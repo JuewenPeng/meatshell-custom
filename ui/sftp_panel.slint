@@ -205,7 +205,7 @@ export component SftpPanel inherits Rectangle {
     in property <bool> show-tree: true;    // hide the directory tree when narrow (#dock)
     in property <bool> compact: false;     // side-docked + collapsed → render nothing but a clean strip (#dock)
     property <length> tree-min-width: 96px;
-    property <length> tree-width: 180px;
+    property <length> tree-width: 220px;
     property <length> tree-reserve-width: 240px;
     property <length> tree-max-width: max(root.tree-min-width, root.width - root.tree-reserve-width);
     // Responsive columns: only when docked left/right (narrow, width-adjustable).
@@ -215,7 +215,7 @@ export component SftpPanel inherits Rectangle {
     // narrow. The name column always remains visible.
     property <length> list-w: root.show-tree ? root.width - root.tree-width : root.width;
     property <length> name-min: 180px;     // narrower than this → start dropping columns
-    property <length> name-col-w: 450px;
+    property <length> name-col-w: 440px;
     property <length> name-col-max-w: max(120px, root.list-w - 78px);
     property <length> size-col-w: 80px;
     property <length> type-col-w: 80px;
