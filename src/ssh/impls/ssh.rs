@@ -7,6 +7,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use rand::{rngs::OsRng, RngCore};
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use russh::client::{self, Handle, Handler, Msg};
@@ -38,6 +40,8 @@ pub struct RemoteEntry {
     /// 0 when the server didn't report permissions. Used to prefill the chmod
     /// dialog (#84).
     pub mode: u32,
+    pub owner: String,
+    pub group: String,
 }
 
 /// One node in the remote directory tree panel.
@@ -48,6 +52,7 @@ pub struct RemoteTreeNode {
     pub depth: u32,
     pub expanded: bool,
     pub has_children: bool,
+    pub is_dir: bool,
 }
 
 pub(crate) fn load_session_private_key(session: &Session, pass: &str) -> Result<PrivateKey> {
@@ -402,6 +407,12 @@ pub enum SessionCommand {
         root_password: Option<crate::config::Secret>,
         reply: tokio::sync::oneshot::Sender<ProcessKillResult>,
     },
+    /// Remove inactive runtime tunnels that failed to start.
+    ClearFailedTunnels,
+    /// A local or dynamic listener bound its local port successfully.
+    TunnelStarted(String),
+    /// A local or dynamic listener could not bind its requested local port.
+    TunnelFailed(String),
     /// Gracefully disconnect and drop the session.
     Close,
 }
@@ -636,6 +647,9 @@ pub enum SessionEvent {
     SftpError(String),
     /// Directory tree structure changed (full rebuild pushed on every toggle).
     SftpTreeUpdate(Vec<RemoteTreeNode>),
+    /// Move-target dialog directory tree changed. It has independent expanded
+    /// state so browsing targets does not alter the main SFTP tree.
+    SftpMoveTreeUpdate(Vec<RemoteTreeNode>),
     /// File-transfer progress / completion (download or upload).
     SftpTransfer {
         id: String,
@@ -698,6 +712,10 @@ impl SessionHandle {
             reply,
         });
         rx
+    }
+
+    pub fn clear_failed_tunnels(&self) {
+        let _ = self.commands.send(SessionCommand::ClearFailedTunnels);
     }
 
     pub fn close(&self) {
@@ -976,12 +994,14 @@ pub fn spawn_session(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<SessionEvent>();
 
+    let cmd_tx_for_task = cmd_tx.clone();
     let evt_tx_for_task = evt_tx.clone();
     let join = runtime.spawn(async move {
         if let Err(err) = run_session(
             session,
             jump,
             cmd_rx,
+            cmd_tx_for_task,
             evt_tx_for_task.clone(),
             initial_cols,
             initial_rows,
@@ -1006,6 +1026,7 @@ pub fn spawn_session(
 struct RuntimeForward {
     info: RuntimeTunnelInfo,
     task: Option<JoinHandle<()>>,
+    order: u64,
 }
 
 fn normalized_bind_addr(f: &PortForward) -> String {
@@ -1047,8 +1068,9 @@ fn emit_tunnel_update(
     forwards: &std::collections::HashMap<String, RuntimeForward>,
     events: &UnboundedSender<SessionEvent>,
 ) {
-    let mut rows: Vec<RuntimeTunnelInfo> = forwards.values().map(|f| f.info.clone()).collect();
-    rows.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    let mut rows: Vec<&RuntimeForward> = forwards.values().collect();
+    rows.sort_by(|a, b| b.order.cmp(&a.order));
+    let rows = rows.into_iter().map(|f| f.info.clone()).collect();
     let _ = events.send(SessionEvent::TunnelUpdate(rows));
 }
 
@@ -1057,8 +1079,10 @@ fn start_runtime_forward(
     id: String,
     forward: PortForward,
     events: &UnboundedSender<SessionEvent>,
+    command_tx: UnboundedSender<SessionCommand>,
+    order: u64,
 ) -> RuntimeForward {
-    let info = tunnel_info(id, &forward, true, t("运行中", "running"));
+    let info = tunnel_info(id.clone(), &forward, false, t("启动中", "starting"));
     let task = match forward.kind.as_str() {
         "local" => Some(crate::tunnel::spawn_local(
             handle,
@@ -1067,16 +1091,20 @@ fn start_runtime_forward(
             info.host.clone(),
             info.host_port,
             events.clone(),
+            id.clone(),
+            command_tx,
         )),
         "dynamic" => Some(crate::tunnel::spawn_dynamic(
             handle,
             info.bind_addr.clone(),
             info.bind_port,
             events.clone(),
+            id.clone(),
+            command_tx,
         )),
         _ => None,
     };
-    RuntimeForward { info, task }
+    RuntimeForward { info, task, order }
 }
 
 /// Open an SSH transport to the session's host (directly or via a SOCKS5 / HTTP
@@ -1099,10 +1127,14 @@ async fn connect_ssh(
         .filter(|f| f.kind == "remote")
         .map(|f| (f.bind_port as u32, (f.host.clone(), f.host_port)))
         .collect();
+    let x11_target = session
+        .x11_forwarding
+        .then(|| parse_x11_display(&session.x11_display));
     let handler = ClientHandler {
         host: session.host.clone(),
         port: session.port,
         remote_forwards,
+        x11_target,
         events: events.clone(),
     };
     let addr = format!("{}:{}", session.host, session.port);
@@ -1393,6 +1425,7 @@ async fn run_session(
     session: Session,
     jump: Option<Session>,
     mut commands: UnboundedReceiver<SessionCommand>,
+    command_tx: UnboundedSender<SessionCommand>,
     events: UnboundedSender<SessionEvent>,
     initial_cols: u32,
     initial_rows: u32,
@@ -1476,6 +1509,32 @@ async fn run_session(
         .channel_open_session()
         .await
         .context("open session channel")?;
+
+    if session.x11_forwarding {
+        let cookie = make_fake_x11_cookie();
+        match channel
+            .request_x11(
+                true,
+                false, // allow multiple X11 connections for this session
+                "MIT-MAGIC-COOKIE-1",
+                cookie,
+                x11_screen_number(&session.x11_display),
+            )
+            .await
+        {
+            Ok(()) => {
+                let _ = events.send(SessionEvent::Output(format!(
+                    "\r\n[meatshell] X11 forwarding enabled → {}\r\n",
+                    session.x11_display
+                )));
+            }
+            Err(e) => {
+                let _ = events.send(SessionEvent::Output(format!(
+                    "\r\n[meatshell] X11 forwarding request failed: {e}\r\n"
+                )));
+            }
+        }
+    }
 
     channel
         .request_pty(
@@ -1562,6 +1621,7 @@ async fn run_session(
     // The echoed setup line is discarded by anchoring on the OSC 7 it produces
     // (see the suppress block below), so it doesn't matter that the long line
     // wraps — we never substring-match it.
+    const PROMPT_BODY: &str = "test -z \"$FISH_VERSION\" && eval '__msc(){ __c=\"$(fc -ln -1 2>/dev/null)\"; [ -n \"$__c\" ] && [ \"$__c\" != \"$__cl\" ] && { __cl=\"$__c\"; printf \"\\033]697;%s\\007\" \"$__c\"; }; }; __ms7(){ if [ -n \"$TMUX\" ]; then printf \"\\033Ptmux;\\033\\033]7;file://%s%s\\007\\033\\134\" \"$HOSTNAME\" \"$PWD\"; else printf \"\\033]7;file://%s%s\\007\" \"$HOSTNAME\" \"$PWD\"; fi; __msc; }; __ms_tmux_env(){ command -v tmux >/dev/null 2>&1 || return; tmux set-option -g allow-passthrough on 2>/dev/null || true; tmux set-environment -g PROMPT_COMMAND \"printf \\\"\\\\033Ptmux;\\\\033\\\\033]7;file://%s%s\\\\007\\\\033\\\\134\\\" \\\"\\$HOSTNAME\\\" \\\"\\$PWD\\\"\" 2>/dev/null || true; }; __cl=\"$(fc -ln -1 2>/dev/null)\"; __ms_tmux_env; if [ -n \"$ZSH_VERSION\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __ms7; else PROMPT_COMMAND=\"__ms7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; __ms7'";
     let prompt_setup = format!(" {}\r", PROMPT_BODY);
     // --- Remote resource monitor (separate exec channel) ----------------
     // A tiny remote loop streams /proc/stat + /proc/meminfo every 2s; we parse
@@ -1633,6 +1693,7 @@ async fn run_session(
                     RuntimeForward {
                         info: tunnel_info(id, f, true, t("运行中", "running")),
                         task: None,
+                        order: idx as u64,
                     },
                 );
             }
@@ -1646,6 +1707,7 @@ async fn run_session(
                     RuntimeForward {
                         info: tunnel_info(id, f, false, t("启动失败", "failed")),
                         task: None,
+                        order: idx as u64,
                     },
                 );
             }
@@ -1731,12 +1793,20 @@ async fn run_session(
                 let id = format!("config-{idx}");
                 runtime_forwards.insert(
                     id.clone(),
-                    start_runtime_forward(handle.clone(), id, f.clone(), &events),
+                    start_runtime_forward(
+                        handle.clone(),
+                        id,
+                        f.clone(),
+                        &events,
+                        command_tx.clone(),
+                        idx as u64,
+                    ),
                 );
             }
             _ => {}
         }
     }
+    let mut next_tunnel_order = session.forwards.len() as u64;
     emit_tunnel_update(&runtime_forwards, &events);
 
     // --- Main pump ------------------------------------------------------
@@ -1785,9 +1855,18 @@ async fn run_session(
                     }
                     Some(SessionCommand::AddTunnel { id, forward }) => {
                         if forward.kind == "local" || forward.kind == "dynamic" {
+                            let order = next_tunnel_order;
+                            next_tunnel_order += 1;
                             runtime_forwards.insert(
                                 id.clone(),
-                                start_runtime_forward(handle.clone(), id, forward, &events),
+                                start_runtime_forward(
+                                    handle.clone(),
+                                    id,
+                                    forward,
+                                    &events,
+                                    command_tx.clone(),
+                                    order,
+                                ),
                             );
                             emit_tunnel_update(&runtime_forwards, &events);
                         } else {
@@ -1795,6 +1874,20 @@ async fn run_session(
                                 "\r\n[meatshell] {}\r\n",
                                 t("运行时暂不支持新增远程转发 -R", "runtime remote forwarding (-R) is not supported yet")
                             )));
+                        }
+                    }
+                    Some(SessionCommand::TunnelStarted(id)) => {
+                        if let Some(f) = runtime_forwards.get_mut(&id) {
+                            f.info.active = true;
+                            f.info.status = t("运行中", "running").to_string();
+                            emit_tunnel_update(&runtime_forwards, &events);
+                        }
+                    }
+                    Some(SessionCommand::TunnelFailed(id)) => {
+                        if let Some(f) = runtime_forwards.get_mut(&id) {
+                            f.info.active = false;
+                            f.info.status = t("启动失败", "failed").to_string();
+                            emit_tunnel_update(&runtime_forwards, &events);
                         }
                     }
                     Some(SessionCommand::StopTunnel(id)) => {
@@ -1813,6 +1906,12 @@ async fn run_session(
                             let result = kill_remote_process(exec_handle, pid, root_password).await;
                             let _ = reply.send(result);
                         });
+                    }
+                    Some(SessionCommand::ClearFailedTunnels) => {
+                        runtime_forwards.retain(|_, f| {
+                            f.info.active || f.info.status != t("启动失败", "failed")
+                        });
+                        emit_tunnel_update(&runtime_forwards, &events);
                     }
                     Some(SessionCommand::Close) | None => {
                         let _ = channel.eof().await;
@@ -2722,7 +2821,57 @@ pub(crate) struct ClientHandler {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) remote_forwards: std::collections::HashMap<u32, (String, u16)>,
+    pub(crate) x11_target: Option<(String, u16)>,
     pub(crate) events: UnboundedSender<SessionEvent>,
+}
+
+/// Generate the fake MIT-MAGIC-COOKIE-1 value advertised to sshd for X11 forwarding.
+///
+/// A production-grade client would also read the user's real local Xauthority
+/// cookie and rewrite the first X11 handshake packet before connecting to the
+/// local X server. This first-stage implementation targets the common Windows
+/// setup where VcXsrv/Xming/X410 is started with access control disabled.
+fn make_fake_x11_cookie() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Parse a local X display string into a TCP endpoint. Examples:
+/// `:0`, `localhost:0`, `127.0.0.1:0.0` → port 6000; `host:6001` → port 6001.
+fn parse_x11_display(display: &str) -> (String, u16) {
+    let trimmed = display.trim();
+    if trimmed.is_empty() {
+        return ("127.0.0.1".to_string(), 6000);
+    }
+
+    let (host, rest) = if let Some(rest) = trimmed.strip_prefix(':') {
+        ("127.0.0.1", rest)
+    } else if let Some((h, r)) = trimmed.rsplit_once(':') {
+        (if h.is_empty() { "127.0.0.1" } else { h }, r)
+    } else {
+        return (trimmed.to_string(), 6000);
+    };
+
+    let display_num = rest
+        .split('.')
+        .next()
+        .and_then(|n| n.parse::<u16>().ok())
+        .unwrap_or(0);
+    let port = if display_num >= 6000 {
+        display_num
+    } else {
+        6000 + display_num
+    };
+    (host.to_string(), port)
+}
+
+fn x11_screen_number(display: &str) -> u32 {
+    display
+        .trim()
+        .rsplit_once('.')
+        .and_then(|(_, s)| s.parse::<u32>().ok())
+        .unwrap_or(0)
 }
 
 /// Shared host-key check used by both the shell and SFTP connections: trust a
@@ -2824,6 +2973,39 @@ impl Handler for ClientHandler {
         _data: &[u8],
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// X11 forwarding: the remote sshd opens one of these channels when a remote
+    /// GUI application connects to the DISPLAY that sshd created for us. Splice it
+    /// to the user's local X server, usually VcXsrv/Xming/X410 on 127.0.0.1:6000.
+    async fn server_channel_open_x11(
+        &mut self,
+        channel: Channel<Msg>,
+        originator_address: &str,
+        originator_port: u32,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let target = self
+            .x11_target
+            .clone()
+            .unwrap_or_else(|| ("127.0.0.1".to_string(), 6000));
+        let events = self.events.clone();
+        let origin = format!("{originator_address}:{originator_port}");
+        tokio::spawn(async move {
+            match tokio::net::TcpStream::connect((target.0.as_str(), target.1)).await {
+                Ok(mut tcp) => {
+                    let mut stream = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
+                }
+                Err(e) => {
+                    let _ = events.send(SessionEvent::Output(format!(
+                        "\r\n[meatshell] X11 {origin} → {}:{} failed: {e}\r\n",
+                        target.0, target.1
+                    )));
+                }
+            }
+        });
         Ok(())
     }
 
