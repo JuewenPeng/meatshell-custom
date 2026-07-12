@@ -27,7 +27,7 @@ jobs:
         run: |
           set -eu
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          CARGO_VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | sed -n '1p')"
           LOCK_VERSION="$(awk '
             $0 == "name = \"meatshell\"" { found = 1; next }
             found && $1 == "version" {
@@ -326,7 +326,7 @@ jobs:
         shell: bash
         run: |
           set -eu
-          ldd --version | head -n 1
+          ldd --version 2>&1 | sed -n '1p'
           file target/aarch64-unknown-linux-gnu/release/meatshell
           objdump -T target/aarch64-unknown-linux-gnu/release/meatshell \
             | grep -o 'GLIBC_[0-9.]*' \
@@ -415,7 +415,7 @@ jobs:
         shell: bash
         run: |
           set -eu
-          ldd --version | head -n 1
+          ldd --version 2>&1 | sed -n '1p'
           file target/x86_64-unknown-linux-gnu/release/meatshell
           objdump -T target/x86_64-unknown-linux-gnu/release/meatshell \
             | grep -o 'GLIBC_[0-9.]*' \
