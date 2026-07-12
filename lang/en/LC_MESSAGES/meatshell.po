@@ -521,3 +521,9 @@ msgstr "Terminating process..."
 
 msgid "Terminate"
 msgstr "Terminate"
+
+msgid "Files"
+msgstr "Files"
+
+msgid "Tunnels"
+msgstr "Tunnels"

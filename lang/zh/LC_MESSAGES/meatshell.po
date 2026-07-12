@@ -521,3 +521,9 @@ msgstr "正在结束进程..."
 
 msgid "Terminate"
 msgstr "结束进程"
+
+msgid "Files"
+msgstr "文件"
+
+msgid "Tunnels"
+msgstr "端口转发"
