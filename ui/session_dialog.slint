@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { LabeledInput, PrimaryButton, GhostButton } from "widgets.slint";
+import { AutoScrollTextInput, LabeledInput, PrimaryButton, GhostButton } from "widgets.slint";
 
 // One SSH port-forward row shown in the session dialog (#56). `summary` is a
 // ready-to-display line like "-L 127.0.0.1:8080 → host:80".
@@ -33,6 +33,9 @@ export struct SessionDraft {
     stop-bits: int,
     parity: string,        // "none" | "odd" | "even"
     flow-control: string,  // "none" | "hardware" | "software"
+    // Enable SSH X11 forwarding to a local X server such as VcXsrv/Xming/X410.
+    x11-forwarding: bool,
+    x11-display: string,
     // Skip the POSIX shell-integration setup (cwd-follow hook + monitor) for
     // Windows / pwsh servers where it breaks the shell (#140).
     disable-shell-integration: bool,
@@ -78,15 +81,13 @@ component MiniInput inherits Rectangle {
     border-width: 1px;
     border-color: mi.has-focus ? Theme.accent : Theme.border-subtle;
     background: Theme.bg-root;
-    mi := TextInput {
+    mi := AutoScrollTextInput {
         x: 8px;
         width: parent.width - 16px;
         height: parent.height;
-        color: Theme.text-primary;
+        text-color: Theme.text-primary;
         font-family: Theme.ui-font-family;
         font-size: Theme.fs-md;
-        vertical-alignment: center;
-        single-line: true;
         text <=> root.value;
         edited => { root.edited(root.value); }
     }
@@ -208,16 +209,14 @@ component GroupCombo inherits VerticalLayout {
     border-color: ginput.has-focus ? Theme.accent : Theme.border-strong;
     background: Theme.bg-elevated;
 
-        ginput := TextInput {
+        ginput := AutoScrollTextInput {
             x: 10px;
             width: parent.width - 44px;     // room for the ▾ button
             height: parent.height;
             text <=> root.value;
-            color: Theme.text-primary;
+            text-color: Theme.text-primary;
             font-family: Theme.ui-font-family;
             font-size: Theme.fs-md;
-            vertical-alignment: center;
-            single-line: true;
         }
 
         if root.value == "" : Text {
@@ -413,6 +412,8 @@ export component SessionDialog inherits Rectangle {
     in-out property <string> draft-stop-bits: "1";
     in-out property <string> draft-parity: "none";
     in-out property <string> draft-flow: "none";
+    in-out property <bool> draft-x11-forwarding: false;
+    in-out property <string> draft-x11-display: "127.0.0.1:0.0";
     in-out property <bool> draft-disable-shell-integration: false;
     in-out property <string> draft-note;
     in-out property <string> test-status;
@@ -420,6 +421,15 @@ export component SessionDialog inherits Rectangle {
     // Port forwards / tunnels (#56). Every row is an editable form (#277).
     in property <[PortFwd]> forwards;
     property <bool> show-advanced: false;   // collapse proxy + forwarding (#56)
+    property <length> dialog-w: 440px;
+    property <length> dialog-h: min(body.preferred-height + 53px, root.height - 40px);
+    property <length> dialog-x: (root.width - root.dialog-w) / 2;
+    property <length> dialog-y: (root.height - root.dialog-h) / 2;
+    property <bool> dialog-dragging;
+    property <length> dialog-base-x;
+    property <length> dialog-base-y;
+    property <length> dialog-grab-x;
+    property <length> dialog-grab-y;
 
     callback submit(SessionDraft);
     callback test-connection(SessionDraft);
@@ -433,9 +443,31 @@ export component SessionDialog inherits Rectangle {
     background: #00000080;
 
     // Clear the host-required flag each time the dialog opens (#110).
+    property <bool> esc-focus-pending: false;
     changed is-open => {
         if (self.is-open) {
             self.host-missing = false;
+            root.esc-focus-pending = true;
+        }
+    }
+
+    esc-focus-timer := Timer {
+        interval: 0ms;
+        running: root.esc-focus-pending;
+        triggered => {
+            if (root.is-open) { esc-scope.focus(); }
+            root.esc-focus-pending = false;
+        }
+    }
+
+    esc-scope := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.cancel();
+                accept
+            } else {
+                reject
+            }
         }
     }
 
@@ -445,13 +477,13 @@ export component SessionDialog inherits Rectangle {
     }
 
     Rectangle {
-        width: 440px;
+        width: root.dialog-w;
         // Height follows the content, but never exceeds the window — past that
         // the body scrolls (the dialog grows with the advanced section / many
         // port forwards) (#56).
-        height: min(body.preferred-height + 53px, parent.height - 40px);
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
+        height: root.dialog-h;
+        x: root.dialog-x;
+        y: root.dialog-y;
         background: Theme.bg-panel;
         border-radius: Theme.radius-lg;
         border-width: 1px;
@@ -522,8 +554,42 @@ export component SessionDialog inherits Rectangle {
             viewport-width: self.width;
             viewport-height: body.preferred-height;
             body := VerticalLayout {
-                padding: 20px;
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 12px;
+                padding-bottom: 20px;
                 spacing: 12px;
+
+            Rectangle {
+                height: 0px;
+                session-title-drag := TouchArea {
+                    y: -12px;
+                    width: parent.width;
+                    height: parent.height + 12px;
+                    mouse-cursor: move;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            root.dialog-dragging = true;
+                            root.dialog-base-x = root.dialog-x;
+                            root.dialog-base-y = root.dialog-y;
+                            root.dialog-grab-x = self.absolute-position.x + self.mouse-x;
+                            root.dialog-grab-y = self.absolute-position.y + self.mouse-y;
+                        } else if (e.kind == PointerEventKind.up) {
+                            root.dialog-dragging = false;
+                        }
+                    }
+                    moved => {
+                        if (root.dialog-dragging) {
+                            root.dialog-x = clamp(
+                                root.dialog-base-x + (self.absolute-position.x + self.mouse-x - root.dialog-grab-x),
+                                0px, max(0px, root.width - root.dialog-w));
+                            root.dialog-y = clamp(
+                                root.dialog-base-y + (self.absolute-position.y + self.mouse-y - root.dialog-grab-y),
+                                0px, max(0px, root.height - root.dialog-h));
+                        }
+                    }
+                }
+            }
 
             // Connection type selector (always shown).
             VerticalLayout {
@@ -688,18 +754,16 @@ export component SessionDialog inherits Rectangle {
                         horizontal-stretch: 1;
                         border-radius: Theme.radius-sm;
                         border-width: 1px;
-                        border-color: keyin.has-focus ? Theme.accent : Theme.border-strong;
-                        background: Theme.bg-elevated;
-                        keyin := TextInput {
+                        border-color: keyin.has-focus ? Theme.accent : Theme.border-subtle;
+                        background: Theme.bg-root;
+                        keyin := AutoScrollTextInput {
                             x: 10px; y: 0px;
                             width: parent.width - 20px;
                             height: parent.height;
                             text <=> root.draft-key-path;
-                            color: Theme.text-primary;
+                            text-color: Theme.text-primary;
                             font-family: Theme.ui-font-family; // CJK-capable (#54)
                             font-size: Theme.fs-md;
-                            vertical-alignment: center;
-                            single-line: true;
                         }
                         if root.draft-key-path == "" : Text {
                             x: 10px; y: 0px;
@@ -916,6 +980,44 @@ export component SessionDialog inherits Rectangle {
             if root.show-advanced && root.draft-kind == "ssh" : VerticalLayout {
                 spacing: 6px;
 
+                // X11 forwarding toggle. This needs a local X server running on
+                // the user's machine, for example VcXsrv/Xming/X410 on Windows.
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 18px; height: 18px; y: 1px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: root.draft-x11-forwarding ? Theme.accent : Theme.border-strong;
+                        background: root.draft-x11-forwarding ? Theme.accent : transparent;
+                        Text {
+                            text: root.draft-x11-forwarding ? "\u{E5CA}" : "";
+                            font-family: "Material Icons"; color: white; font-size: 14px;
+                            width: 100%; height: 100%;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.draft-x11-forwarding = !root.draft-x11-forwarding; }
+                        }
+                    }
+                    Text {
+                        text: @tr("Enable X11 forwarding");
+                        color: Theme.text-primary; font-size: Theme.fs-sm;
+                        vertical-alignment: center; horizontal-stretch: 1;
+                    }
+                }
+                if root.draft-x11-forwarding : LabeledInput {
+                    label: @tr("Local X server display");
+                    placeholder: "127.0.0.1:0.0";
+                    value <=> root.draft-x11-display;
+                }
+                Text {
+                    text: @tr("Start VcXsrv/Xming/X410 first. Common Windows value: 127.0.0.1:0.0.");
+                    color: Theme.text-muted; font-size: Theme.fs-xs; wrap: word-wrap;
+                }
+                Rectangle { height: 6px; }
+
                 // Shell-integration toggle (#140): the cwd-follow hook + resource
                 // monitor assume a POSIX shell; on a Windows pwsh/cmd server the
                 // injected hook breaks the shell, so let the user turn it off.
@@ -1064,6 +1166,8 @@ export component SessionDialog inherits Rectangle {
                             stop-bits: root.draft-stop-bits.to-float(),
                             parity: root.draft-parity,
                             flow-control: root.draft-flow,
+                            x11-forwarding: root.draft-x11-forwarding,
+                            x11-display: root.draft-x11-display,
                             disable-shell-integration: root.draft-disable-shell-integration,
                             note: root.draft-note,
                             jump-session-id: (root.draft-jump-index > 0 && root.draft-jump-index < root.jump-ids.length)
