@@ -285,6 +285,8 @@ export component SftpPanel inherits Rectangle {
     // --- Callbacks ---------------------------------------------------------
     callback toggle-collapsed();    // minimise / restore the panel
     callback navigate(string);
+    callback navigate-back();
+    callback navigate-forward();
     callback download(string);
     callback archive-download(string);
     callback upload-clicked(string /* remote dir */, bool /* folder */);
@@ -852,6 +854,13 @@ export component SftpPanel inherits Rectangle {
                                             }
                                         }
                                         pointer-event(ev) => {
+                                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.back) {
+                                                root.navigate-back();
+                                                return;
+                                            } else if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.forward) {
+                                                root.navigate-forward();
+                                                return;
+                                            }
                                             if (node.name == "加载全部...") {
                                                 return;
                                             }
@@ -915,6 +924,13 @@ export component SftpPanel inherits Rectangle {
                                             }
                                         }
                                         pointer-event(ev) => {
+                                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.back) {
+                                                root.navigate-back();
+                                                return;
+                                            } else if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.forward) {
+                                                root.navigate-forward();
+                                                return;
+                                            }
                                             if (node.name == "加载全部...") {
                                                 return;
                                             }
@@ -937,7 +953,7 @@ export component SftpPanel inherits Rectangle {
 
                                     Text {
                                         x: 2px;
-                                        text: node.depth == 0 ? "/" : (node.name == "加载全部..." ? "... " + root.load-all-label : (node.is-dir ? (node.expanded ? "📂 " : "📁 ") + node.name : "📄 " + node.name));
+                                        text: node.depth == 0 ? "/" : (node.name == "加载全部..." ? "...    " + root.load-all-label : (node.is-dir ? (node.expanded ? "📂 " : "📁 ") + node.name : "📄 " + node.name));
                                         color: node.path == root.current-path
                                             ? Theme.accent
                                             : (node.is-dir ? Theme.text-primary : Theme.text-secondary);
@@ -1220,6 +1236,13 @@ export component SftpPanel inherits Rectangle {
                                 root.selected-row = -1;
                         }
                         pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.back) {
+                                root.navigate-back();
+                                return;
+                            } else if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.forward) {
+                                root.navigate-forward();
+                                return;
+                            }
                             if (ev.kind == PointerEventKind.down
                                     && ev.button == PointerEventButton.right) {
                                 root.selected-row = -1;
@@ -1278,6 +1301,13 @@ export component SftpPanel inherits Rectangle {
                                     root.open-entry(entry.full-path, entry.is-dir);
                                 }
                                 pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.back) {
+                                        root.navigate-back();
+                                        return;
+                                    } else if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.forward) {
+                                        root.navigate-forward();
+                                        return;
+                                    }
                                     if (ev.kind == PointerEventKind.down
                                             && ev.button == PointerEventButton.left) {
                                         input-blur-scope.focus();
@@ -1329,7 +1359,7 @@ export component SftpPanel inherits Rectangle {
                                     if entry.full-path == "__MEATSHELL_LOAD_MORE__" || entry.full-path == "__MEATSHELL_LOAD_ALL__" : Text {
                                         x: 6px;
                                         width: parent.width - 12px;
-                                        text: entry.full-path == "__MEATSHELL_LOAD_MORE__" ? "... " + root.load-more-label : "... " + root.load-all-label;
+                                        text: entry.full-path == "__MEATSHELL_LOAD_MORE__" ? "... " + root.load-more-label : "...    " + root.load-all-label;
                                         color: Theme.text-primary;
                                         font-size: Theme.fs-sm;
                                         overflow: elide;
