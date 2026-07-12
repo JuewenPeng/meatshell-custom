@@ -7,7 +7,7 @@
 // of the global UI scale; only the font-preview reflects the real terminal size.
 
 import { Theme } from "theme.slint";
-import { ComboBox, Slider, ScrollView } from "std-widgets.slint";
+import { Slider, ScrollView } from "std-widgets.slint";
 import { LabeledInput, PrimaryButton, GhostButton } from "widgets.slint";
 
 export struct OutputRuleItem {
@@ -57,6 +57,90 @@ component SectionHeader inherits Text {
     font-weight: 700;
     color: Theme.text-muted;
     vertical-alignment: center;
+}
+
+// Theme-owned dropdown for settings controls that must not inherit Fluent's
+// fixed light palette (notably the Jiangnan theme font picker).
+component ThemeCombo inherits Rectangle {
+    in property <[string]> model;
+    in property <string> current-value;
+    callback selected(string);
+    width: 220px;
+    height: 32px;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: combo-ta.has-hover ? Theme.border-strong : Theme.border-subtle;
+    background: combo-ta.has-hover ? Theme.bg-hover : Theme.bg-panel;
+
+    combo-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { font-popup.show(); }
+    }
+    Text {
+        x: 10px;
+        width: parent.width - 36px;
+        height: parent.height;
+        text: root.current-value;
+        color: Theme.text-primary;
+        font-size: 13px * Theme.panel-font;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: parent.width - 28px;
+        width: 18px;
+        height: parent.height;
+        text: "\u{E5C5}";
+        font-family: "Material Icons";
+        color: Theme.text-secondary;
+        font-size: 16px * Theme.panel-font;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    font-popup := PopupWindow {
+        x: 0;
+        y: parent.height + 3px;
+        width: root.width;
+        height: min(root.model.length, 6) * 28px + 8px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            ScrollView {
+                width: parent.width - 8px;
+                height: parent.height - 8px;
+                x: 4px;
+                y: 4px;
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 1px;
+                    for font in root.model : Rectangle {
+                        height: 28px;
+                        border-radius: Theme.radius-sm;
+                        background: font-ta.has-hover ? Theme.bg-hover : transparent;
+                        font-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.selected(font); font-popup.close(); }
+                        }
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            height: parent.height;
+                            text: font;
+                            color: Theme.text-primary;
+                            font-size: 13px * Theme.panel-font;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // A settings row: label (+ optional description) on the left, a control slot on
@@ -567,7 +651,7 @@ export component InterfacePanel inherits Rectangle {
                 SectionHeader { text: root.lang-en ? "FONT" : "字体"; height: 24px; }
                 SettingRow {
                     label: root.lang-en ? "Terminal font" : "终端字体";
-                    ComboBox {
+                    ThemeCombo {
                         width: 220px;
                         model: root.term-fonts;
                         current-value: root.term-font-family;
