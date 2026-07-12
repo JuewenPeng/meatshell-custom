@@ -766,6 +766,8 @@ export component AppWindow inherits Window {
     // --- SFTP callbacks ---------------------------------------------------
     // Navigate to a new remote directory (or ".." to go up).
     callback sftp-navigate(string /* tab-id */, string /* path */);
+    callback sftp-navigate-back(string /* tab-id */);
+    callback sftp-navigate-forward(string /* tab-id */);
     // Trigger a download: Rust opens a save-folder dialog then transfers.
     callback sftp-download(string /* tab-id */, string /* remote-path */);
     callback sftp-archive-download(string /* tab-id */, string /* remote-path */);
@@ -1632,6 +1634,8 @@ export component AppWindow inherits Window {
                     send-key(key, ctrl, alt, shift) => { root.send-key(term.id, key, ctrl, alt, shift) }
                     terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
                     sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
+                    sftp-navigate-back() => { root.sftp-navigate-back(term.id); }
+                    sftp-navigate-forward() => { root.sftp-navigate-forward(term.id); }
                     sftp-download(path) => { root.sftp-download(term.id, path); }
                     sftp-archive-download(path) => { root.sftp-archive-download(term.id, path); }
                     sftp-upload-clicked(dir, folder) => { root.sftp-upload-clicked(term.id, dir, folder); }
