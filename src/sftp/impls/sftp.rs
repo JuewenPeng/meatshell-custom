@@ -1,4 +1,4 @@
-//! SFTP subsystem worker.
+﻿//! SFTP subsystem worker.
 //!
 //! Each terminal tab that spawns an SSH shell also spawns a *separate* SSH
 //! connection for SFTP. This keeps the shell PTY completely unblocked: large
@@ -9,7 +9,7 @@
 //! via the shared `UnboundedSender<SessionEvent>` that already exists for the
 //! terminal tab.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +34,159 @@ use crate::config::{AuthMethod, Session};
 use crate::i18n::t;
 use crate::ssh::{format_mtime, format_size, RemoteEntry, RemoteTreeNode, SessionEvent};
 
+const SFTP_UI_PAGE_SIZE: usize = 500;
+const SFTP_TREE_CHILD_LIMIT: usize = 50;
+const SFTP_LOAD_ALL_PATH: &str = "__MEATSHELL_LOAD_ALL__";
+const SFTP_TREE_LOAD_MORE_NAME: &str = "加载全部...";
+const SFTP_TREE_LOAD_MORE_MARKER: &str = "__MEATSHELL_TREE_LOAD_MORE__";
+const SFTP_DIR_LIST_CACHE_CAP: usize = 64;
+
+#[derive(Default)]
+struct DirListCache {
+    entries_by_path: HashMap<String, Vec<RemoteEntry>>,
+    recent_paths: Vec<String>,
+}
+
+impl DirListCache {
+    fn get(&mut self, path: &str) -> Option<&[RemoteEntry]> {
+        if self.entries_by_path.contains_key(path) {
+            self.mark_recent(path);
+        }
+        self.entries_by_path.get(path).map(Vec::as_slice)
+    }
+
+    fn store(&mut self, path: impl Into<String>, entries: Vec<RemoteEntry>) {
+        let path = path.into();
+        self.entries_by_path.insert(path.clone(), entries);
+        self.mark_recent(&path);
+        while self.recent_paths.len() > SFTP_DIR_LIST_CACHE_CAP {
+            if let Some(oldest) = self.recent_paths.first().cloned() {
+                self.recent_paths.remove(0);
+                self.entries_by_path.remove(&oldest);
+            }
+        }
+    }
+
+    fn invalidate_path_and_descendants(&mut self, path: &str) {
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        self.entries_by_path
+            .retain(|p, _| p != path && !p.starts_with(&prefix));
+        self.recent_paths
+            .retain(|p| p != path && !p.starts_with(&prefix));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries_by_path.len()
+    }
+
+    fn mark_recent(&mut self, path: &str) {
+        self.recent_paths.retain(|p| p != path);
+        self.recent_paths.push(path.to_string());
+    }
+}
+
+fn store_dir_cache(
+    list_cache: &Arc<Mutex<DirListCache>>,
+    path: impl Into<String>,
+    entries: &[RemoteEntry],
+) {
+    list_cache.lock().unwrap().store(path, entries.to_vec());
+}
+
+#[derive(Debug, Clone)]
+struct TreeChild {
+    path: String,
+    is_dir: bool,
+}
+
+fn tree_load_more_path(parent: &str) -> String {
+    if parent == "/" {
+        format!("/{SFTP_TREE_LOAD_MORE_MARKER}")
+    } else {
+        format!("{}/{}", parent.trim_end_matches('/'), SFTP_TREE_LOAD_MORE_MARKER)
+    }
+}
+
+fn tree_load_more_parent(path: &str) -> Option<String> {
+    if !path.ends_with(SFTP_TREE_LOAD_MORE_MARKER) {
+        return None;
+    }
+    Some(parent_dir(path))
+}
+
+fn is_tree_load_more_path(path: &str) -> bool {
+    path.ends_with(SFTP_TREE_LOAD_MORE_MARKER)
+}
+
+fn paged_entries(entries: &[RemoteEntry], visible: usize) -> Vec<RemoteEntry> {
+    let shown = visible.min(entries.len());
+    let mut out: Vec<RemoteEntry> = entries.iter().take(shown).cloned().collect();
+    if shown < entries.len() {
+        out.push(RemoteEntry {
+            name: "加载全部...".to_string(),
+            full_path: SFTP_LOAD_ALL_PATH.to_string(),
+            is_dir: false,
+            size: 0,
+            modified: 0,
+            mode: 0,
+            owner: String::new(),
+            group: String::new(),
+        });
+    }
+    out
+}
+
+fn emit_paged_entries(
+    events: &UnboundedSender<SessionEvent>,
+    path: &str,
+    entries: &[RemoteEntry],
+    visible: usize,
+) {
+    let shown = visible.min(entries.len());
+    let _ = events.send(SessionEvent::SftpEntries {
+        path: path.to_string(),
+        entries: paged_entries(entries, visible),
+    });
+    if shown < entries.len() {
+        let _ = events.send(SessionEvent::SftpStatus(format!(
+            "{}    已显示 {} / {}",
+            path, shown, entries.len()
+        )));
+    } else {
+        let _ = events.send(SessionEvent::SftpStatus(path.to_string()));
+    }
+}
+
+fn with_tree_load_more(
+    parent: &str,
+    mut children: Vec<TreeChild>,
+    total_dirs: usize,
+    shown_dirs: usize,
+) -> Vec<TreeChild> {
+    if shown_dirs < total_dirs {
+        children.push(TreeChild {
+            path: tree_load_more_path(parent),
+            is_dir: false,
+        });
+    }
+    children
+}
+
+fn tree_children_from_entries(parent: &str, entries: &[RemoteEntry]) -> Vec<TreeChild> {
+    let total_dirs = entries.iter().filter(|e| e.is_dir).count();
+    let dirs: Vec<TreeChild> = entries
+        .iter()
+        .filter(|e| e.is_dir)
+        .take(SFTP_TREE_CHILD_LIMIT)
+        .map(|e| TreeChild {
+            path: e.full_path.clone(),
+            is_dir: true,
+        })
+        .collect();
+    with_tree_load_more(parent, dirs, total_dirs, SFTP_TREE_CHILD_LIMIT)
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -48,8 +201,24 @@ pub enum SftpCommand {
     /// a reconnect (#189). Plain navigation uses `ListDir` to avoid the extra
     /// per-click tree round-trips.
     RefreshDir(String),
+    /// Show the next page of the current large directory in the UI.
+    LoadMore,
+    /// Show every cached entry in the current large directory.
+    LoadAll,
+    /// Show more child directories for one left-tree node.
+    LoadMoreTree(String),
+    /// Show all child directories for one move-target tree node.
+    LoadMoreMoveTree(String),
     /// Toggle a directory node in the tree (expand if collapsed, collapse if expanded).
     ToggleTreeNode(String),
+    /// Toggle a directory node in the move-target tree only.
+    ToggleMoveTreeNode(String),
+    /// Load a directory node's children into the tree cache without expanding it.
+    ProbeTreeNode(String),
+    /// Expand enough parent directories to make this path visible in the flat tree.
+    RevealTreePath(String),
+    /// Expand enough parent directories in the move-target tree only.
+    RevealMoveTreePath(String),
     /// Download a remote file to a local directory.
     Download { remote: String, local_dir: String },
     /// Multi-select download (#100): tar the named entries under `remote_dir`
@@ -82,6 +251,8 @@ pub enum SftpCommand {
     OpenTemp { remote: String, edit: bool },
     /// Rename / move a remote file or directory (#69).
     Rename { from: String, to: String },
+    /// Move multiple remote files/directories in one batch.
+    MoveMany { moves: Vec<(String, String)> },
     /// Change a remote path's permission bits (POSIX mode, e.g. 0o755) (#69).
     Chmod { path: String, mode: u32 },
     /// Create an empty remote directory (#69).
@@ -109,6 +280,24 @@ impl SftpHandle {
     }
     pub fn refresh_dir(&self, path: String) {
         let _ = self.commands.send(SftpCommand::RefreshDir(path));
+    }
+    pub fn load_more(&self) {
+        let _ = self.commands.send(SftpCommand::LoadMore);
+    }
+    pub fn load_all(&self) {
+        let _ = self.commands.send(SftpCommand::LoadAll);
+    }
+    pub fn load_more_tree(&self, path: String) {
+        let _ = self.commands.send(SftpCommand::LoadMoreTree(path));
+    }
+    pub fn load_more_move_tree(&self, path: String) {
+        let _ = self.commands.send(SftpCommand::LoadMoreMoveTree(path));
+    }
+    pub fn toggle_move_tree_node(&self, path: String) {
+        let _ = self.commands.send(SftpCommand::ToggleMoveTreeNode(path));
+    }
+    pub fn reveal_move_tree_path(&self, path: String) {
+        let _ = self.commands.send(SftpCommand::RevealMoveTreePath(path));
     }
     pub fn download(&self, remote: String, local_dir: String) {
         let _ = self
@@ -147,6 +336,12 @@ impl SftpHandle {
     pub fn toggle_tree_node(&self, path: String) {
         let _ = self.commands.send(SftpCommand::ToggleTreeNode(path));
     }
+    pub fn probe_tree_node(&self, path: String) {
+        let _ = self.commands.send(SftpCommand::ProbeTreeNode(path));
+    }
+    pub fn reveal_tree_path(&self, path: String) {
+        let _ = self.commands.send(SftpCommand::RevealTreePath(path));
+    }
     pub fn delete(&self, path: String) {
         let _ = self.commands.send(SftpCommand::Delete(path));
     }
@@ -155,6 +350,9 @@ impl SftpHandle {
     }
     pub fn rename(&self, from: String, to: String) {
         let _ = self.commands.send(SftpCommand::Rename { from, to });
+    }
+    pub fn move_many(&self, moves: Vec<(String, String)>) {
+        let _ = self.commands.send(SftpCommand::MoveMany { moves });
     }
     pub fn chmod(&self, path: String, mode: u32) {
         let _ = self.commands.send(SftpCommand::Chmod { path, mode });
@@ -256,29 +454,37 @@ pub fn spawn_sftp(
 fn build_tree_nodes(
     path: &str,
     depth: u32,
+    is_dir: bool,
     expanded: &std::collections::HashSet<String>,
-    tree_dirs: &std::collections::HashMap<String, Vec<(String, String)>>,
+    tree_dirs: &std::collections::HashMap<String, Vec<TreeChild>>,
     nodes: &mut Vec<RemoteTreeNode>,
 ) {
-    let name = if path == "/" {
+    let name = if is_tree_load_more_path(path) {
+        SFTP_TREE_LOAD_MORE_NAME.to_string()
+    } else if path == "/" {
         "/".to_string()
     } else {
         path.rsplit('/').next().unwrap_or(path).to_string()
     };
     let children = tree_dirs.get(path);
-    let has_children = children.map(|c| !c.is_empty()).unwrap_or(true);
-    let is_expanded = expanded.contains(path);
+    // Unknown folders stay arrowless until the user visits/loads them. Once a
+    // folder has been loaded into the tree cache, show the arrow when it has
+    // any visible child entry (file or folder).
+    let is_load_more = is_tree_load_more_path(path);
+    let has_children = is_dir && !is_load_more && children.map(|c| !c.is_empty()).unwrap_or(false);
+    let is_expanded = is_dir && !is_load_more && expanded.contains(path);
     nodes.push(RemoteTreeNode {
         path: path.to_string(),
         name,
         depth,
         expanded: is_expanded,
         has_children,
+        is_dir,
     });
     if is_expanded {
         if let Some(ch) = children {
-            for (_, child_path) in ch {
-                build_tree_nodes(child_path, depth + 1, expanded, tree_dirs, nodes);
+            for child in ch {
+                build_tree_nodes(&child.path, depth + 1, child.is_dir, expanded, tree_dirs, nodes);
             }
         }
     }
@@ -286,13 +492,23 @@ fn build_tree_nodes(
 
 /// Rebuild the flat tree node list from the current cache and push it to the UI.
 fn emit_tree(
-    tree_dirs: &std::collections::HashMap<String, Vec<(String, String)>>,
+    tree_dirs: &std::collections::HashMap<String, Vec<TreeChild>>,
     tree_expanded: &std::collections::HashSet<String>,
     events: &UnboundedSender<SessionEvent>,
 ) {
     let mut nodes = Vec::new();
-    build_tree_nodes("/", 0, tree_expanded, tree_dirs, &mut nodes);
+    build_tree_nodes("/", 0, true, tree_expanded, tree_dirs, &mut nodes);
     let _ = events.send(SessionEvent::SftpTreeUpdate(nodes));
+}
+
+fn emit_move_tree(
+    tree_dirs: &std::collections::HashMap<String, Vec<TreeChild>>,
+    tree_expanded: &std::collections::HashSet<String>,
+    events: &UnboundedSender<SessionEvent>,
+) {
+    let mut nodes = Vec::new();
+    build_tree_nodes("/", 0, true, tree_expanded, tree_dirs, &mut nodes);
+    let _ = events.send(SessionEvent::SftpMoveTreeUpdate(nodes));
 }
 
 /// Re-fetch a directory's sub-directories into the tree cache, but only if that
@@ -303,12 +519,79 @@ fn emit_tree(
 async fn sync_tree_dir(
     sftp: &SftpSession,
     dir: &str,
-    tree_dirs: &mut std::collections::HashMap<String, Vec<(String, String)>>,
+    tree_dirs: &mut std::collections::HashMap<String, Vec<TreeChild>>,
 ) {
     if tree_dirs.contains_key(dir) {
-        let dirs = list_dirs_only_impl(sftp, dir).await.unwrap_or_default();
+        let dirs = list_tree_children_impl(sftp, dir).await.unwrap_or_default();
         tree_dirs.insert(dir.to_string(), dirs);
     }
+}
+
+/// Expand just enough of the left directory tree so `path` is visible after
+/// navigation from the right file list or path bar.
+///
+/// Important: do *not* list/preload the target directory itself here. Some
+/// directories contain many huge sub-folders, and preloading their children on
+/// every navigation makes opening the folder feel frozen. We only fetch each
+/// parent directory needed to reveal the target node; the target's children are
+/// loaded later if the user explicitly expands it in the tree.
+async fn reveal_tree_path(
+    sftp: &SftpSession,
+    path: &str,
+    tree_dirs: &mut std::collections::HashMap<String, Vec<TreeChild>>,
+    tree_expanded: &mut std::collections::HashSet<String>,
+) {
+    let path = if path.trim().is_empty() { "/" } else { path };
+    tree_expanded.insert("/".to_string());
+
+    // Cache root once if it is missing. Re-fetching root on every directory
+    // navigation adds needless network round-trips. Refresh still performs a
+    // full expanded-tree sync when the user explicitly asks for it.
+    if !tree_dirs.contains_key("/") {
+        let root_dirs = list_tree_children_impl(sftp, "/").await.unwrap_or_default();
+        tree_dirs.insert("/".to_string(), root_dirs);
+    }
+
+    if path == "/" {
+        return;
+    }
+
+    let segments: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let mut current = "/".to_string();
+
+    for segment in segments {
+        // The current directory is the parent of the next path segment. Fetch
+        // it only if the tree does not already know its children.
+        if !tree_dirs.contains_key(&current) {
+            let dirs = list_tree_children_impl(sftp, &current).await.unwrap_or_default();
+            tree_dirs.insert(current.clone(), dirs);
+        }
+        tree_expanded.insert(current.clone());
+
+        let next = if current == "/" {
+            format!("/{}", segment)
+        } else {
+            format!("{}/{}", current, segment)
+        };
+
+        // The tree caps each directory to avoid rendering thousands of rows.
+        // If the current path is outside that cap, inject just this path segment
+        // so the move dialog can still reveal and scroll to it.
+        if let Some(children) = tree_dirs.get_mut(&current) {
+            if !children.iter().any(|c| c.path == next) {
+                children.push(TreeChild {
+                    path: next.clone(),
+                    is_dir: true,
+                });
+            }
+        }
+
+        current = next;
+    }
+
+    // Do not insert `current` into tree_expanded and do not list it here. The
+    // current path will still be visible/highlighted because its parent is
+    // expanded and contains the node.
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +802,11 @@ async fn run_sftp(
     let cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    let mut current_list_path = String::new();
+    let mut current_list_entries: Vec<RemoteEntry> = Vec::new();
+    let mut current_list_visible = SFTP_UI_PAGE_SIZE;
+    let list_cache = Arc::new(Mutex::new(DirListCache::default()));
+
     // Resolve the home directory and do an initial listing.
     let home = sftp
         .canonicalize(".")
@@ -530,12 +818,18 @@ async fn run_sftp(
         home
     )));
     match list_dir_impl(&sftp, &home).await {
-        Ok(entries) => {
-            let _ = events.send(SessionEvent::SftpEntries {
-                path: home.clone(),
-                entries,
-            });
-            let _ = events.send(SessionEvent::SftpStatus(home.clone()));
+        Ok(mut entries) => {
+            resolve_owner_group_names(&handle, &mut entries).await;
+            store_dir_cache(&list_cache, home.clone(), &entries);
+            current_list_path = home.clone();
+            current_list_entries = entries;
+            current_list_visible = SFTP_UI_PAGE_SIZE;
+            emit_paged_entries(
+                &events,
+                &current_list_path,
+                &current_list_entries,
+                current_list_visible,
+            );
         }
         Err(e) => {
             let _ = events.send(SessionEvent::SftpError(list_error_msg(&home, &e)));
@@ -543,16 +837,19 @@ async fn run_sftp(
     }
 
     // --- Directory tree initialization -------------------------------------
-    // tree_dirs: path -> [(child_name, child_full_path)] for directories only
+    // tree_dirs: path -> visible child entries (folders + files, limited)
     // tree_expanded: set of paths currently shown as expanded
-    let mut tree_dirs: std::collections::HashMap<String, Vec<(String, String)>> =
+    let mut tree_dirs: std::collections::HashMap<String, Vec<TreeChild>> =
         std::collections::HashMap::new();
     let mut tree_expanded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut move_tree_expanded: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // Fetch root "/" subdirs, then expand path down to home.
-    let root_dirs = list_dirs_only_impl(&sftp, "/").await.unwrap_or_default();
+    let root_dirs = list_tree_children_impl(&sftp, "/").await.unwrap_or_default();
     tree_dirs.insert("/".to_string(), root_dirs);
     tree_expanded.insert("/".to_string());
+    move_tree_expanded.insert("/".to_string());
 
     // Walk each path segment from "/" toward home, expanding as we go.
     if home != "/" {
@@ -565,12 +862,12 @@ async fn run_sftp(
             // Only expand if this child appeared in the parent listing.
             let found = tree_dirs
                 .get(&current)
-                .map(|c| c.iter().any(|(_, p)| p == &child))
+                .map(|c| c.iter().any(|item| item.is_dir && item.path == child))
                 .unwrap_or(false);
             if !found {
                 break;
             }
-            let dirs = list_dirs_only_impl(&sftp, &child).await.unwrap_or_default();
+            let dirs = list_tree_children_impl(&sftp, &child).await.unwrap_or_default();
             tree_dirs.insert(child.clone(), dirs);
             tree_expanded.insert(child.clone());
             current = child;
@@ -578,8 +875,9 @@ async fn run_sftp(
     }
     {
         let mut nodes = Vec::new();
-        build_tree_nodes("/", 0, &tree_expanded, &tree_dirs, &mut nodes);
+        build_tree_nodes("/", 0, true, &tree_expanded, &tree_dirs, &mut nodes);
         let _ = events.send(SessionEvent::SftpTreeUpdate(nodes));
+        emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
     }
 
     // --- Command loop -------------------------------------------------------
@@ -593,13 +891,46 @@ async fn run_sftp(
                     t("加载", "Loading"),
                     path
                 )));
-                match list_dir_impl(&sftp, &path).await {
+                let cached = list_cache
+                    .lock()
+                    .unwrap()
+                    .get(&path)
+                    .map(|entries| entries.to_vec());
+                match if let Some(entries) = cached {
+                    Ok(entries)
+                } else {
+                    match list_dir_impl(&sftp, &path).await {
+                        Ok(mut entries) => {
+                            resolve_owner_group_names(&handle, &mut entries).await;
+                            store_dir_cache(&list_cache, path.clone(), &entries);
+                            Ok(entries)
+                        }
+                        Err(e) => Err(e),
+                    }
+                } {
                     Ok(entries) => {
-                        let _ = events.send(SessionEvent::SftpEntries {
-                            path: path.clone(),
-                            entries,
-                        });
-                        let _ = events.send(SessionEvent::SftpStatus(path));
+                        current_list_path = path.clone();
+                        current_list_entries = entries;
+                        current_list_visible = SFTP_UI_PAGE_SIZE;
+                        emit_paged_entries(
+                            &events,
+                            &current_list_path,
+                            &current_list_entries,
+                            current_list_visible,
+                        );
+                        // The user has now visited this directory, so make its
+                        // children known to the left tree as well. This keeps
+                        // first-visit folders arrowless, but shows an expand
+                        // arrow immediately after a successful visit when the
+                        // directory actually contains visible files/folders.
+                        tree_dirs.insert(
+                            current_list_path.clone(),
+                            tree_children_from_entries(&current_list_path, &current_list_entries),
+                        );
+                        reveal_tree_path(&sftp, &path, &mut tree_dirs, &mut tree_expanded)
+                            .await;
+                        emit_tree(&tree_dirs, &tree_expanded, &events);
+                        emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
                     }
                     Err(e) => {
                         let _ = events.send(SessionEvent::SftpError(list_error_msg(&path, &e)));
@@ -615,27 +946,78 @@ async fn run_sftp(
                     path
                 )));
                 match list_dir_impl(&sftp, &path).await {
-                    Ok(entries) => {
-                        let _ = events.send(SessionEvent::SftpEntries {
-                            path: path.clone(),
-                            entries,
-                        });
-                        let _ = events.send(SessionEvent::SftpStatus(path.clone()));
+                    Ok(mut entries) => {
+                        resolve_owner_group_names(&handle, &mut entries).await;
+                        store_dir_cache(&list_cache, path.clone(), &entries);
+                        current_list_path = path.clone();
+                        current_list_entries = entries;
+                        current_list_visible = SFTP_UI_PAGE_SIZE;
+                        emit_paged_entries(
+                            &events,
+                            &current_list_path,
+                            &current_list_entries,
+                            current_list_visible,
+                        );
+                        tree_dirs.insert(
+                            current_list_path.clone(),
+                            tree_children_from_entries(&current_list_path, &current_list_entries),
+                        );
+                        let expanded: Vec<String> = tree_expanded.iter().cloned().collect();
+                        for dir in expanded {
+                            let dirs = list_tree_children_impl(&sftp, &dir).await.unwrap_or_default();
+                            tree_dirs.insert(dir, dirs);
+                        }
+                        emit_tree(&tree_dirs, &tree_expanded, &events);
+                        emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
                     }
                     Err(e) => {
                         let _ = events.send(SessionEvent::SftpError(list_error_msg(&path, &e)));
                     }
                 }
-                // Tree — re-fetch every currently-expanded directory so deleted /
-                // created folders sync without a reconnect (#189). Stale entries
-                // whose parent no longer lists them are simply never walked by
-                // build_tree_nodes, so they drop out on the rebuild.
-                let expanded: Vec<String> = tree_expanded.iter().cloned().collect();
-                for dir in expanded {
-                    let dirs = list_dirs_only_impl(&sftp, &dir).await.unwrap_or_default();
-                    tree_dirs.insert(dir, dirs);
+            }
+
+            SftpCommand::LoadMore => {
+                if !current_list_path.is_empty() {
+                    current_list_visible = (current_list_visible + SFTP_UI_PAGE_SIZE)
+                        .min(current_list_entries.len());
+                    emit_paged_entries(
+                        &events,
+                        &current_list_path,
+                        &current_list_entries,
+                        current_list_visible,
+                    );
                 }
+            }
+
+            SftpCommand::LoadAll => {
+                if !current_list_path.is_empty() {
+                    current_list_visible = current_list_entries.len();
+                    emit_paged_entries(
+                        &events,
+                        &current_list_path,
+                        &current_list_entries,
+                        current_list_visible,
+                    );
+                }
+            }
+
+            SftpCommand::LoadMoreTree(path) => {
+                let parent = tree_load_more_parent(&path).unwrap_or(path);
+                let dirs = list_tree_children_page_impl(&sftp, &parent, usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                tree_dirs.insert(parent, dirs);
                 emit_tree(&tree_dirs, &tree_expanded, &events);
+                emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
+            }
+
+            SftpCommand::LoadMoreMoveTree(path) => {
+                let parent = tree_load_more_parent(&path).unwrap_or(path);
+                let dirs = list_tree_children_page_impl(&sftp, &parent, usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                tree_dirs.insert(parent, dirs);
+                emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
             }
 
             SftpCommand::ToggleTreeNode(path) => {
@@ -646,14 +1028,51 @@ async fn run_sftp(
                 } else {
                     // Expand: fetch children if not yet cached.
                     if !tree_dirs.contains_key(&path) {
-                        let dirs = list_dirs_only_impl(&sftp, &path).await.unwrap_or_default();
+                        let dirs = list_tree_children_impl(&sftp, &path).await.unwrap_or_default();
                         tree_dirs.insert(path.clone(), dirs);
                     }
                     tree_expanded.insert(path.clone());
                 }
                 let mut nodes = Vec::new();
-                build_tree_nodes("/", 0, &tree_expanded, &tree_dirs, &mut nodes);
+                build_tree_nodes("/", 0, true, &tree_expanded, &tree_dirs, &mut nodes);
                 let _ = events.send(SessionEvent::SftpTreeUpdate(nodes));
+            }
+
+            SftpCommand::ToggleMoveTreeNode(path) => {
+                if move_tree_expanded.contains(&path) {
+                    let prefix = format!("{}/", path.trim_end_matches('/'));
+                    move_tree_expanded.retain(|p| p != &path && !p.starts_with(&prefix));
+                } else {
+                    if !tree_dirs.contains_key(&path) {
+                        let dirs = list_tree_children_impl(&sftp, &path).await.unwrap_or_default();
+                        tree_dirs.insert(path.clone(), dirs);
+                    }
+                    move_tree_expanded.insert(path.clone());
+                }
+                emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
+            }
+
+            SftpCommand::RevealTreePath(path) => {
+                reveal_tree_path(&sftp, &path, &mut tree_dirs, &mut tree_expanded).await;
+                emit_tree(&tree_dirs, &tree_expanded, &events);
+            }
+
+            SftpCommand::RevealMoveTreePath(path) => {
+                reveal_tree_path(&sftp, &path, &mut tree_dirs, &mut move_tree_expanded).await;
+                emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
+            }
+
+            SftpCommand::ProbeTreeNode(path) => {
+                // Used by the move-target dialog: selecting an unknown folder should
+                // reveal whether it has sub-folders, but should not expand it yet.
+                if !tree_dirs.contains_key(&path) {
+                    let dirs = list_tree_children_impl(&sftp, &path).await.unwrap_or_default();
+                    tree_dirs.insert(path.clone(), dirs);
+                    let mut nodes = Vec::new();
+                    build_tree_nodes("/", 0, true, &tree_expanded, &tree_dirs, &mut nodes);
+                    let _ = events.send(SessionEvent::SftpTreeUpdate(nodes));
+                    emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
+                }
             }
 
             SftpCommand::Download { remote, local_dir } => {
@@ -672,7 +1091,7 @@ async fn run_sftp(
                     .insert(file_id.clone(), cancel.clone());
                 let cancels_done = cancels.clone();
                 tokio::spawn(async move {
-                    // A directory target → recursively mirror the whole tree (#50).
+                    // A directory target: recursively mirror the whole tree (#50).
                     let is_dir = sftp
                         .metadata(&remote)
                         .await
@@ -700,11 +1119,29 @@ async fn run_sftp(
                             t("下载文件夹", "Downloading folder"),
                             dirname
                         )));
-                        match download_dir(&sftp, &handle, &remote, &local_dir, &events).await {
-                            Ok(_) => {
+                        emit_transfer(&events, &file_id, &dirname, false, 0, 0, 0, "");
+                        match download_dir(
+                            &sftp,
+                            &handle,
+                            &remote,
+                            &local_dir,
+                            &file_id,
+                            &events,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
                                 let _ = events.send(SessionEvent::SftpStatus(format!(
                                     "{}: {}",
                                     t("下载完成", "Downloaded"),
+                                    dirname
+                                )));
+                            }
+                            Ok(false) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消", "Cancelled"),
                                     dirname
                                 )));
                             }
@@ -784,7 +1221,6 @@ async fn run_sftp(
                 // #100: multi-select download. Instead of N concurrent transfers
                 // (which raced and dropped files), tar everything into ONE archive
                 // on the remote, pull that single file, then delete the temp.
-                let sftp = sftp.clone();
                 let handle = handle.clone();
                 let events = events.clone();
                 // Register a cancel flag up-front so CancelTransfer can flip it (#100).
@@ -793,74 +1229,8 @@ async fn run_sftp(
                 cancels.lock().unwrap().insert(id.clone(), cancel.clone());
                 let cancels_done = cancels.clone();
                 tokio::spawn(async move {
-                    let n = names.len();
-                    let tmp = format!("/tmp/meatshell-{}.tar", Uuid::new_v4());
-                    // Name the archive after the first item's stem, per the user:
-                    // 11.txt → "11等文件.tar". Sanitize since names come from the server.
-                    let first = names.first().map(|s| s.as_str()).unwrap_or("download");
-                    let stem = first
-                        .rsplit_once('.')
-                        .map(|(a, _)| a)
-                        .filter(|a| !a.is_empty())
-                        .unwrap_or(first);
-                    let arc_name =
-                        sanitize_filename(&format!("{}{}.tar", stem, t("等文件", "-and-more")));
-                    let local_path = format!("{}/{}", local_dir.trim_end_matches('/'), arc_name);
-                    let _ = events.send(SessionEvent::SftpStatus(format!(
-                        "{} {} {}...",
-                        t("打包下载", "Archiving"),
-                        n,
-                        t("项", "items")
-                    )));
-                    // Show a "preparing" row in the transfer panel right away so a
-                    // big selection isn't a silent wait while tar runs (#100). The
-                    // download then reuses this same id, so the row turns into the
-                    // live progress bar once bytes start flowing.
-                    emit_transfer(&events, &id, &arc_name, false, 0, 0, 3, "");
-                    // Plain tar (no gzip): the user prefers speed over a smaller file.
-                    // Server-supplied names are untrusted → quote every argument.
-                    let mut cmd =
-                        format!("tar -cf {} -C {}", sh_quote(&tmp), sh_quote(&remote_dir));
-                    for nm in &names {
-                        cmd.push(' ');
-                        cmd.push_str(&sh_quote(nm));
-                    }
-                    let _ = &sftp; // listing session kept alive; transfer uses `handle`
-                    let res: Result<bool> = async {
-                        let st = exec_remote(&handle, &cmd).await.context("tar on remote")?;
-                        if st != 0 {
-                            return Err(anyhow!(t("远端 tar 打包失败", "remote tar failed")));
-                        }
-                        download_impl(&handle, &tmp, &local_path, &arc_name, &id, &events, &cancel)
-                            .await
-                    }
-                    .await;
-                    // Best-effort cleanup of the remote temp tar — success, failure
-                    // or cancel all reach here, so no junk is left on the server (#100).
-                    let _ = exec_remote(&handle, &format!("rm -f {}", sh_quote(&tmp))).await;
-                    match res {
-                        Ok(true) => {
-                            let _ = events.send(SessionEvent::SftpStatus(format!(
-                                "{}: {}",
-                                t("下载完成", "Downloaded"),
-                                arc_name
-                            )));
-                        }
-                        Ok(false) => {
-                            let _ = events.send(SessionEvent::SftpStatus(format!(
-                                "{}: {}",
-                                t("已取消", "Cancelled"),
-                                arc_name
-                            )));
-                        }
-                        Err(e) => {
-                            emit_transfer(&events, &id, &arc_name, false, 0, 0, 2, &e.to_string());
-                            let _ = events.send(SessionEvent::SftpStatus(format!(
-                                "{}: {e}",
-                                t("下载失败", "Download failed")
-                            )));
-                        }
-                    }
+                    archive_and_download(&handle, remote_dir, names, local_dir, id.clone(), events, cancel)
+                        .await;
                     cancels_done.lock().unwrap().remove(&id);
                 });
             }
@@ -881,6 +1251,7 @@ async fn run_sftp(
                 let sftp = sftp.clone();
                 let handle = handle.clone();
                 let events = events.clone();
+                let list_cache = list_cache.clone();
                 // Register a cancel flag up-front under the file id so a
                 // CancelTransfer arriving mid-upload can flip it (#100).
                 let up_id = Uuid::new_v4().to_string();
@@ -916,18 +1287,30 @@ async fn run_sftp(
                             t("上传文件夹", "Uploading folder"),
                             dirname
                         )));
-                        let res = upload_dir(&handle, &sftp, &local, &remote_dir, &events).await;
-                        if let Ok(entries) = list_dir_impl(&sftp, &remote_dir).await {
+                        emit_transfer(&events, &up_id, &dirname, true, 0, 0, 0, "");
+                        let res =
+                            upload_dir(&handle, &sftp, &local, &remote_dir, &up_id, &events, &cancel)
+                                .await;
+                        if let Ok(mut entries) = list_dir_impl(&sftp, &remote_dir).await {
+                            resolve_owner_group_names(&handle, &mut entries).await;
+                            store_dir_cache(&list_cache, remote_dir.clone(), &entries);
                             let _ = events.send(SessionEvent::SftpEntries {
                                 path: remote_dir.clone(),
                                 entries,
                             });
                         }
                         match res {
-                            Ok(_) => {
+                            Ok(true) => {
                                 let _ = events.send(SessionEvent::SftpStatus(format!(
                                     "{}: {}",
                                     t("上传完成", "Uploaded"),
+                                    dirname
+                                )));
+                            }
+                            Ok(false) => {
+                                let _ = events.send(SessionEvent::SftpStatus(format!(
+                                    "{}: {}",
+                                    t("已取消", "Cancelled"),
                                     dirname
                                 )));
                             }
@@ -973,7 +1356,9 @@ async fn run_sftp(
                         .await
                         {
                             Ok(true) => {
-                                if let Ok(entries) = list_dir_impl(&sftp, &remote_dir).await {
+                                if let Ok(mut entries) = list_dir_impl(&sftp, &remote_dir).await {
+                                    resolve_owner_group_names(&handle, &mut entries).await;
+                                    store_dir_cache(&list_cache, remote_dir.clone(), &entries);
                                     let _ = events.send(SessionEvent::SftpEntries {
                                         path: remote_dir.clone(),
                                         entries,
@@ -987,7 +1372,9 @@ async fn run_sftp(
                             }
                             Ok(false) => {
                                 // Refresh the listing so the removed partial file disappears.
-                                if let Ok(entries) = list_dir_impl(&sftp, &remote_dir).await {
+                                if let Ok(mut entries) = list_dir_impl(&sftp, &remote_dir).await {
+                                    resolve_owner_group_names(&handle, &mut entries).await;
+                                    store_dir_cache(&list_cache, remote_dir.clone(), &entries);
                                     let _ = events.send(SessionEvent::SftpEntries {
                                         path: remote_dir.clone(),
                                         entries,
@@ -1086,7 +1473,9 @@ async fn run_sftp(
                 match res {
                     Ok(_) => {
                         let parent = parent_dir(&path);
-                        if let Ok(entries) = list_dir_impl(&sftp, &parent).await {
+                        if let Ok(mut entries) = list_dir_impl(&sftp, &parent).await {
+                            resolve_owner_group_names(&handle, &mut entries).await;
+                            store_dir_cache(&list_cache, parent.clone(), &entries);
                             let _ = events.send(SessionEvent::SftpEntries {
                                 path: parent.clone(),
                                 entries,
@@ -1097,6 +1486,10 @@ async fn run_sftp(
                         // the parent's sub-dirs so the deleted node disappears
                         // without needing a reconnect.
                         let prefix = format!("{}/", path.trim_end_matches('/'));
+                        list_cache
+                            .lock()
+                            .unwrap()
+                            .invalidate_path_and_descendants(&path);
                         tree_dirs.retain(|p, _| p != &path && !p.starts_with(&prefix));
                         tree_expanded.retain(|p| p != &path && !p.starts_with(&prefix));
                         sync_tree_dir(&sftp, &parent, &mut tree_dirs).await;
@@ -1129,6 +1522,11 @@ async fn run_sftp(
                         // descendants, then re-list both the source and the
                         // destination parent (rename can also move across dirs).
                         let prefix = format!("{}/", from.trim_end_matches('/'));
+                        {
+                            let mut cache = list_cache.lock().unwrap();
+                            cache.invalidate_path_and_descendants(&from);
+                            cache.invalidate_path_and_descendants(&to);
+                        }
                         tree_dirs.retain(|p, _| p != &from && !p.starts_with(&prefix));
                         tree_expanded.retain(|p| p != &from && !p.starts_with(&prefix));
                         sync_tree_dir(&sftp, &refresh, &mut tree_dirs).await;
@@ -1145,12 +1543,65 @@ async fn run_sftp(
                         )));
                     }
                 }
-                if let Ok(entries) = list_dir_impl(&sftp, &refresh).await {
+                if let Ok(mut entries) = list_dir_impl(&sftp, &refresh).await {
+                    resolve_owner_group_names(&handle, &mut entries).await;
+                    store_dir_cache(&list_cache, refresh.clone(), &entries);
                     let _ = events.send(SessionEvent::SftpEntries {
                         path: refresh,
                         entries,
                     });
                 }
+            }
+
+            SftpCommand::MoveMany { moves } => {
+                let mut refresh_dirs = HashSet::new();
+                let mut ok_count = 0usize;
+                let mut fail_count = 0usize;
+                for (from, to) in moves {
+                    let refresh = parent_dir(&from);
+                    let to_parent = parent_dir(&to);
+                    match sftp.rename(&from, &to).await {
+                        Ok(_) => {
+                            ok_count += 1;
+                            let prefix = format!("{}/", from.trim_end_matches('/'));
+                            {
+                                let mut cache = list_cache.lock().unwrap();
+                                cache.invalidate_path_and_descendants(&from);
+                                cache.invalidate_path_and_descendants(&to);
+                            }
+                            tree_dirs.retain(|p, _| p != &from && !p.starts_with(&prefix));
+                            tree_expanded.retain(|p| p != &from && !p.starts_with(&prefix));
+                            refresh_dirs.insert(refresh);
+                            refresh_dirs.insert(to_parent);
+                        }
+                        Err(_) => {
+                            fail_count += 1;
+                        }
+                    }
+                }
+                for dir in refresh_dirs.iter() {
+                    sync_tree_dir(&sftp, dir, &mut tree_dirs).await;
+                    if let Ok(mut entries) = list_dir_impl(&sftp, dir).await {
+                        resolve_owner_group_names(&handle, &mut entries).await;
+                        store_dir_cache(&list_cache, dir.clone(), &entries);
+                        let _ = events.send(SessionEvent::SftpEntries {
+                            path: dir.clone(),
+                            entries,
+                        });
+                    }
+                }
+                emit_tree(&tree_dirs, &tree_expanded, &events);
+                let _ = events.send(SessionEvent::SftpStatus(if fail_count == 0 {
+                    format!("{}: {}", t("已移动", "Moved"), ok_count)
+                } else {
+                    format!(
+                        "{}: {}, {}: {}",
+                        t("已移动", "Moved"),
+                        ok_count,
+                        t("失败", "Failed"),
+                        fail_count
+                    )
+                }));
             }
 
             SftpCommand::Chmod { path, mode } => {
@@ -1175,7 +1626,9 @@ async fn run_sftp(
                         )));
                     }
                 }
-                if let Ok(entries) = list_dir_impl(&sftp, &refresh).await {
+                if let Ok(mut entries) = list_dir_impl(&sftp, &refresh).await {
+                    resolve_owner_group_names(&handle, &mut entries).await;
+                    store_dir_cache(&list_cache, refresh.clone(), &entries);
                     let _ = events.send(SessionEvent::SftpEntries {
                         path: refresh,
                         entries,
@@ -1203,7 +1656,9 @@ async fn run_sftp(
                         )));
                     }
                 }
-                if let Ok(entries) = list_dir_impl(&sftp, &refresh).await {
+                if let Ok(mut entries) = list_dir_impl(&sftp, &refresh).await {
+                    resolve_owner_group_names(&handle, &mut entries).await;
+                    store_dir_cache(&list_cache, refresh.clone(), &entries);
                     let _ = events.send(SessionEvent::SftpEntries {
                         path: refresh,
                         entries,
@@ -1238,7 +1693,9 @@ async fn run_sftp(
                         }
                     }
                 }
-                if let Ok(entries) = list_dir_impl(&sftp, &refresh).await {
+                if let Ok(mut entries) = list_dir_impl(&sftp, &refresh).await {
+                    resolve_owner_group_names(&handle, &mut entries).await;
+                    store_dir_cache(&list_cache, refresh.clone(), &entries);
                     let _ = events.send(SessionEvent::SftpEntries {
                         path: refresh,
                         entries,
@@ -1247,53 +1704,88 @@ async fn run_sftp(
             }
 
             SftpCommand::OpenTemp { remote, edit } => {
-                // Sanitize the remote-controlled name before it becomes a local
-                // file path that we later hand to the OS "open" call.
-                let filename = sanitize_filename(&base_name(&remote));
-                let tmp_dir = std::env::temp_dir().join("meatshell");
-                let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-                let local = tmp_dir.join(&filename);
-                let local_str = local.to_string_lossy().to_string();
-                let _ = events.send(SessionEvent::SftpStatus(format!(
-                    "{} {}...",
-                    t("打开", "Opening"),
-                    filename
-                )));
-                let xid = Uuid::new_v4().to_string();
-                let no_cancel = Arc::new(AtomicBool::new(false));
-                match download_impl(
-                    &handle, &remote, &local_str, &filename, &xid, &events, &no_cancel,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        open_with_os(&local_str);
-                        let _ = events.send(SessionEvent::SftpStatus(format!(
-                            "{}: {}",
+                // External open/edit also starts by downloading the remote file to a
+                // temp copy. Register it in the normal transfer table and run it on
+                // its own task so the transfer popup's cancel button can stop a slow
+                // large-file download (#81 cancel external open/edit).
+                let handle = handle.clone();
+                let events = events.clone();
+                let self_tx = self_tx.clone();
+                let id = format!("open-temp:{}", Uuid::new_v4());
+                let cancel = Arc::new(AtomicBool::new(false));
+                cancels.lock().unwrap().insert(id.clone(), cancel.clone());
+                let cancels_done = cancels.clone();
+                tokio::spawn(async move {
+                    // Sanitize the remote-controlled name before it becomes a local
+                    // file path that we later hand to the OS "open" call.
+                    let filename = sanitize_filename(&base_name(&remote));
+                    let tmp_dir = std::env::temp_dir().join("meatshell");
+                    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+                    let local = tmp_dir.join(&filename);
+                    let local_str = local.to_string_lossy().to_string();
+                    let _ = events.send(SessionEvent::SftpStatus(format!(
+                        "{} {}...",
+                        t("打开", "Opening"),
+                        filename
+                    )));
+                    match download_impl(
+                        &handle,
+                        &remote,
+                        &local_str,
+                        &filename,
+                        &id,
+                        &events,
+                        &cancel,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            open_with_os(&local_str);
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {}",
+                                if edit {
+                                    t("已打开编辑", "Opened for editing")
+                                } else {
+                                    t("已打开", "Opened")
+                                },
+                                filename
+                            )));
                             if edit {
-                                t("已打开编辑", "Opened for editing")
-                            } else {
-                                t("已打开", "Opened")
-                            },
-                            filename
-                        )));
-                        if edit {
-                            spawn_edit_watcher(
-                                self_tx.clone(),
-                                local_str,
-                                remote.clone(),
-                                filename,
-                                events.clone(),
+                                spawn_edit_watcher(
+                                    self_tx,
+                                    local_str,
+                                    remote.clone(),
+                                    filename,
+                                    events.clone(),
+                                );
+                            }
+                        }
+                        Ok(false) => {
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {}",
+                                t("已取消", "Cancelled"),
+                                filename
+                            )));
+                        }
+                        Err(e) => {
+                            emit_transfer(
+                                &events,
+                                &id,
+                                &filename,
+                                false,
+                                0,
+                                0,
+                                2,
+                                &e.to_string(),
                             );
+                            let _ = events.send(SessionEvent::SftpStatus(format!(
+                                "{}: {e}",
+                                t("打开失败", "Open failed")
+                            )));
                         }
                     }
-                    Err(e) => {
-                        let _ = events.send(SessionEvent::SftpStatus(format!(
-                            "{}: {e}",
-                            t("打开失败", "Open failed")
-                        )));
-                    }
-                }
+                    cancels_done.lock().unwrap().remove(&id);
+                });
             }
             SftpCommand::ReadText { remote, edit } => {
                 let name = base_name(&remote);
@@ -1484,9 +1976,27 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+fn shell_words<I>(items: I) -> String
+where
+    I: IntoIterator<Item = String>,
+{
+    items
+        .into_iter()
+        .map(|s| sh_quote(&s))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Run a one-shot command on the remote over its own exec channel and return
 /// the exit status. Stdout/stderr are drained and discarded.
 async fn exec_remote(handle: &client::Handle<SftpClientHandler>, cmd: &str) -> Result<u32> {
+    exec_remote_output(handle, cmd).await.map(|(status, _)| status)
+}
+
+async fn exec_remote_output(
+    handle: &client::Handle<SftpClientHandler>,
+    cmd: &str,
+) -> Result<(u32, String)> {
     let mut ch = handle
         .channel_open_session()
         .await
@@ -1495,14 +2005,70 @@ async fn exec_remote(handle: &client::Handle<SftpClientHandler>, cmd: &str) -> R
         .await
         .context("exec remote command")?;
     let mut status = 0u32;
+    let mut out = Vec::new();
     while let Some(msg) = ch.wait().await {
         match msg {
+            russh::ChannelMsg::Data { data } => out.extend_from_slice(&data),
             russh::ChannelMsg::ExitStatus { exit_status } => status = exit_status,
             russh::ChannelMsg::Close => break,
             _ => {}
         }
     }
-    Ok(status)
+    Ok((status, String::from_utf8_lossy(&out).to_string()))
+}
+
+async fn resolve_owner_group_names(
+    handle: &client::Handle<SftpClientHandler>,
+    entries: &mut [RemoteEntry],
+) {
+    let uids: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.owner.parse::<u32>().ok().map(|v| v.to_string()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let gids: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.group.parse::<u32>().ok().map(|v| v.to_string()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if uids.is_empty() && gids.is_empty() {
+        return;
+    }
+
+    let cmd = format!(
+        "for u in {}; do n=$(getent passwd \"$u\" 2>/dev/null | cut -d: -f1); [ -n \"$n\" ] && printf 'U %s %s\\n' \"$u\" \"$n\"; done; for g in {}; do n=$(getent group \"$g\" 2>/dev/null | cut -d: -f1); [ -n \"$n\" ] && printf 'G %s %s\\n' \"$g\" \"$n\"; done",
+        shell_words(uids),
+        shell_words(gids),
+    );
+    let Ok((_, output)) = exec_remote_output(handle, &cmd).await else {
+        return;
+    };
+
+    let mut users = HashMap::<String, String>::new();
+    let mut groups = HashMap::<String, String>::new();
+    for line in output.lines() {
+        let mut parts = line.splitn(3, ' ');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("U"), Some(id), Some(name)) => {
+                users.insert(id.to_string(), name.to_string());
+            }
+            (Some("G"), Some(id), Some(name)) => {
+                groups.insert(id.to_string(), name.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    for e in entries {
+        if let Some(name) = users.get(&e.owner) {
+            e.owner = name.clone();
+        }
+        if let Some(name) = groups.get(&e.group) {
+            e.group = name.clone();
+        }
+    }
 }
 
 /// Parent directory of a remote path ("/a/b" → "/a", "/a" → "/").
@@ -1676,6 +2242,81 @@ async fn cleanup_import_path(path: &Path) {
     }
 }
 
+async fn archive_and_download(
+    handle: &client::Handle<SftpClientHandler>,
+    remote_dir: String,
+    names: Vec<String>,
+    local_dir: String,
+    id: String,
+    events: UnboundedSender<SessionEvent>,
+    cancel: Arc<AtomicBool>,
+) {
+    let n = names.len();
+    let tmp = format!("/tmp/meatshell-{}.tar", Uuid::new_v4());
+    // Name the archive after the first item's stem, per the user:
+    // 11.txt -> "11等文件.tar". Sanitize since names come from the server.
+    let first = names.first().map(|s| s.as_str()).unwrap_or("download");
+    let stem = first
+        .rsplit_once('.')
+        .map(|(a, _)| a)
+        .filter(|a| !a.is_empty())
+        .unwrap_or(first);
+    let arc_name = sanitize_filename(&format!("{}{}.tar", stem, t("等文件", "-and-more")));
+    let local_path = format!("{}/{}", local_dir.trim_end_matches('/'), arc_name);
+    let _ = events.send(SessionEvent::SftpStatus(format!(
+        "{} {} {}...",
+        t("打包下载", "Archiving"),
+        n,
+        t("项", "items")
+    )));
+    // Show a "preparing" row in the transfer panel right away so a big archive
+    // isn't a silent wait while tar runs (#100). The download then reuses this id.
+    emit_transfer(&events, &id, &arc_name, false, 0, 0, 3, "");
+
+    // Plain tar (no gzip): the user prefers speed over a smaller file.
+    // Server-supplied names are untrusted -> quote every argument.
+    let mut cmd = format!("tar -cf {} -C {}", sh_quote(&tmp), sh_quote(&remote_dir));
+    for nm in &names {
+        cmd.push(' ');
+        cmd.push_str(&sh_quote(nm));
+    }
+
+    let res: Result<bool> = async {
+        let st = exec_remote(handle, &cmd).await.context("tar on remote")?;
+        if st != 0 {
+            return Err(anyhow!(t("远端 tar 打包失败", "remote tar failed")));
+        }
+        download_impl(handle, &tmp, &local_path, &arc_name, &id, &events, &cancel).await
+    }
+    .await;
+    // Best-effort cleanup of the remote temp tar: success, failure or cancel all
+    // reach here, so no junk is left on the server (#100).
+    let _ = exec_remote(handle, &format!("rm -f {}", sh_quote(&tmp))).await;
+    match res {
+        Ok(true) => {
+            let _ = events.send(SessionEvent::SftpStatus(format!(
+                "{}: {}",
+                t("下载完成", "Downloaded"),
+                arc_name
+            )));
+        }
+        Ok(false) => {
+            let _ = events.send(SessionEvent::SftpStatus(format!(
+                "{}: {}",
+                t("已取消", "Cancelled"),
+                arc_name
+            )));
+        }
+        Err(e) => {
+            emit_transfer(&events, &id, &arc_name, false, 0, 0, 2, &e.to_string());
+            let _ = events.send(SessionEvent::SftpStatus(format!(
+                "{}: {e}",
+                t("下载失败", "Download failed")
+            )));
+        }
+    }
+}
+
 async fn stage_remote_for_copy(
     sftp: &SftpSession,
     handle: &client::Handle<SftpClientHandler>,
@@ -1709,7 +2350,8 @@ async fn stage_remote_for_copy(
             .map(|entries| entries.is_empty())
             .unwrap_or(false);
         if !empty {
-            download_dir(sftp, handle, remote, &local_parent, events).await?;
+            let _ =
+                download_dir(sftp, handle, remote, &local_parent, &id, events, &no_cancel).await?;
         }
     } else {
         let local = local_path.to_string_lossy().to_string();
@@ -1752,6 +2394,16 @@ async fn list_dir_impl(sftp: &SftpSession, path: &str) -> Result<Vec<RemoteEntry
             let is_dir = (permissions & 0o170_000) == 0o040_000;
             let size = meta.size.unwrap_or(0);
             let modified = meta.mtime.unwrap_or(0);
+            let owner = meta
+                .user
+                .clone()
+                .or_else(|| meta.uid.map(|v| v.to_string()))
+                .unwrap_or_else(|| "-".to_string());
+            let group = meta
+                .group
+                .clone()
+                .or_else(|| meta.gid.map(|v| v.to_string()))
+                .unwrap_or_else(|| "-".to_string());
             RemoteEntry {
                 name,
                 full_path,
@@ -1759,6 +2411,8 @@ async fn list_dir_impl(sftp: &SftpSession, path: &str) -> Result<Vec<RemoteEntry
                 size,
                 modified,
                 mode: permissions & 0o7777,
+                owner,
+                group,
             }
         })
         .collect();
@@ -1773,14 +2427,34 @@ async fn list_dir_impl(sftp: &SftpSession, path: &str) -> Result<Vec<RemoteEntry
     Ok(entries)
 }
 
-/// List only the subdirectories of `path` (no files). Used to build the tree.
-async fn list_dirs_only_impl(sftp: &SftpSession, path: &str) -> Result<Vec<(String, String)>> {
+/// List a limited set of child directories for the left tree.
+///
+/// The tree intentionally shows folders only and caps each expanded node, so a
+/// dataset directory with thousands of entries does not create thousands of
+/// Slint rows at once. Full operations such as recursive download/delete still
+/// use `list_dir_impl` and are not affected by this UI cap.
+async fn list_tree_children_impl(sftp: &SftpSession, path: &str) -> Result<Vec<TreeChild>> {
+    list_tree_children_page_impl(sftp, path, SFTP_TREE_CHILD_LIMIT).await
+}
+
+async fn list_tree_children_page_impl(
+    sftp: &SftpSession,
+    path: &str,
+    visible: usize,
+) -> Result<Vec<TreeChild>> {
     let entries = list_dir_impl(sftp, path).await?;
-    Ok(entries
+    let total_dirs = entries.iter().filter(|e| e.is_dir).count();
+    let shown_dirs = visible.min(total_dirs);
+    let children: Vec<TreeChild> = entries
         .into_iter()
         .filter(|e| e.is_dir)
-        .map(|e| (e.name, e.full_path))
-        .collect())
+        .take(shown_dirs)
+        .map(|e| TreeChild {
+            path: e.full_path,
+            is_dir: true,
+        })
+        .collect();
+    Ok(with_tree_load_more(path, children, total_dirs, shown_dirs))
 }
 
 /// Emit a transfer-progress event.
@@ -1995,41 +2669,42 @@ async fn download_dir(
     handle: &client::Handle<SftpClientHandler>,
     remote_root: &str,
     local_parent: &str,
+    id: &str,
     events: &UnboundedSender<SessionEvent>,
-) -> Result<()> {
-    // Folder transfers aren't individually cancellable from the UI; a throwaway
-    // never-set flag satisfies download_impl's signature.
-    let no_cancel = Arc::new(AtomicBool::new(false));
+    cancel: &Arc<AtomicBool>,
+) -> Result<bool> {
     let root_name = sanitize_filename(&base_name(remote_root));
     let root_local = format!("{}/{}", local_parent.trim_end_matches('/'), root_name);
     // (remote_dir, local_dir) pairs still to mirror.
     let mut stack = vec![(remote_root.trim_end_matches('/').to_string(), root_local)];
     while let Some((rdir, ldir)) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            emit_transfer(events, id, &root_name, false, 0, 0, 4, t("已取消", "Cancelled"));
+            return Ok(false);
+        }
         tokio::fs::create_dir_all(&ldir)
             .await
             .with_context(|| format!("create local dir {ldir}"))?;
         for entry in list_dir_impl(sftp, &rdir).await? {
+            if cancel.load(Ordering::Relaxed) {
+                emit_transfer(events, id, &root_name, false, 0, 0, 4, t("已取消", "Cancelled"));
+                return Ok(false);
+            }
             if entry.is_dir {
                 let child_local = format!("{}/{}", ldir, sanitize_filename(&entry.name));
                 stack.push((entry.full_path, child_local));
             } else {
                 let fname = sanitize_filename(&entry.name);
                 let lpath = format!("{}/{}", ldir, fname);
-                let id = Uuid::new_v4().to_string();
-                download_impl(
-                    handle,
-                    &entry.full_path,
-                    &lpath,
-                    &fname,
-                    &id,
-                    events,
-                    &no_cancel,
-                )
-                .await?;
+                if !download_impl(handle, &entry.full_path, &lpath, &fname, id, events, cancel)
+                    .await?
+                {
+                    return Ok(false);
+                }
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Recursively remove a remote directory tree (#50 follow-up).
@@ -2072,21 +2747,28 @@ async fn upload_dir(
     sftp: &SftpSession,
     local_root: &Path,
     remote_parent: &str,
+    id: &str,
     events: &UnboundedSender<SessionEvent>,
-) -> Result<()> {
-    // Folder uploads aren't individually cancellable from the UI; a throwaway
-    // never-set flag satisfies upload_pipelined's signature.
-    let no_cancel = Arc::new(AtomicBool::new(false));
+    cancel: &Arc<AtomicBool>,
+) -> Result<bool> {
     let root_name = local_file_name_utf8(local_root)?;
     let remote_root = format!("{}/{}", remote_parent.trim_end_matches('/'), root_name);
     let mut stack = vec![(local_root.to_path_buf(), remote_root)];
     while let Some((ldir, rdir)) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            emit_transfer(events, id, &root_name, true, 0, 0, 4, t("已取消", "Cancelled"));
+            return Ok(false);
+        }
         // Best-effort mkdir; an error usually just means the dir already exists.
         let _ = sftp.create_dir(&rdir).await;
         let mut rd = tokio::fs::read_dir(&ldir)
             .await
             .with_context(|| format!("read local dir {}", ldir.display()))?;
         while let Some(entry) = rd.next_entry().await.context("read dir entry")? {
+            if cancel.load(Ordering::Relaxed) {
+                emit_transfer(events, id, &root_name, true, 0, 0, 4, t("已取消", "Cancelled"));
+                return Ok(false);
+            }
             let lpath = entry.path();
             let name = local_file_name_utf8(&lpath)?;
             let rchild = format!("{}/{}", rdir, name);
@@ -2094,12 +2776,13 @@ async fn upload_dir(
             if ft.is_dir() {
                 stack.push((lpath, rchild));
             } else if ft.is_file() {
-                let id = Uuid::new_v4().to_string();
-                upload_pipelined(handle, &lpath, &rchild, &name, &id, events, &no_cancel).await?;
+                if !upload_pipelined(handle, &lpath, &rchild, &name, id, events, cancel).await? {
+                    return Ok(false);
+                }
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Pipelined SFTP upload (#16).
@@ -2376,5 +3059,73 @@ mod sanitize_tests {
             validate_editor_text("第一行\nsecond line\n".as_bytes().to_vec()),
             Ok("第一行\nsecond line\n".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod dir_list_cache_tests {
+    use super::{DirListCache, RemoteEntry};
+
+    fn entry(name: &str) -> RemoteEntry {
+        RemoteEntry {
+            name: name.to_string(),
+            full_path: format!("/data/{name}"),
+            is_dir: false,
+            size: 0,
+            modified: 0,
+            mode: 0,
+            owner: String::new(),
+            group: String::new(),
+        }
+    }
+
+    #[test]
+    fn returns_cached_entries_for_same_path() {
+        let mut cache = DirListCache::default();
+        cache.store("/data", vec![entry("a")]);
+
+        let cached = cache.get("/data").expect("cache hit");
+
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].name, "a");
+    }
+
+    #[test]
+    fn replacing_path_updates_cached_entries() {
+        let mut cache = DirListCache::default();
+        cache.store("/data", vec![entry("old")]);
+        cache.store("/data", vec![entry("new")]);
+
+        let cached = cache.get("/data").expect("cache hit");
+
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].name, "new");
+    }
+
+    #[test]
+    fn invalidate_path_and_descendants_removes_stale_entries() {
+        let mut cache = DirListCache::default();
+        cache.store("/data", vec![entry("root")]);
+        cache.store("/data/nested", vec![entry("child")]);
+        cache.store("/other", vec![entry("other")]);
+
+        cache.invalidate_path_and_descendants("/data");
+
+        assert!(cache.get("/data").is_none());
+        assert!(cache.get("/data/nested").is_none());
+        assert!(cache.get("/other").is_some());
+    }
+
+    #[test]
+    fn keeps_at_most_64_directories() {
+        let mut cache = DirListCache::default();
+
+        for i in 0..65 {
+            cache.store(format!("/dir-{i}"), vec![entry(&format!("file-{i}"))]);
+        }
+
+        assert_eq!(cache.len(), 64);
+        assert!(cache.get("/dir-0").is_none());
+        assert!(cache.get("/dir-64").is_some());
     }
 }

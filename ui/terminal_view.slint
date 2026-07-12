@@ -1,7 +1,8 @@
 import { Theme } from "theme.slint";
 import { SftpPanel, SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
 import { TabInfo } from "tabs.slint";
-import { DockExpandButton, ToolStrip } from "widgets.slint";
+import { AutoScrollTextInput, DockExpandButton, ToolStrip } from "widgets.slint";
+import { LineEdit, Button, ListView } from "std-widgets.slint";
 
 // Embed the terminal fonts here too so the cell-probe Text below measures
 // with the CORRECT font (the built-in Meatshell Mono), not a system fallback.
@@ -88,178 +89,36 @@ component MenuItem inherits Rectangle {
     }
 }
 
-// Persistent, resizable quick-command panel (#215). It deliberately shares the
-// same model/actions as the command-bar popup; docking only adds another view.
-export component QuickDockPanel inherits Rectangle {
-    in property <[QuickCmd]> commands;
-    in property <string> dock-edge: "right";
-    callback activate(string, bool /* send-enter */);
-    callback toggle-group(string);
-    callback manage();
-    callback close();
-    callback dock-drag-move(length, length);
-    callback dock-drag-end();
-
-    background: Theme.bg-panel;
-    border-width: 1px;
-    border-color: Theme.border-subtle;
-    clip: true;
-
-    VerticalLayout {
-        spacing: 0;
-        Rectangle {
-            height: 34px;
-            background: Theme.bg-panel-alt;
-            drag-area := TouchArea {
-                mouse-cursor: grab;
-                moved => {
-                    if (self.pressed) {
-                        root.dock-drag-move(self.absolute-position.x + self.mouse-x,
-                                            self.absolute-position.y + self.mouse-y);
-                    }
-                }
-                pointer-event(ev) => {
-                    if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
-                }
-            }
-            HorizontalLayout {
-                padding-left: 8px; padding-right: 4px; spacing: 6px;
-                Text {
-                    text: "\u{E25D}";
-                    font-family: "Material Icons";
-                    color: Theme.text-muted; font-size: Theme.fs-md;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: @tr("Quick commands");
-                    color: Theme.text-primary; font-size: Theme.fs-sm;
-                    font-weight: 700; vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-                Rectangle {
-                    width: 28px;
-                    background: close-ta.has-hover ? Theme.bg-hover : transparent;
-                    border-radius: Theme.radius-sm;
-                    close-ta := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
-                    Text {
-                        text: root.dock-edge == "right" ? "\u{E5CC}"
-                            : root.dock-edge == "top" ? "\u{E5CE}"
-                            : root.dock-edge == "bottom" ? "\u{E5CF}"
-                            : "\u{E5CB}";
-                        font-family: "Material Icons";
-                        color: Theme.text-secondary; font-size: Theme.fs-md;
-                        horizontal-alignment: center; vertical-alignment: center;
-                    }
-                }
-            }
-        }
-
-        Flickable {
-            vertical-stretch: 1;
-            viewport-width: self.width;
-            viewport-height: max(self.height, list.preferred-height);
-            list := VerticalLayout {
-                padding: 6px; spacing: 2px; alignment: start;
-                if root.commands.length == 0 : Text {
-                    height: 36px;
-                    text: @tr("No quick commands yet");
-                    color: Theme.text-muted; font-size: Theme.fs-xs;
-                    horizontal-alignment: center; vertical-alignment: center;
-                }
-                for q in root.commands : VerticalLayout {
-                    spacing: 1px;
-                    if q.group-header != "" : Rectangle {
-                        height: 26px;
-                        border-radius: Theme.radius-sm;
-                        background: group-ta.has-hover ? Theme.bg-hover : transparent;
-                        group-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.toggle-group(q.group); }
-                        }
-                        HorizontalLayout {
-                            padding-left: 6px; padding-right: 6px; spacing: 5px;
-                            Text {
-                                text: q.collapsed ? "\u{E5CC}" : "\u{E5CF}";
-                                font-family: "Material Icons";
-                                color: Theme.text-muted; font-size: Theme.fs-sm;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: q.group; color: Theme.text-muted;
-                                font-size: Theme.fs-xs; font-weight: 700;
-                                vertical-alignment: center; overflow: elide;
-                                horizontal-stretch: 1;
-                            }
-                        }
-                    }
-                    if !q.collapsed && q.orig-index >= 0 : Rectangle {
-                        height: max(44px, item-col.preferred-height + 8px);
-                        border-radius: Theme.radius-sm;
-                        background: item-ta.has-hover ? Theme.bg-hover : transparent;
-                        item-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.activate(q.command, q.send-enter); }
-                        }
-                        item-col := VerticalLayout {
-                            padding-left: 9px; padding-right: 9px;
-                            padding-top: 4px; padding-bottom: 4px; spacing: 1px;
-                            Text {
-                                text: q.name; color: Theme.text-primary;
-                                font-size: Theme.fs-sm; wrap: word-wrap;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: q.command; color: Theme.text-muted;
-                                font-size: Theme.fs-xs; overflow: elide;
-                                font-family: Theme.ui-font-family;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Rectangle {
-            height: 32px;
-            background: manage-ta.has-hover ? Theme.bg-hover : Theme.bg-panel-alt;
-            manage-ta := TouchArea { mouse-cursor: pointer; clicked => { root.manage(); } }
-            Text {
-                text: @tr("Manage…"); color: Theme.accent; font-size: Theme.fs-sm;
-                horizontal-alignment: center; vertical-alignment: center;
-            }
-        }
-    }
-}
-
 // --- TerminalView ----------------------------------------------------------
 
 export component TerminalView inherits Rectangle {
-    in property <bool> active: true;
-    in property <bool> quick-sidebar-enabled: false;
-    in property <bool> quick-panel-docked: false;
-    in property <string> quick-external-command;
-    in property <bool> quick-external-send-enter;
-    in property <int> quick-external-sequence;
     in property <string> tab-id;
     in property <string> status-line: @tr("Not connected");
     in property <[TermSpan]> spans;     // coloured runs of the visible screen
     in property <int> cursor-row;       // cursor cell (grid coords)
     in property <int> cursor-col;
-    in property <string> cursor-style: "block";
-    in property <color> cursor-color: Theme.term-fg;
     in property <int> rows-used;        // content rows, for viewport sizing
     in property <int> scroll-max;       // scrollback depth (max offset) (#103)
     in property <int> scroll-offset;    // current offset (0 = live bottom) (#103)
     in property <bool>   is-alt-screen;
     in property <[TermMatch]> find-matches; // search-highlight rectangles
     in property <[TermMatch]> selection;    // drag-selection highlight rectangles
+    // Terminal shortcut preference. false = standard terminal behavior
+    // (Ctrl+C interrupts, Ctrl+Shift+C copies). true = swapped behavior
+    // (Ctrl+C copies, Ctrl+Shift+C interrupts).
+    in property <bool> ctrl-c-copy: false;
+    in property <bool> lang-en: false;
+    // Focus sink for popup cards; terminal clicks still focus ime-input.
+    input-blur-scope := FocusScope {}
 
     in property <string>  sftp-path: "/";
     in property <[SftpEntry]> sftp-entries;
     in property <string>  sftp-status: "";
     in property <bool>    sftp-loading: false;
     in property <[SftpTreeNode]> sftp-tree-nodes: [];
+    in property <[SftpTreeNode]> sftp-move-tree-nodes: [];
+    in property <int> sftp-tree-focus-index: -1;
+    in property <int> sftp-move-tree-focus-index: -1;
     in property <[TabInfo]> sftp-transfer-targets: [];
     in property <string> sftp-sort-key: "";
     in property <int> sftp-sort-dir: 0;
@@ -302,15 +161,16 @@ export component TerminalView inherits Rectangle {
     in property <[string]> history-view;       // filtered dropdown, newest first (#101, #331)
     property <bool> send-to-all: false;
     property <bool> quick-open: false;         // quick-command popup visibility
+    property <int> pending-qcmd-edit-index: -1; // defer quick-command edit outside PopupWindow click event
+    property <bool> pending-qcmd-manage: false; // defer manage dialog outside quick panel click event
     property <bool> history-open: false;       // history dropdown visibility
+    property <bool> history-scroll-pending: false;
     property <int> history-cursor: -1;         // ↑/↓ recall index (-1 = live input)
     // Keyboard-driven selection in the open history dropdown (#140): ↑/↓ move it,
     // Enter runs history-view[history-selected].
     property <int> history-selected: 0;
     callback run-command(string /* cmd */, bool /* to-all */);
     callback manage-quick-commands();          // open the add/edit/delete dialog
-    callback quick-dock-drag-move(length, length);
-    callback quick-dock-drag-end();
     callback toggle-quick-group(string /* group */);  // collapse/expand a group (#55)
     // Right-click management on the popup, mirroring the welcome session list (#55).
     callback edit-quick-command(int /* index */);
@@ -330,13 +190,27 @@ export component TerminalView inherits Rectangle {
     callback terminal-resize(float, float);
     callback sftp-navigate(string);
     callback sftp-download(string);
+    callback sftp-archive-download(string);
     callback sftp-upload-clicked(string, bool);
     callback sftp-refresh(string);
-    callback sftp-tree-expand(string);
+    callback sftp-load-more();
+    callback sftp-load-all();
+    callback sftp-sort(string, bool);
+    callback sftp-tree-expand(string, bool);
+    callback sftp-move-tree-expand(string, bool);
+    callback sftp-tree-probe(string);
+    callback sftp-tree-load-more(string);
+    callback sftp-move-tree-load-more(string);
+    callback sftp-tree-reveal(string);
+    callback sftp-move-tree-reveal(string);
     callback sftp-delete(string);
     in property <int> sftp-selected-count;          // checked-entry count (#100)
     callback sftp-toggle-select(int);               // toggle a row's checkbox (#100)
+    callback sftp-select-single(int);
+    callback sftp-select-range(int, int, bool);
+    callback sftp-select-all();
     callback sftp-download-selected();              // download checked entries (#100)
+    callback sftp-archive-download-selected();       // tar checked entries into one archive
     callback sftp-delete-selected();                // delete checked entries (#100)
     callback sftp-copy-to-target(string, string);
     callback sftp-copy-selected-to-target(string);
@@ -344,16 +218,36 @@ export component TerminalView inherits Rectangle {
     callback sftp-edit(string);
     callback sftp-open-external(string);
     callback sftp-edit-external(string);
-    callback sftp-sort-request(string);
-    callback sftp-clear-sort();
     callback tunnel-add(string, string, string, string, string, string);
     callback tunnel-stop(string);
+    callback clear-failed-tunnels();
     // Context-menu extensions (#69), forwarded up to the app shell.
     callback sftp-rename-request(string, string);
+    callback sftp-rename-submit(string, string);
     callback sftp-chmod-request(string, string, int);
     callback sftp-copy-path(string);
     callback sftp-new-folder(string);
     callback sftp-new-file(string);
+    callback sftp-move-submit(string /* source path */, string /* target dir */);
+    callback sftp-move-selected-submit(string /* target dir */);
+    property <bool> sftp-move-open: false;
+    property <bool> sftp-move-focus-pending: false;
+    property <bool> sftp-move-scroll-pending: false;
+    changed sftp-move-open => { root.sftp-move-focus-pending = root.sftp-move-open; }
+    changed sftp-move-tree-nodes => { root.sftp-move-scroll-pending = root.sftp-move-open; }
+    property <string> sftp-move-source;
+    property <string> sftp-move-name;
+    property <string> sftp-move-target;
+    property <bool> sftp-move-batch;
+    property <length> sftp-move-w: min(480px, root.width - 32px);
+    property <length> sftp-move-h: min(520px, root.height - 32px);
+    property <length> sftp-move-x: (root.width - root.sftp-move-w) / 2;
+    property <length> sftp-move-y: (root.height - root.sftp-move-h) / 2;
+    property <bool> sftp-move-dragging;
+    property <length> sftp-move-base-x;
+    property <length> sftp-move-base-y;
+    property <length> sftp-move-grab-x;
+    property <length> sftp-move-grab-y;
     callback paste-from-clipboard();
     callback copy-terminal-text();
     callback clear-terminal();              // wipe this session's screen buffer
@@ -383,17 +277,6 @@ export component TerminalView inherits Rectangle {
     // construction (on new TerminalView instantiation) finishes before focus
     // changes — avoids RefCell re-entry panic in WinitWindowAdapter (#AccessKit).
     property <bool> focus-pending: false;
-
-    changed quick-external-sequence => {
-        if (root.active) {
-            if (root.quick-external-send-enter) {
-                root.run-command(root.quick-external-command, root.send-to-all);
-            } else {
-                cmd-input.text = root.quick-external-command;
-                cmd-input.focus();
-            }
-        }
-    }
 
     background: Theme.term-bg;
     forward-focus: ime-input;
@@ -479,7 +362,11 @@ export component TerminalView inherits Rectangle {
     // Reset the history filter whenever the dropdown opens; the search box itself
     // is recreated empty because the `if` subtree is destroyed on close (#101).
     changed history-open => {
-        if (root.history-open) { root.search-history(""); root.history-selected = 0; }
+        if (root.history-open) {
+            root.search-history("");
+            root.history-selected = max(0, root.history-view.length - 1);
+            root.history-scroll-pending = true;
+        }
     }
     changed visible => {
         if (self.visible) {
@@ -487,6 +374,23 @@ export component TerminalView inherits Rectangle {
             // Re-sync the PTY size on return (it was frozen while hidden).
             if (root.has-real-size) {
                 root.terminal-resize(root.term-cols, root.term-rows);
+            }
+        }
+    }
+
+    qcmd-action-defer-timer := Timer {
+        interval: 30ms;
+        running: root.pending-qcmd-edit-index >= 0 || root.pending-qcmd-manage;
+        triggered => {
+            if (root.pending-qcmd-edit-index >= 0) {
+                root.quick-open = false;
+                root.edit-quick-command(root.pending-qcmd-edit-index);
+                root.pending-qcmd-edit-index = -1;
+            }
+            if (root.pending-qcmd-manage) {
+                root.quick-open = false;
+                root.pending-qcmd-manage = false;
+                root.manage-quick-commands();
             }
         }
     }
@@ -518,17 +422,6 @@ export component TerminalView inherits Rectangle {
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
-                // Alt-screen indicator only.  IMPORTANT: never put cell-w / cell-h
-                // (a Text's preferred-size) inside another Text's `text` — doing so
-                // makes Slint compute one text layout *inside* another, which
-                // re-enters parley's FontContext RefCell and panics ("already
-                // borrowed").  A plain bool flag is safe.
-                if root.is-alt-screen : Text {
-                    text: "[ALT]";
-                    color: Theme.success;
-                    font-size: Theme.fs-xs;
-                    vertical-alignment: center;
-                }
             }
         }
 
@@ -539,13 +432,8 @@ export component TerminalView inherits Rectangle {
         vertical-stretch: 1;
         // Collapsed → shrink to the 36px ToolStrip icon bar at the docked edge
         // (M5), click its icon to re-expand. The 4px splitter is gone collapsed.
-        // Side-docked SFTP needs enough room for its compact action row and a
-        // usable path field. Clamp legacy/saved widths below that floor instead
-        // of letting Slint squeeze controls out of alignment.
-        property <length> sf-w: root.sftp-collapsed ? 36px
-            : root.sftp-horizontal ? max(300px, root.sftp-panel-width)
-            : root.sftp-panel-width;
-        property <length> sf-h: root.sftp-collapsed ? 36px : root.sftp-panel-height;
+        property <length> sf-w: root.sftp-collapsed ? (root.sftp-horizontal ? 40px : 36px) : root.sftp-panel-width;
+        property <length> sf-h: root.sftp-collapsed ? (root.sftp-horizontal ? 40px : 36px) : root.sftp-panel-height;
         property <length> sp:   root.sftp-collapsed ? 0px : 4px;
         // The collapsed bar (sf-h) already reserves the bottom strip now.
         property <length> bottom-strip-h: 0px;
@@ -767,19 +655,13 @@ export component TerminalView inherits Rectangle {
                             }
                         }
 
-                        // Blinking cursor (overlay, decoupled from text). Its
-                        // shape follows the persisted user preference (#275).
+                        // Blinking block cursor (overlay, decoupled from text).
                         Rectangle {
-                            // The VT cursor already names the active grid cell.
-                            // A bar belongs on that cell's leading edge too;
-                            // shifting it one column in alternate-screen apps put
-                            // it after ASCII glyphs and inside wide CJK cells (#319).
                             x: root.cursor-col * root.cell-w;
-                            y: root.cursor-row * root.cell-h
-                                + (root.cursor-style == "underline" ? max(0px, root.cell-h - max(2px, root.cell-h / 8)) : 0px);
-                            width: root.cursor-style == "bar" ? max(2px, root.cell-w / 8) : root.cell-w;
-                            height: root.cursor-style == "underline" ? max(2px, root.cell-h / 8) : root.cell-h;
-                            background: root.cursor-color;
+                            y: root.cursor-row * root.cell-h;
+                            width: root.cell-w;
+                            height: root.cell-h;
+                            background: Theme.term-fg;
                             // Blink while focused; show solid (no repaint) when the
                             // window is unfocused so the cursor neither vanishes nor
                             // keeps the window repainting (#127).
@@ -917,10 +799,6 @@ export component TerminalView inherits Rectangle {
                 width: 1px;
                 height: 1px;
                 opacity: 0;
-                // Opacity does not suppress Slint's focused TextInput caret on
-                // every renderer. This input exists only as a keyboard/IME
-                // anchor; the terminal cursor above is the sole visible caret.
-                text-cursor-width: 0px;
                 single-line: true;
 
                 // Reset blink phase on focus gain so cursor appears immediately.
@@ -929,10 +807,6 @@ export component TerminalView inherits Rectangle {
                 }
 
                 key-pressed(event) => {
-                    // Keep the caret visible while typing or moving it. Without
-                    // this reset an old blink phase can hide the cursor halfway
-                    // through a repeated arrow-key sequence (#319).
-                    key-capture.cursor-blink = true;
                     // ⚠ macOS modifier naming is SWAPPED by Slint (see the winit
                     // backend's muda.rs): `event.modifiers.control` is the **Cmd (⌘)**
                     // key and `event.modifiers.meta` is the **physical Ctrl** key.
@@ -957,9 +831,13 @@ export component TerminalView inherits Rectangle {
                                 || event.text == "\u{0012}")) {
                         root.history-open = true;
                         accept
-                    // ── Copy: ⌘C (macOS, no Shift) / Ctrl+Shift+C ──
+                    // ── Copy: configurable on Windows/Linux.
+                    // Standard: Ctrl+Shift+C copies and Ctrl+C reaches the shell as ^C.
+                    // Swapped: Ctrl+C copies and Ctrl+Shift+C reaches the shell as ^C.
+                    // macOS keeps ⌘C for copy so physical Ctrl+C still reaches the shell.
                     } else if (event.modifiers.control
-                            && (Theme.is-mac ? !event.modifiers.shift : event.modifiers.shift)
+                            && (Theme.is-mac ? !event.modifiers.shift
+                                             : (root.ctrl-c-copy ? !event.modifiers.shift : event.modifiers.shift))
                             && (event.text == "c" || event.text == "C"
                                 || event.text == "\u{0003}")) {
                         root.copy-terminal-text();
@@ -1064,19 +942,17 @@ export component TerminalView inherits Rectangle {
                         background: Theme.bg-root;
                         border-radius: 3px;
                         horizontal-stretch: 1;
-                        find-input := TextInput {
+                        find-input := AutoScrollTextInput {
                             x: 6px;
                             width: parent.width - 12px;
                             height: parent.height;
-                            color: Theme.text-primary;
+                            text-color: Theme.text-primary;
                             font-family: Theme.ui-font-family; // CJK-capable (#54)
                             font-size: Theme.fs-md;
-                            vertical-alignment: center;
-                            single-line: true;
                             // Grab focus as soon as the bar appears.
-                            init => { self.focus(); }
+                            auto-focus: true;
                             edited => { root.find-query-changed(self.text); }
-                            key-pressed(e) => {
+                            input-key-pressed(e) => {
                                 if (e.text == "\u{001b}") {       // Esc closes find
                                     root.find-active = false;
                                     root.find-query-changed("");
@@ -1115,7 +991,7 @@ export component TerminalView inherits Rectangle {
 
         // --- Command bar (#55): quick commands + input box + history ---------
         cmd-bar := Rectangle {
-            height: 34px;
+            height: 36px;
             background: Theme.bg-panel-alt;
             border-width: 0;
 
@@ -1123,17 +999,16 @@ export component TerminalView inherits Rectangle {
             // anywhere out of an open popup dismisses it.
             if root.quick-open || root.history-open : TouchArea {
                 x: 0; y: -2000px; width: parent.width; height: 2000px;
-                clicked => { root.quick-open = false; root.history-open = false; }
+                clicked => { root.quick-open = false; root.history-open = false; ime-input.focus(); }
             }
 
             HorizontalLayout {
                 padding-left: 8px; padding-right: 8px;
-                padding-top: 4px; padding-bottom: 4px;
+                padding-top: 5px; padding-bottom: 5px;
                 spacing: 6px;
 
-                // Quick-command toggle. Once the sidebar has been docked, the
-                // sidebar/icon strip becomes its only entry point (#215).
-                if !root.quick-panel-docked : Rectangle {
+                // Quick-command toggle.
+                Rectangle {
                     width: qc-row.preferred-width + 16px;
                     border-radius: Theme.radius-sm;
                     background: qc-ta.has-hover || root.quick-open ? Theme.bg-hover : Theme.bg-elevated;
@@ -1159,42 +1034,35 @@ export component TerminalView inherits Rectangle {
                     border-width: 1px;
                     border-color: cmd-input.has-focus ? Theme.accent : Theme.border-subtle;
                     background: Theme.bg-root;
-                    cmd-input := TextInput {
+                    cmd-input := AutoScrollTextInput {
                         x: 8px;
                         width: parent.width - 16px;
                         height: parent.height;
-                        color: Theme.text-primary;
+                        text-color: Theme.text-primary;
                         font-family: Theme.ui-font-family;
                         font-size: Theme.fs-md;
-                        vertical-alignment: center;
-                        // Preserve pasted newlines. A single-line input rewrites
-                        // them as spaces and corrupts heredoc terminators before
-                        // run-command receives the text (#319).
-                        single-line: false;
                         // Enter sends; ↑/↓ recall history.
                         accepted => {
                             root.run-command(self.text, root.send-to-all);
                             self.text = "";
                             root.history-cursor = -1;
                         }
-                        key-pressed(e) => {
-                            if (e.text == Key.Return && !e.modifiers.shift) {
-                                root.run-command(self.text, root.send-to-all);
-                                self.text = "";
-                                root.history-cursor = -1;
-                                accept
-                            // ⌘R / Ctrl+R opens the searchable history dropdown and
-                            // focuses its search box — full keyboard history recall
-                            // (#140). Esc closes it / returns to terminal. (The
-                            // Ctrl+A/E/K/U line-editing below stays on Ctrl — those
-                            // are the standard readline bindings on macOS too.)
-                            } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
+                        input-key-pressed(e) => {
+                            // Cmd/Ctrl+R opens the searchable history dropdown.
+                            // The command box follows regular text-field editing
+                            // shortcuts; terminal/readline shortcuts stay in the
+                            // real terminal above.
+                            if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
                                     && (e.text == Key.Tab || e.text == Key.Backtab)) {
                                 root.cycle-tab(e.modifiers.shift || e.text == Key.Backtab);
                                 accept
                             } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
                                     && (e.text == "r" || e.text == "R" || e.text == "\u{0012}")) {
                                 root.history-open = true;
+                                accept
+                            } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
+                                    && (e.text == "a" || e.text == "A" || e.text == "\u{0001}")) {
+                                self.select-all();
                                 accept
                             } else if (e.text == Key.Escape) {
                                 if (root.history-open) { root.history-open = false; }
@@ -1221,25 +1089,6 @@ export component TerminalView inherits Rectangle {
                                         self.text = "";
                                     }
                                 }
-                                accept
-                            // --- readline line-editing keys (#103) ---
-                            // Ctrl+A → start of line.
-                            } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control) && (e.text =="a" || e.text == "A" || e.text == "\u{0001}")) {
-                                self.set-selection-offsets(0, 0);
-                                accept
-                            // Ctrl+E → end of line.
-                            } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control) && (e.text =="e" || e.text == "E" || e.text == "\u{0005}")) {
-                                self.set-selection-offsets(1000000, 1000000);
-                                accept
-                            // Ctrl+K → kill from cursor to end (deletes + clipboard).
-                            } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control) && (e.text =="k" || e.text == "K" || e.text == "\u{000B}")) {
-                                self.set-selection-offsets(self.cursor-position_byte-offset, 1000000);
-                                self.cut();
-                                accept
-                            // Ctrl+U → kill from start to cursor.
-                            } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control) && (e.text =="u" || e.text == "U" || e.text == "\u{0015}")) {
-                                self.set-selection-offsets(0, self.cursor-position_byte-offset);
-                                self.cut();
                                 accept
                             } else {
                                 reject
@@ -1321,7 +1170,7 @@ export component TerminalView inherits Rectangle {
                 border-color: Theme.border-strong;
                 drop-shadow-blur: 16px;
                 drop-shadow-color: #00000070;
-                TouchArea {}  // swallow clicks
+                TouchArea { clicked => { ime-input.focus(); } }  // swallow clicks and blur inputs
                 Flickable {
                     viewport-width: self.width;
                     viewport-height: max(self.height, qc-col.preferred-height);
@@ -1417,7 +1266,7 @@ export component TerminalView inherits Rectangle {
                                             // Only fill the input box so it can be
                                             // tweaked before sending (B站 suggestion).
                                             cmd-input.text = q.command;
-                                            cmd-input.focus();
+                                            cmd-input.focus-input();
                                         }
                                         root.quick-open = false;
                                     }
@@ -1450,7 +1299,7 @@ export component TerminalView inherits Rectangle {
                                             padding: 4px; spacing: 1px;
                                             Rectangle { height: 28px; border-radius: Theme.radius-sm;
                                                 background: pi-edit-ta.has-hover ? Theme.bg-hover : transparent;
-                                                pi-edit-ta := TouchArea { mouse-cursor: pointer; clicked => { root.quick-open = false; root.edit-quick-command(q.orig-index); } }
+                                                pi-edit-ta := TouchArea { mouse-cursor: pointer; clicked => { qpop-ctx-menu.close(); root.pending-qcmd-edit-index = q.orig-index; } }
                                                 HorizontalLayout { padding-left: 10px; spacing: 8px;
                                                     Text { text: "\u{E3C9}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
                                                     Text { text: @tr("Edit"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
@@ -1493,46 +1342,14 @@ export component TerminalView inherits Rectangle {
                         // Manage entry.
                         Rectangle {
                             height: 30px;
-                            HorizontalLayout {
-                                spacing: 2px;
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: Theme.radius-sm;
-                                    background: mng-ta.has-hover ? Theme.bg-hover : transparent;
-                                    mng-ta := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.quick-open = false; root.manage-quick-commands(); }
-                                    }
-                                    Text { text: @tr("Manage…"); color: Theme.accent; font-size: Theme.fs-sm;
-                                           horizontal-alignment: center; vertical-alignment: center; }
-                                }
-                                if root.quick-sidebar-enabled : Rectangle {
-                                    width: 34px;
-                                    border-radius: Theme.radius-sm;
-                                    background: quick-grip.has-hover ? Theme.bg-hover : transparent;
-                                    quick-grip := TouchArea {
-                                        mouse-cursor: grab;
-                                        moved => {
-                                            if (self.pressed) {
-                                                root.quick-dock-drag-move(
-                                                    self.absolute-position.x + self.mouse-x,
-                                                    self.absolute-position.y + self.mouse-y);
-                                            }
-                                        }
-                                        pointer-event(ev) => {
-                                            if (ev.kind == PointerEventKind.up) {
-                                                root.quick-open = false;
-                                                root.quick-dock-drag-end();
-                                            }
-                                        }
-                                    }
-                                    Text {
-                                        text: "\u{E25D}"; font-family: "Material Icons";
-                                        color: Theme.text-secondary; font-size: Theme.fs-md;
-                                        horizontal-alignment: center; vertical-alignment: center;
-                                    }
-                                }
+                            border-radius: Theme.radius-sm;
+                            background: mng-ta.has-hover ? Theme.bg-hover : transparent;
+                            mng-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.pending-qcmd-manage = true; }
                             }
+                            Text { text: @tr("Manage…"); color: Theme.accent; font-size: Theme.fs-sm;
+                                   horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -1550,17 +1367,32 @@ export component TerminalView inherits Rectangle {
                 border-color: Theme.border-strong;
                 drop-shadow-blur: 16px;
                 drop-shadow-color: #00000070;
-                TouchArea {}
+                TouchArea { clicked => { ime-input.focus(); } }
                 VerticalLayout {
                     padding: 4px;
                     spacing: 4px;
                     // History list fills the popup; the search box is pinned at the
                     // bottom (next to the command input) so it stays in a fixed,
                     // easy-to-find spot no matter how tall the list is (#131).
-                    Flickable {
+                    hist-flick := Flickable {
                     vertical-stretch: 1;
                     viewport-width: self.width;
                     viewport-height: max(self.height, h-col.preferred-height);
+                    init => { root.history-scroll-pending = true; }
+                    changed viewport-height => {
+                        self.viewport-y = min(0px, self.height - self.viewport-height);
+                    }
+                    changed height => {
+                        self.viewport-y = min(0px, self.height - self.viewport-height);
+                    }
+                    history-scroll-timer := Timer {
+                        interval: 1ms;
+                        running: root.history-scroll-pending;
+                        triggered => {
+                            hist-flick.viewport-y = min(0px, hist-flick.height - hist-flick.viewport-height);
+                            root.history-scroll-pending = false;
+                        }
+                    }
                     h-col := VerticalLayout {
                         padding: 4px;
                         alignment: start;
@@ -1581,7 +1413,7 @@ export component TerminalView inherits Rectangle {
                                 clicked => {
                                     cmd-input.text = h;
                                     root.history-open = false;
-                                    cmd-input.focus();
+                                    cmd-input.focus-input();
                                 }
                             }
                             HorizontalLayout {
@@ -1657,19 +1489,21 @@ export component TerminalView inherits Rectangle {
                                    vertical-alignment: center; }
                             Rectangle {
                                 horizontal-stretch: 1;
-                                hist-search := TextInput {
+                                hist-search := AutoScrollTextInput {
                                     width: 100%; height: 100%;
-                                    vertical-alignment: center;
-                                    color: Theme.text-primary;
+                                    text-color: Theme.text-primary;
                                     font-family: Theme.ui-font-family;
                                     font-size: Theme.fs-sm;
-                                    single-line: true;
                                     // Auto-focus so Ctrl+R lands you typing (#140).
-                                    init => { self.focus(); }
-                                    edited => { root.search-history(self.text); root.history-selected = 0; }
+                                    auto-focus: true;
+                                    edited => {
+                                        root.search-history(self.text);
+                                        root.history-selected = max(0, root.history-view.length - 1);
+                                        root.history-scroll-pending = true;
+                                    }
                                     // ↑/↓ move the selection, Enter runs it, Esc
                                     // closes and returns focus to the terminal (#140).
-                                    key-pressed(e) => {
+                                    input-key-pressed(e) => {
                                         if (e.text == Key.Escape) {
                                             root.history-open = false;
                                             ime-input.focus();
@@ -1726,8 +1560,18 @@ export component TerminalView inherits Rectangle {
              : 0px;
             width:  root.sftp-horizontal ? 4px : parent.width;
             height: root.sftp-horizontal ? parent.height : 4px;
-            background: divider-ta.has-hover || root.sftp-dragging
+            property <bool> hover-lit;
+            property <bool> hover-pending;
+            background: self.hover-lit || root.sftp-dragging
                 ? Theme.accent : Theme.border-subtle;
+            divider-hover-timer := Timer {
+                interval: 180ms;
+                running: parent.hover-pending;
+                triggered => {
+                    parent.hover-lit = true;
+                    parent.hover-pending = false;
+                }
+            }
             divider-ta := TouchArea {
                 // Hit area extends a few px past the thin visual bar so it's easy
                 // to grab without landing on the terminal / SFTP edge.
@@ -1736,6 +1580,14 @@ export component TerminalView inherits Rectangle {
                 width:  root.sftp-horizontal ? 12px : parent.width;
                 height: root.sftp-horizontal ? parent.height : 12px;
                 mouse-cursor: root.sftp-horizontal ? ew-resize : ns-resize;
+                changed has-hover => {
+                    if (self.has-hover) {
+                        parent.hover-pending = true;
+                    } else {
+                        parent.hover-pending = false;
+                        parent.hover-lit = false;
+                    }
+                }
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.down) {
                         root.sftp-dragging = true;
@@ -1752,13 +1604,13 @@ export component TerminalView inherits Rectangle {
                 moved => {
                     if (root.sftp-dragging) {
                         if (root.sftp-horizontal) {
-                            // Floor matches SftpPanel's compact two-row toolbar;
-                            // narrower widths make the path field and actions unusable.
+                            // Floor of 150px — by then Size+Modified columns have
+                            // dropped and only Name remains; no narrower (#dock).
                             root.set-sftp-panel-width(clamp(
                                 root.sftp-dock == "right"
                                     ? dock-region.width - ((self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x)
                                     : (self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x,
-                                300px, max(310px, dock-region.width - 200px)));
+                                150px, max(160px, dock-region.width - 200px)));
                         } else {
                             root.set-sftp-panel-height(clamp(
                                 root.sftp-dock == "bottom"
@@ -1773,10 +1625,12 @@ export component TerminalView inherits Rectangle {
 
         // --- SFTP panel — positioned on the docked edge ---------------------
         if root.sftp-available : SftpPanel {
+            visible: !root.sftp-collapsed;
             x: root.sftp-dock == "right"  ? parent.width - parent.sf-w : 0px;
             y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
             width:  root.sftp-horizontal ? parent.sf-w : parent.width;
             height: root.sftp-horizontal ? parent.height : parent.sf-h;
+            dock-edge: root.sftp-dock;
             show-tree: !root.sftp-horizontal;   // hide the tree when narrow (vertical)
             compact: root.sftp-collapsed && root.sftp-horizontal;  // clean strip when side+collapsed
             dock-drag-move(ax, ay) => {
@@ -1803,6 +1657,7 @@ export component TerminalView inherits Rectangle {
             sort-key: root.sftp-sort-key;
             sort-dir: root.sftp-sort-dir;
             tunnels: root.tunnels;
+            lang-en: root.lang-en;
             toggle-collapsed => {
                 if (root.sftp-collapsed) {
                     // Re-expand; the panel height was preserved while collapsed.
@@ -1816,12 +1671,22 @@ export component TerminalView inherits Rectangle {
             }
             navigate(path)      => { root.sftp-navigate(path); }
             download(path)      => { root.sftp-download(path); }
+            archive-download(path) => { root.sftp-archive-download(path); }
             upload-clicked(dir, folder) => { root.sftp-upload-clicked(dir, folder); }
             refresh(path)       => { root.sftp-refresh(path); }
-            tree-expand(path)   => { root.sftp-tree-expand(path); }
+            load-more()         => { root.sftp-load-more(); }
+            load-all()          => { root.sftp-load-all(); }
+            sort-request(column, ascending) => { root.sftp-sort(column, ascending); }
+            tree-expand(path, was-expanded) => { root.sftp-tree-expand(path, was-expanded); }
+            tree-probe(path)    => { root.sftp-tree-probe(path); }
+            tree-load-more(path) => { root.sftp-tree-load-more(path); }
             delete(path)        => { root.sftp-delete(path); }
             toggle-select(i)    => { root.sftp-toggle-select(i); }
+            select-single(i)    => { root.sftp-select-single(i); }
+            select-range(a, i, keep) => { root.sftp-select-range(a, i, keep); }
+            select-all()        => { root.sftp-select-all(); }
             download-selected() => { root.sftp-download-selected(); }
+            archive-download-selected() => { root.sftp-archive-download-selected(); }
             delete-selected()   => { root.sftp-delete-selected(); }
             copy-to-target(path, target) => { root.sftp-copy-to-target(path, target); }
             copy-selected-to-target(target) => { root.sftp-copy-selected-to-target(target); }
@@ -1829,17 +1694,274 @@ export component TerminalView inherits Rectangle {
             edit(path)          => { root.sftp-edit(path); }
             open-external(path) => { root.sftp-open-external(path); }
             edit-external(path) => { root.sftp-edit-external(path); }
-            sort-request(key)   => { root.sftp-sort-request(key); }
-            clear-sort()        => { root.sftp-clear-sort(); }
             tunnel-add(name, kind, bind, bind-port, host, host-port) => {
                 root.tunnel-add(name, kind, bind, bind-port, host, host-port);
             }
             tunnel-stop(id)     => { root.tunnel-stop(id); }
+            clear-failed-tunnels() => { root.clear-failed-tunnels(); }
             rename-request(path, name) => { root.sftp-rename-request(path, name); }
+            rename-submit(path, name) => { root.sftp-rename-submit(path, name); }
             chmod-request(path, name, mode) => { root.sftp-chmod-request(path, name, mode); }
             copy-path(path)     => { root.sftp-copy-path(path); }
             new-folder(dir)     => { root.sftp-new-folder(dir); }
             new-file(dir)       => { root.sftp-new-file(dir); }
+            move-request(path, name) => {
+                root.sftp-move-source = path;
+                root.sftp-move-name = name;
+                root.sftp-move-batch = false;
+                root.sftp-move-target = root.sftp-path;
+                root.sftp-move-scroll-pending = true;
+                root.sftp-move-tree-reveal(root.sftp-move-target);
+                root.sftp-move-open = true;
+            }
+            move-selected-request() => {
+                root.sftp-move-source = "";
+                root.sftp-move-name = root.lang-en
+                    ? "Selected " + root.sftp-selected-count + " item(s)"
+                    : "已选择 " + root.sftp-selected-count + " 个项目";
+                root.sftp-move-batch = true;
+                root.sftp-move-target = root.sftp-path;
+                root.sftp-move-scroll-pending = true;
+                root.sftp-move-tree-reveal(root.sftp-move-target);
+                root.sftp-move-open = true;
+            }
+        }
+
+        if root.sftp-move-open : Rectangle {
+            x: 0px; y: 0px; width: parent.width; height: parent.height;
+            background: #00000080;
+            TouchArea { clicked => { root.sftp-move-open = false; } }
+            move-esc-scope := FocusScope {
+                key-pressed(e) => {
+                    if (e.text == Key.Escape) {
+                        root.sftp-move-open = false;
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+            }
+
+            move-focus-timer := Timer {
+                interval: 0ms;
+                running: root.sftp-move-focus-pending;
+                triggered => {
+                    if (root.sftp-move-open) { move-esc-scope.focus(); }
+                    root.sftp-move-focus-pending = false;
+                }
+            }
+
+            move-scroll-timer := Timer {
+                interval: 0ms;
+                running: root.sftp-move-scroll-pending;
+                triggered => {
+                    if (root.sftp-move-open && root.sftp-move-tree-focus-index >= 0) {
+                        file-move-list.viewport-y = min(0px,
+                            file-move-list.height / 2 - root.sftp-move-tree-focus-index * 28px - 14px);
+                    }
+                    root.sftp-move-scroll-pending = false;
+                }
+            }
+
+            Rectangle {
+                x: root.sftp-move-x;
+                y: root.sftp-move-y;
+                width: root.sftp-move-w;
+                height: root.sftp-move-h;
+                background: Theme.bg-panel;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #000000a0;
+                TouchArea { clicked => { move-esc-scope.focus(); } }
+
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 10px;
+                    Rectangle {
+                        height: 26px;
+                        move-title-drag := TouchArea {
+                            y: -12px;
+                            width: parent.width;
+                            height: parent.height + 12px;
+                            mouse-cursor: move;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down) {
+                                    root.sftp-move-dragging = true;
+                                    root.sftp-move-base-x = root.sftp-move-x;
+                                    root.sftp-move-base-y = root.sftp-move-y;
+                                    root.sftp-move-grab-x = self.absolute-position.x + self.mouse-x;
+                                    root.sftp-move-grab-y = self.absolute-position.y + self.mouse-y;
+                                } else if (e.kind == PointerEventKind.up) {
+                                    root.sftp-move-dragging = false;
+                                }
+                            }
+                            moved => {
+                                if (root.sftp-move-dragging) {
+                                    root.sftp-move-x = clamp(
+                                        root.sftp-move-base-x + (self.absolute-position.x + self.mouse-x - root.sftp-move-grab-x),
+                                        0px, max(0px, root.width - root.sftp-move-w));
+                                    root.sftp-move-y = clamp(
+                                        root.sftp-move-base-y + (self.absolute-position.y + self.mouse-y - root.sftp-move-grab-y),
+                                        0px, max(0px, root.height - root.sftp-move-h));
+                                }
+                            }
+                        }
+                        Text {
+                            text: root.lang-en ? "Move to..." : "移动到...";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-lg;
+                            font-weight: 700;
+                            width: parent.width;
+                            horizontal-alignment: left;
+                            vertical-alignment: center;
+                            height: parent.height;
+                        }
+                    }
+                    Text {
+                        text: root.sftp-move-name;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.lang-en ? "Target directory" : "目标目录";
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                    }
+                    Rectangle {
+                        height: 32px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: move-target-input.has-focus ? Theme.accent : Theme.border-subtle;
+                        background: Theme.bg-root;
+
+                        move-target-input := AutoScrollTextInput {
+                            x: 10px;
+                            y: 0px;
+                            width: parent.width - 20px;
+                            height: parent.height;
+                            text <=> root.sftp-move-target;
+                            text-color: Theme.text-primary;
+                            font-family: Theme.ui-font-family;
+                            font-size: Theme.fs-md;
+                            input-key-pressed(e) => {
+                                if (e.text == Key.Escape) {
+                                    root.sftp-move-open = false;
+                                    accept
+                                } else {
+                                    reject
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border-subtle;
+                    }
+                    file-move-list := ListView {
+                        vertical-stretch: 1;
+                        for node[i] in root.sftp-move-tree-nodes : row := Rectangle {
+                            height: 28px;
+                            border-radius: Theme.radius-sm;
+                            background: node.path == root.sftp-move-target ? #4a90e240 : (row-ta.has-hover ? Theme.bg-hover : transparent);
+                            row-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if (node.name == "加载全部...") {
+                                        root.sftp-move-tree-load-more(node.path);
+                                        root.sftp-move-focus-pending = true;
+                                        return;
+                                    }
+                                    root.sftp-move-target = node.path;
+                                    // Select first. For folders that have not been loaded into
+                                    // the tree cache yet, probe their children without expanding.
+                                    // The arrow appears only after the probe confirms sub-folders.
+                                    if (node.is-dir && !node.has-children && !node.expanded) {
+                                        root.sftp-tree-probe(node.path);
+                                    }
+                                    // Clicking a target row can move keyboard focus away from
+                                    // the popup-level FocusScope. Re-arm focus on the next tick
+                                    // so Esc still closes the move dialog after selecting a folder.
+                                    root.sftp-move-focus-pending = true;
+                                }
+                                double-clicked => {
+                                    if (node.name == "加载全部...") {
+                                        root.sftp-move-tree-load-more(node.path);
+                                        root.sftp-move-focus-pending = true;
+                                        return;
+                                    }
+                                    if (node.is-dir) {
+                                        root.sftp-move-tree-expand(node.path, node.expanded);
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 4px;
+                                Rectangle { width: node.depth * 16px; }
+                                Rectangle {
+                                    width: 18px;
+                                    Text {
+                                        text: node.has-children ? (node.expanded ? "\u{E5CF}" : "\u{E5CC}") : " ";
+                                        font-family: "Material Icons";
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.fs-sm;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                    }
+                                    TouchArea {
+                                        mouse-cursor: node.has-children ? pointer : default;
+                                        clicked => {
+                                            if (node.name == "加载全部...") {
+                                                root.sftp-move-tree-load-more(node.path);
+                                                root.sftp-move-focus-pending = true;
+                                                return;
+                                            }
+                                            if (node.has-children) {
+                                                root.sftp-move-tree-expand(node.path, node.expanded);
+                                            }
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: node.name == "加载全部..." ? "⏬ " + (root.lang-en ? "Load all..." : node.name) : "📁 " + node.name;
+                                    color: node.path == root.sftp-move-target ? Theme.accent : Theme.text-primary;
+                                    font-size: Theme.fs-sm;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        Button {
+                            text: @tr("Cancel");
+                            clicked => { root.sftp-move-open = false; }
+                        }
+                        Button {
+                            text: root.lang-en ? "Move" : "移动";
+                            primary: true;
+                            enabled: root.sftp-move-target != "";
+                            clicked => {
+                                if (root.sftp-move-batch) {
+                                    root.sftp-move-selected-submit(root.sftp-move-target);
+                                } else {
+                                    root.sftp-move-submit(root.sftp-move-source, root.sftp-move-target);
+                                }
+                                root.sftp-move-open = false;
+                            }
+                        }
+                    }
+
+                }
+
+            }
         }
 
         // Drag-to-dock snap overlay — four edge zones; the one under the cursor
@@ -1885,7 +2007,16 @@ export component TerminalView inherits Rectangle {
                 }
             }
         }
-
+        if root.sftp-collapsed && !root.sftp-horizontal : DockExpandButton {
+            x: root.sftp-dock == "bottom" ? 0px : 0px;
+            y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
+            width: parent.width;
+            height: parent.sf-h;
+            dock-edge: root.sftp-dock;
+            hug-right: true;
+            flat: true;
+            expand => { root.set-sftp-collapsed(false); }
+        }
         }
     }
 }

@@ -340,13 +340,14 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 
 /// A brand-new config (no file yet, or the old one was corrupt). Seeds the
 /// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
-/// a left sidebar, resource panel docked right, 15% wallpaper transparency, and
+/// a left sidebar, resource panel docked left, 38% wallpaper transparency, and
 /// marks the migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
     ConfigFile {
         wallpaper: "builtin:ms".to_string(),
         welcome_as_sidebar: true,
-        sidebar_dock: "right".to_string(),
+        welcome_sidebar_dock: "left".to_string(),
+        sidebar_dock: "left".to_string(),
         wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
         defaults_rev: DEFAULTS_REV,
         ..ConfigFile::default()
@@ -395,6 +396,17 @@ fn migrate_defaults(cfg: &mut ConfigFile) -> bool {
     {
         cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
     }
+    // rev 3: Quick Connect and resource/status share the left activity bar.
+    // Only move the previous rev-1 default (right) or unset values; explicit
+    // top/bottom/left choices are preserved.
+    if cfg.defaults_rev < 3 {
+        if cfg.welcome_as_sidebar && cfg.welcome_sidebar_dock.trim().is_empty() {
+            cfg.welcome_sidebar_dock = "left".to_string();
+        }
+        if cfg.sidebar_dock.trim().is_empty() || cfg.sidebar_dock == "right" {
+            cfg.sidebar_dock = "left".to_string();
+        }
+    }
     cfg.defaults_rev = DEFAULTS_REV;
     true
 }
@@ -420,6 +432,9 @@ fn default_quick_panel_height() -> f32 {
 }
 fn default_flow() -> String {
     "none".to_string()
+}
+fn default_x11_display() -> String {
+    "127.0.0.1:0.0".to_string()
 }
 
 /// How a session authenticates.
@@ -508,6 +523,17 @@ pub struct Session {
     #[serde(default)]
     pub forwards: Vec<PortForward>,
 
+    /// Enable SSH X11 forwarding for this session. MeatShell forwards X11 channels
+    /// opened by the remote sshd to a local X server such as VcXsrv/Xming/X410.
+    /// This is equivalent to the first-stage `ssh -X` style workflow: users still
+    /// need a local X server running on Windows (usually display :0).
+    #[serde(default)]
+    pub x11_forwarding: bool,
+    /// Local X server display/address used by X11 forwarding. Accepts common
+    /// forms such as `:0`, `localhost:0`, `127.0.0.1:0.0`, or `host:6000`.
+    #[serde(default = "default_x11_display")]
+    pub x11_display: String,
+
     /// Skip the shell-integration setup (the cwd-follow PROMPT_COMMAND hook + the
     /// remote resource monitor). Those assume a POSIX shell; on a Windows server
     /// whose shell is pwsh/cmd the injected hook breaks the shell. Turn this on
@@ -565,6 +591,8 @@ impl Session {
             parity: default_parity(),
             flow_control: default_flow(),
             forwards: Vec::new(),
+            x11_forwarding: false,
+            x11_display: default_x11_display(),
             disable_shell_integration: false,
             note: String::new(),
         }
@@ -637,6 +665,9 @@ pub struct ConfigFile {
     /// femtovg/skia. Missing or foreign-platform values use the platform default.
     #[serde(default)]
     pub renderer_mode: String,
+    /// UI color theme variant: "" / "vscode" (default) | "jiangnan".
+    #[serde(default)]
+    pub theme_variant: String,
     /// Terminal font family. Empty = the built-in default ("Meatshell Mono").
     #[serde(default)]
     pub font_family: String,
@@ -785,6 +816,11 @@ pub struct ConfigFile {
     /// Settings-panel font scale, percent (80–160). 0 = 100% default (v0.5).
     #[serde(default)]
     pub panel_font: u32,
+    /// Terminal shortcut preference: when true, Ctrl+C copies selection and
+    /// Ctrl+Shift+C sends the terminal interrupt (^C). When false, use the
+    /// traditional terminal mapping: Ctrl+C interrupts and Ctrl+Shift+C copies.
+    #[serde(default)]
+    pub terminal_ctrl_c_copy: bool,
     /// Disable the startup "new version available" check (#184). Default false =
     /// keep checking (preserves existing behaviour for upgrading users); turning
     /// it on stops the GitHub releases query and the banner.
@@ -833,28 +869,6 @@ fn dedup_keep_last(items: &mut Vec<String>) {
             i += 1;
         }
     }
-}
-
-/// Display-only session groups that must never be persisted as user folders.
-/// `default` maps to an empty group; `system` is owned by built-in local shells.
-pub(crate) fn is_reserved_session_group(name: &str) -> bool {
-    name.eq_ignore_ascii_case("default") || name.eq_ignore_ascii_case("system")
-}
-
-/// Repair configurations created before #324, when the Move-to menu exposed
-/// the built-in `system` group as a destination for saved server sessions.
-fn normalize_reserved_session_groups(cfg: &mut ConfigFile) -> bool {
-    let old_group_count = cfg.groups.len();
-    cfg.groups
-        .retain(|group| !is_reserved_session_group(group.trim()));
-    let mut changed = cfg.groups.len() != old_group_count;
-    for session in &mut cfg.sessions {
-        if is_reserved_session_group(session.group.trim()) {
-            session.group.clear();
-            changed = true;
-        }
-    }
-    changed
 }
 
 impl ConfigStore {
@@ -984,13 +998,9 @@ impl ConfigStore {
                     // Clean up any duplicate history accumulated before #113,
                     // keeping the last (most recent) occurrence of each command.
                     dedup_keep_last(&mut cfg.command_history);
-                    // `system` and `default` are display-only group names. Older
-                    // builds allowed moving saved servers into `system`, creating
-                    // a duplicate empty-menu folder (#324).
-                    migrated |= normalize_reserved_session_groups(&mut cfg);
                     // One-time push of the new default layout to existing users
                     // (only for items they never changed). (#new-user-defaults)
-                    migrated |= migrate_defaults(&mut cfg);
+                    migrated = migrate_defaults(&mut cfg);
                     cfg
                 }
                 Err(err) => {
@@ -1036,10 +1046,7 @@ impl ConfigStore {
         &mut self.cache.sessions
     }
 
-    pub fn upsert(&mut self, mut session: Session) {
-        if is_reserved_session_group(session.group.trim()) {
-            session.group.clear();
-        }
+    pub fn upsert(&mut self, session: Session) {
         if let Some(existing) = self.cache.sessions.iter_mut().find(|s| s.id == session.id) {
             *existing = session;
         } else {
@@ -1049,6 +1056,32 @@ impl ConfigStore {
 
     pub fn remove(&mut self, id: &str) {
         self.cache.sessions.retain(|s| s.id != id);
+    }
+
+    /// Move one session before/after another session in the same group.
+    /// The UI keeps groups separate; this only changes the vector order inside
+    /// `sessions.json` and leaves all session fields untouched.
+    pub fn reorder_session_near(&mut self, id: &str, target_id: &str, before: bool) -> bool {
+        if id == target_id || id.is_empty() || target_id.is_empty() {
+            return false;
+        }
+        let Some(from) = self.cache.sessions.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        let moving = self.cache.sessions.remove(from);
+        let moving_group = moving.group.clone();
+        let Some(target) = self
+            .cache
+            .sessions
+            .iter()
+            .position(|s| s.id == target_id && s.group == moving_group)
+        else {
+            self.cache.sessions.insert(from, moving);
+            return false;
+        };
+        let insert_at = if before { target } else { target + 1 };
+        self.cache.sessions.insert(insert_at, moving);
+        true
     }
 
     pub fn get(&self, id: &str) -> Option<&Session> {
@@ -1100,7 +1133,7 @@ impl ConfigStore {
 
     /// Missing and invalid Windows values deliberately use software so upgrades
     /// preserve the high-DPI/VM compatibility from #224.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub fn renderer_mode(&self) -> &str {
         match self.cache.renderer_mode.as_str() {
             "auto" => "auto",
@@ -1117,18 +1150,7 @@ impl ConfigStore {
         };
     }
 
-    /// Linux previously used Slint's automatic renderer selection and had no
-    /// settings entry. Keep that behaviour for existing configurations.
-    #[cfg(target_os = "linux")]
-    pub fn renderer_mode(&self) -> &str {
-        match self.cache.renderer_mode.as_str() {
-            "gpu" => "gpu",
-            "software" => "software",
-            _ => "auto",
-        }
-    }
-
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub fn set_renderer_mode(&mut self, mode: String) {
         self.cache.renderer_mode = match mode.as_str() {
             "auto" => "auto".into(),
@@ -1137,13 +1159,17 @@ impl ConfigStore {
         };
     }
 
-    #[cfg(target_os = "linux")]
-    pub fn set_renderer_mode(&mut self, mode: String) {
-        self.cache.renderer_mode = match mode.as_str() {
-            "gpu" => "gpu".into(),
-            "software" => "software".into(),
-            _ => "auto".into(),
-        };
+    /// UI color theme variant: "" / "vscode" (default) | "jiangnan".
+    pub fn theme_variant(&self) -> &str {
+        if self.cache.theme_variant.is_empty() {
+            "vscode"
+        } else {
+            &self.cache.theme_variant
+        }
+    }
+
+    pub fn set_theme_variant(&mut self, variant: String) {
+        self.cache.theme_variant = variant;
     }
 
     /// Terminal font family ("" = built-in default).
@@ -1496,9 +1522,6 @@ impl ConfigStore {
     pub fn set_sidebar_dock(&mut self, v: String) {
         self.cache.sidebar_dock = v;
     }
-    pub fn sidebar_collapsed(&self) -> Option<bool> {
-        self.cache.sidebar_collapsed
-    }
     pub fn set_sidebar_collapsed(&mut self, v: bool) {
         self.cache.sidebar_collapsed = Some(v);
     }
@@ -1564,6 +1587,13 @@ impl ConfigStore {
     }
     pub fn set_panel_font(&mut self, percent: u32) {
         self.cache.panel_font = percent.clamp(80, 160);
+    }
+    /// Whether Ctrl+C copies selected terminal text instead of sending ^C.
+    pub fn terminal_ctrl_c_copy(&self) -> bool {
+        self.cache.terminal_ctrl_c_copy
+    }
+    pub fn set_terminal_ctrl_c_copy(&mut self, enabled: bool) {
+        self.cache.terminal_ctrl_c_copy = enabled;
     }
     pub fn sftp_panel_width(&self) -> f32 {
         let w = self.cache.sftp_panel_width;
@@ -1731,43 +1761,26 @@ impl ConfigStore {
         }
     }
 
-    /// Whether a user group already exists, including groups inferred from
-    /// sessions that were created before explicit group records were added.
-    pub fn session_group_exists(&self, name: &str) -> bool {
-        let target = name.trim();
-        if target.is_empty() {
-            return false;
-        }
-        self.cache
-            .groups
-            .iter()
-            .any(|group| group.trim().eq_ignore_ascii_case(target))
-            || self.cache.sessions.iter().any(|session| {
-                !session.group.trim().is_empty()
-                    && session.group.trim().eq_ignore_ascii_case(target)
-            })
-    }
-
-    /// Create an empty group. Ignores blank/reserved names and duplicates.
+    /// Create an empty group. Ignores blank names, the reserved "default", and
+    /// duplicates.
     pub fn add_group(&mut self, name: String) {
         let n = name.trim().to_string();
-        if n.is_empty() || is_reserved_session_group(&n) || self.session_group_exists(&n) {
+        if n.is_empty() || n.eq_ignore_ascii_case("default") {
             return;
         }
-        self.cache.groups.push(n.clone());
-        if let Some(groups) = &mut self.cache.collapsed_session_groups {
-            groups.push(n);
-            groups.sort();
-            groups.dedup();
+        if !self.cache.groups.iter().any(|g| g == &n) {
+            self.cache.groups.push(n.clone());
+            if let Some(groups) = &mut self.cache.collapsed_session_groups {
+                groups.push(n);
+                groups.sort();
+                groups.dedup();
+            }
         }
     }
 
     /// Delete a group. Any session still in it falls back to ungrouped — the UI
     /// only offers delete on empty groups, but we clear sessions defensively.
     pub fn remove_group(&mut self, name: &str) {
-        if is_reserved_session_group(name.trim()) {
-            return;
-        }
         self.cache.groups.retain(|g| g != name);
         if let Some(groups) = &mut self.cache.collapsed_session_groups {
             groups.retain(|group| group != name);
@@ -1779,15 +1792,10 @@ impl ConfigStore {
         }
     }
 
-    /// Rename a group, moving its sessions along. No-op for reserved names.
+    /// Rename a group, moving its sessions along. No-op for blank / "default".
     pub fn rename_group(&mut self, old: &str, new: String) {
         let n = new.trim().to_string();
-        if n.is_empty()
-            || is_reserved_session_group(old.trim())
-            || is_reserved_session_group(&n)
-            || n == old
-            || (!n.eq_ignore_ascii_case(old) && self.session_group_exists(&n))
-        {
+        if n.is_empty() || n.eq_ignore_ascii_case("default") || n == old {
             return;
         }
         for g in &mut self.cache.groups {
@@ -2004,7 +2012,7 @@ impl ConfigStore {
                 continue;
             }
             s.id = Uuid::new_v4().to_string();
-            self.upsert(s);
+            self.cache.sessions.push(s);
             added += 1;
         }
         if added > 0 {
@@ -2052,7 +2060,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     fn renderer_mode_preserves_compatibility_default_and_validates() {
         let mut store = temp_store();
         assert_eq!(store.renderer_mode(), "software");
@@ -2066,23 +2074,6 @@ mod tests {
 
         store.cache = serde_json::from_str("{}").expect("legacy config must deserialize");
         assert_eq!(store.renderer_mode(), "software");
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn renderer_mode_preserves_linux_automatic_default_and_validates() {
-        let mut store = temp_store();
-        assert_eq!(store.renderer_mode(), "auto");
-
-        store.set_renderer_mode("gpu".into());
-        assert_eq!(store.renderer_mode(), "gpu");
-        store.set_renderer_mode("software".into());
-        assert_eq!(store.renderer_mode(), "software");
-        store.set_renderer_mode("unexpected".into());
-        assert_eq!(store.renderer_mode(), "auto");
-
-        store.cache = serde_json::from_str("{}").expect("legacy config must deserialize");
-        assert_eq!(store.renderer_mode(), "auto");
     }
 
     #[test]
@@ -2108,64 +2099,6 @@ mod tests {
             .unwrap()
             .iter()
             .any(|group| group == "production"));
-    }
-
-    #[test]
-    fn reserved_session_groups_are_repaired_and_rejected() {
-        let mut system_session = sample_session("misfiled");
-        system_session.group = "system".into();
-        let mut default_session = sample_session("legacy-default");
-        default_session.group = "Default".into();
-        let mut cfg = ConfigFile {
-            sessions: vec![system_session, default_session],
-            groups: vec!["system".into(), "System".into(), "default".into(), "prod".into()],
-            collapsed_session_groups: Some(vec!["system".into(), "prod".into()]),
-            ..ConfigFile::default()
-        };
-
-        assert!(normalize_reserved_session_groups(&mut cfg));
-        assert_eq!(cfg.groups, ["prod"]);
-        assert!(cfg.sessions.iter().all(|session| session.group.is_empty()));
-        // The built-in system folder's collapse preference is display state,
-        // not a user-created group, so normalization must preserve it.
-        assert_eq!(
-            cfg.collapsed_session_groups.as_deref(),
-            Some(["system".to_string(), "prod".to_string()].as_slice())
-        );
-
-        let mut store = temp_store();
-        store.add_group("system".into());
-        store.add_group("DEFAULT".into());
-        store.add_group("prod".into());
-        store.rename_group("prod", "System".into());
-        assert_eq!(store.groups(), ["prod"]);
-
-        let mut session = sample_session("server");
-        session.group = "SYSTEM".into();
-        let id = session.id.clone();
-        store.upsert(session);
-        assert_eq!(store.get(&id).unwrap().group, "");
-    }
-
-    #[test]
-    fn session_group_names_are_unique_case_insensitively() {
-        let mut store = temp_store();
-        store.add_group("Production".into());
-        store.add_group("production".into());
-        assert_eq!(store.groups(), ["Production"]);
-        assert!(store.session_group_exists(" PRODUCTION "));
-
-        let mut session = sample_session("staging-server");
-        session.group = "Staging".into();
-        store.upsert(session);
-        assert!(store.session_group_exists("staging"));
-
-        store.rename_group("Production", "STAGING".into());
-        assert_eq!(store.groups(), ["Production"]);
-
-        // Changing only the spelling/case of the same group remains valid.
-        store.rename_group("Production", "production".into());
-        assert_eq!(store.groups(), ["production"]);
     }
 
     #[test]
@@ -2370,6 +2303,14 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn fresh_layout_defaults_to_left_activity_bar() {
+        let cfg = fresh_config();
+        assert!(cfg.welcome_as_sidebar);
+        assert_eq!(cfg.welcome_sidebar_dock, "left");
+        assert_eq!(cfg.sidebar_dock, "left");
     }
 
     #[test]
