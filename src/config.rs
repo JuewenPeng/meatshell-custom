@@ -323,7 +323,7 @@ fn default_wallpaper() -> String {
 }
 
 /// Bump when `migrate_defaults` gains a new one-time default-layout change.
-pub const DEFAULTS_REV: u32 = 2;
+pub const DEFAULTS_REV: u32 = 3;
 
 const DEFAULT_WALLPAPER_TRANSPARENCY: f32 = 0.38;
 const DEFAULT_WALLPAPER_OVERLAY: f32 = 1.0 - DEFAULT_WALLPAPER_TRANSPARENCY;
@@ -338,13 +338,14 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 
 /// A brand-new config (no file yet, or the old one was corrupt). Seeds the
 /// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
-/// a left sidebar, resource panel docked right, 38% wallpaper transparency, and
+/// a left sidebar, resource panel docked left, 38% wallpaper transparency, and
 /// marks the migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
     ConfigFile {
         wallpaper: "builtin:ms".to_string(),
         welcome_as_sidebar: true,
-        sidebar_dock: "right".to_string(),
+        welcome_sidebar_dock: "left".to_string(),
+        sidebar_dock: "left".to_string(),
         wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
         defaults_rev: DEFAULTS_REV,
         ..ConfigFile::default()
@@ -386,6 +387,17 @@ fn migrate_defaults(cfg: &mut ConfigFile) -> bool {
     {
         cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
     }
+    // rev 3: Quick Connect and resource/status share the left activity bar.
+    // Only move the previous rev-1 default (right) or unset values; explicit
+    // top/bottom/left choices are preserved.
+    if cfg.defaults_rev < 3 {
+        if cfg.welcome_as_sidebar && cfg.welcome_sidebar_dock.trim().is_empty() {
+            cfg.welcome_sidebar_dock = "left".to_string();
+        }
+        if cfg.sidebar_dock.trim().is_empty() || cfg.sidebar_dock == "right" {
+            cfg.sidebar_dock = "left".to_string();
+        }
+    }
     cfg.defaults_rev = DEFAULTS_REV;
     true
 }
@@ -403,6 +415,9 @@ fn default_sftp_height() -> f32 {
 }
 fn default_flow() -> String {
     "none".to_string()
+}
+fn default_x11_display() -> String {
+    "127.0.0.1:0.0".to_string()
 }
 
 /// How a session authenticates.
@@ -491,6 +506,17 @@ pub struct Session {
     #[serde(default)]
     pub forwards: Vec<PortForward>,
 
+    /// Enable SSH X11 forwarding for this session. MeatShell forwards X11 channels
+    /// opened by the remote sshd to a local X server such as VcXsrv/Xming/X410.
+    /// This is equivalent to the first-stage `ssh -X` style workflow: users still
+    /// need a local X server running on Windows (usually display :0).
+    #[serde(default)]
+    pub x11_forwarding: bool,
+    /// Local X server display/address used by X11 forwarding. Accepts common
+    /// forms such as `:0`, `localhost:0`, `127.0.0.1:0.0`, or `host:6000`.
+    #[serde(default = "default_x11_display")]
+    pub x11_display: String,
+
     /// Skip the shell-integration setup (the cwd-follow PROMPT_COMMAND hook + the
     /// remote resource monitor). Those assume a POSIX shell; on a Windows server
     /// whose shell is pwsh/cmd the injected hook breaks the shell. Turn this on
@@ -548,6 +574,8 @@ impl Session {
             parity: default_parity(),
             flow_control: default_flow(),
             forwards: Vec::new(),
+            x11_forwarding: false,
+            x11_display: default_x11_display(),
             disable_shell_integration: false,
             note: String::new(),
         }
@@ -616,6 +644,9 @@ pub struct ConfigFile {
     /// Theme preference: "system" (default) | "dark" | "light".
     #[serde(default)]
     pub theme_pref: String,
+    /// UI color theme variant: "" / "vscode" (default) | "jiangnan".
+    #[serde(default)]
+    pub theme_variant: String,
     /// Terminal font family. Empty = the built-in default ("Meatshell Mono").
     #[serde(default)]
     pub font_family: String,
@@ -745,6 +776,11 @@ pub struct ConfigFile {
     /// Settings-panel font scale, percent (80–160). 0 = 100% default (v0.5).
     #[serde(default)]
     pub panel_font: u32,
+    /// Terminal shortcut preference: when true, Ctrl+C copies selection and
+    /// Ctrl+Shift+C sends the terminal interrupt (^C). When false, use the
+    /// traditional terminal mapping: Ctrl+C interrupts and Ctrl+Shift+C copies.
+    #[serde(default)]
+    pub terminal_ctrl_c_copy: bool,
     /// Disable the startup "new version available" check (#184). Default false =
     /// keep checking (preserves existing behaviour for upgrading users); turning
     /// it on stops the GitHub releases query and the banner.
@@ -982,6 +1018,32 @@ impl ConfigStore {
         self.cache.sessions.retain(|s| s.id != id);
     }
 
+    /// Move one session before/after another session in the same group.
+    /// The UI keeps groups separate; this only changes the vector order inside
+    /// `sessions.json` and leaves all session fields untouched.
+    pub fn reorder_session_near(&mut self, id: &str, target_id: &str, before: bool) -> bool {
+        if id == target_id || id.is_empty() || target_id.is_empty() {
+            return false;
+        }
+        let Some(from) = self.cache.sessions.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        let moving = self.cache.sessions.remove(from);
+        let moving_group = moving.group.clone();
+        let Some(target) = self
+            .cache
+            .sessions
+            .iter()
+            .position(|s| s.id == target_id && s.group == moving_group)
+        else {
+            self.cache.sessions.insert(from, moving);
+            return false;
+        };
+        let insert_at = if before { target } else { target + 1 };
+        self.cache.sessions.insert(insert_at, moving);
+        true
+    }
+
     pub fn get(&self, id: &str) -> Option<&Session> {
         self.cache.sessions.iter().find(|s| s.id == id)
     }
@@ -1018,6 +1080,19 @@ impl ConfigStore {
 
     pub fn set_theme_pref(&mut self, pref: String) {
         self.cache.theme_pref = pref;
+    }
+
+    /// UI color theme variant: "" / "vscode" (default) | "jiangnan".
+    pub fn theme_variant(&self) -> &str {
+        if self.cache.theme_variant.is_empty() {
+            "vscode"
+        } else {
+            &self.cache.theme_variant
+        }
+    }
+
+    pub fn set_theme_variant(&mut self, variant: String) {
+        self.cache.theme_variant = variant;
     }
 
     /// Terminal font family ("" = built-in default).
@@ -1306,9 +1381,6 @@ impl ConfigStore {
     pub fn set_sidebar_dock(&mut self, v: String) {
         self.cache.sidebar_dock = v;
     }
-    pub fn sidebar_collapsed(&self) -> Option<bool> {
-        self.cache.sidebar_collapsed
-    }
     pub fn set_sidebar_collapsed(&mut self, v: bool) {
         self.cache.sidebar_collapsed = Some(v);
     }
@@ -1374,6 +1446,13 @@ impl ConfigStore {
     }
     pub fn set_panel_font(&mut self, percent: u32) {
         self.cache.panel_font = percent.clamp(80, 160);
+    }
+    /// Whether Ctrl+C copies selected terminal text instead of sending ^C.
+    pub fn terminal_ctrl_c_copy(&self) -> bool {
+        self.cache.terminal_ctrl_c_copy
+    }
+    pub fn set_terminal_ctrl_c_copy(&mut self, enabled: bool) {
+        self.cache.terminal_ctrl_c_copy = enabled;
     }
     pub fn sftp_panel_width(&self) -> f32 {
         let w = self.cache.sftp_panel_width;
@@ -1943,6 +2022,14 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&store.path);
+    }
+
+    #[test]
+    fn fresh_layout_defaults_to_left_activity_bar() {
+        let cfg = fresh_config();
+        assert!(cfg.welcome_as_sidebar);
+        assert_eq!(cfg.welcome_sidebar_dock, "left");
+        assert_eq!(cfg.sidebar_dock, "left");
     }
 
     #[test]

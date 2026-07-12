@@ -196,7 +196,7 @@ export component TabBar inherits Rectangle {
     // so showing the arrows (which shrink the flickable) can't feed back into this
     // condition and form a binding loop. The 64px allows for the two arrows.
     property <bool> tab-overflow:
-        strip.preferred-width > root.width - root.reserve-right - 64px;
+        strip.preferred-width > root.width - root.reserve-right - 12px;
 
     HorizontalLayout {
         padding: 3px;
