@@ -215,11 +215,12 @@ export component SftpPanel inherits Rectangle {
     // narrow. The name column always remains visible.
     property <length> list-w: root.show-tree ? root.width - root.tree-width : root.width;
     property <length> name-min: 180px;     // narrower than this → start dropping columns
-    property <length> name-col-w: 480px;
-    property <length> size-col-w: 76px;
+    property <length> name-col-w: 450px;
+    property <length> name-col-max-w: max(120px, root.list-w - 78px);
+    property <length> size-col-w: 80px;
     property <length> type-col-w: 80px;
-    property <length> modified-col-w: 124px;
-    property <length> perm-col-w: 92px;
+    property <length> modified-col-w: 120px;
+    property <length> perm-col-w: 80px;
     property <length> owner-col-w: 120px;
     property <length> owner-min-w: 120px;
     property <bool> side-docked: !root.show-tree;
@@ -233,7 +234,7 @@ export component SftpPanel inherits Rectangle {
     property <length> visible-modified-col-w: root.show-modified-col ? root.modified-col-w : 0px;
     property <length> visible-perm-col-w: root.show-perm-col ? root.perm-col-w : 0px;
     property <length> visible-owner-min-w: root.show-owner-col ? root.owner-min-w : 0px;
-    property <length> name-col-view-w: root.name-col-w;
+    property <length> name-col-view-w: min(root.name-col-w, root.name-col-max-w);
     property <length> size-col-view-w: root.visible-size-col-w;
     property <length> type-col-view-w: root.visible-type-col-w;
     property <length> modified-col-view-w: root.visible-modified-col-w;
@@ -368,6 +369,10 @@ export component SftpPanel inherits Rectangle {
         interval: 600ms;
         running: root.tree-name-click-pending;
         triggered => { root.tree-name-click-pending = false; }
+    }
+
+    changed list-w => {
+        root.name-col-w = min(root.name-col-w, root.name-col-max-w);
     }
 
     changed tree-focus-index => {
@@ -1138,9 +1143,10 @@ export component SftpPanel inherits Rectangle {
                             sort-column: root.sort-column; sort-asc: root.sort-asc;
                             left-align: root.side-docked;
                             width: root.name-col-view-w;
-                            current-width: root.name-col-w;
+                            current-width: root.name-col-view-w;
                             col-min-w: 120px;
-                            resize-to(w) => { root.name-col-w = max(120px, w); }
+                            col-max-w: root.name-col-max-w;
+                            resize-to(w) => { root.name-col-w = max(120px, min(root.name-col-max-w, w)); }
                             clicked(c) => {
                                 root.sort-asc = root.sort-column == c ? !root.sort-asc : true;
                                 root.sort-column = c;
@@ -1259,6 +1265,7 @@ export component SftpPanel inherits Rectangle {
                         width: parent.width;
                         height: parent.height;
                         viewport-width: self.width;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
 
                         for entry[i] in root.entries : row := Rectangle {
