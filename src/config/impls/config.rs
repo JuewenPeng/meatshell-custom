@@ -35,9 +35,9 @@ use chacha20poly1305::{
 };
 use directories::ProjectDirs;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use super::structs::*;
+use zeroize::Zeroize;
 
 // ── Data directory resolution (portable-first, #141) ──────────────────────────
 //
@@ -214,6 +214,122 @@ fn restore_user_backup_if_needed(primary_dir: &Path, backup_dir: &Path) {
     }
 }
 
+/// A secret string (e.g. a session password) whose heap buffer is zeroed when
+/// it is dropped, so plaintext credentials don't survive in freed memory and
+/// turn up in core dumps, a debugger, or `/proc/<pid>/mem`.  `Clone` makes an
+/// independent copy that is likewise zeroed on its own drop, and `Debug` is
+/// redacted so a password can never be logged by accident.
+#[derive(Clone, Default)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(s: impl Into<String>) -> Self {
+        Secret(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never reveal the contents in logs / debug output.
+        f.write_str(if self.0.is_empty() {
+            "Secret(\"\")"
+        } else {
+            "Secret(***)"
+        })
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(Secret(String::deserialize(d)?))
+    }
+}
+
+/// Which transport a session uses.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionKind {
+    /// SSH shell + SFTP (the original and default behaviour).
+    #[default]
+    Ssh,
+    /// Local serial port (COM3 / /dev/ttyUSB0) for switches, routers, MCUs (#14).
+    Serial,
+    /// Plain Telnet over TCP, for legacy network gear (#17).
+    Telnet,
+    /// Local shell process on this machine (PowerShell/CMD/WSL/$SHELL).
+    Local,
+}
+
+impl SessionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionKind::Ssh => "ssh",
+            SessionKind::Serial => "serial",
+            SessionKind::Telnet => "telnet",
+            SessionKind::Local => "local",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "serial" => SessionKind::Serial,
+            "telnet" => SessionKind::Telnet,
+            "local" => SessionKind::Local,
+            _ => SessionKind::Ssh,
+        }
+    }
+}
+
+fn default_baud() -> u32 {
+    115_200
+}
+fn default_data_bits() -> u8 {
+    8
+}
+fn default_stop_bits() -> u8 {
+    1
+}
+fn default_parity() -> String {
+    "none".to_string()
+}
+/// Ships with the "幻想 3048" sci-fi wallpaper on by default (a dark theme). New
+/// installs and users upgrading from before the wallpaper feature get it; once
+/// the user picks anything (including "无"/none, stored as ""), their choice is
+/// saved and sticks.
+fn default_wallpaper() -> String {
+    // Serde default for the `wallpaper` field: kept at the old "幻想 3048" so an
+    // *existing* config that predates the field stays on tech — `migrate_defaults`
+    // then advances default-following users through the migration chain. Brand-new
+    // installs get the current default straight from `fresh_config`.
+    "builtin:tech".to_string()
+}
+
+/// Bump when `migrate_defaults` gains a new one-time default-layout change.
+pub const DEFAULTS_REV: u32 = 3;
+
+const PREVIOUS_DEFAULT_WALLPAPER_TRANSPARENCY: f32 = 0.38;
+const PREVIOUS_DEFAULT_WALLPAPER_OVERLAY: f32 = 1.0 - PREVIOUS_DEFAULT_WALLPAPER_TRANSPARENCY;
+const DEFAULT_WALLPAPER_TRANSPARENCY: f32 = 0.15;
+const DEFAULT_WALLPAPER_OVERLAY: f32 = 1.0 - DEFAULT_WALLPAPER_TRANSPARENCY;
+
 fn normalize_hex_color(value: &str) -> Option<String> {
     let digits = value.trim().strip_prefix('#').unwrap_or(value.trim());
     if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -224,13 +340,14 @@ fn normalize_hex_color(value: &str) -> Option<String> {
 
 /// A brand-new config (no file yet, or the old one was corrupt). Seeds the
 /// new-user default layout (#new-user-defaults): ms wallpaper, welcome page as
-/// a left sidebar, resource panel docked right, 15% wallpaper transparency, and
+/// a left sidebar, resource panel docked left, 38% wallpaper transparency, and
 /// marks the migration done so it isn't re-applied.
 fn fresh_config() -> ConfigFile {
     ConfigFile {
         wallpaper: "builtin:ms".to_string(),
         welcome_as_sidebar: true,
-        sidebar_dock: "right".to_string(),
+        welcome_sidebar_dock: "left".to_string(),
+        sidebar_dock: "left".to_string(),
         wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
         defaults_rev: DEFAULTS_REV,
         ..ConfigFile::default()
@@ -279,7 +396,243 @@ fn migrate_defaults(cfg: &mut ConfigFile) -> bool {
     {
         cfg.wallpaper_overlay = DEFAULT_WALLPAPER_OVERLAY;
     }
+    // rev 3: Quick Connect and resource/status share the left activity bar.
+    // Only move the previous rev-1 default (right) or unset values; explicit
+    // top/bottom/left choices are preserved.
+    if cfg.defaults_rev < 3 {
+        if cfg.welcome_as_sidebar && cfg.welcome_sidebar_dock.trim().is_empty() {
+            cfg.welcome_sidebar_dock = "left".to_string();
+        }
+        if cfg.sidebar_dock.trim().is_empty() || cfg.sidebar_dock == "right" {
+            cfg.sidebar_dock = "left".to_string();
+        }
+    }
     cfg.defaults_rev = DEFAULTS_REV;
+    true
+}
+fn default_sidebar_width() -> f32 {
+    220.0
+}
+fn default_sidebar_height() -> f32 {
+    240.0
+}
+fn default_sftp_width() -> f32 {
+    380.0
+}
+fn default_sftp_height() -> f32 {
+    220.0
+}
+
+fn default_quick_panel_width() -> f32 {
+    260.0
+}
+
+fn default_quick_panel_height() -> f32 {
+    220.0
+}
+fn default_flow() -> String {
+    "none".to_string()
+}
+fn default_x11_display() -> String {
+    "127.0.0.1:0.0".to_string()
+}
+
+/// How a session authenticates.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMethod {
+    Password,
+    #[serde(rename = "keyboard-interactive")]
+    KeyboardInteractive,
+    Key,
+}
+
+impl AuthMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuthMethod::Password => "password",
+            AuthMethod::KeyboardInteractive => "keyboard-interactive",
+            AuthMethod::Key => "key",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "keyboard-interactive" | "keyboard" | "interactive" => AuthMethod::KeyboardInteractive,
+            "key" => AuthMethod::Key,
+            _ => AuthMethod::Password,
+        }
+    }
+}
+
+/// A single saved SSH target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub auth: AuthMethod,
+    #[serde(default)]
+    pub password: Secret,
+    #[serde(default)]
+    pub private_key_path: String,
+    #[serde(default)]
+    pub private_key_inline: Secret,
+    /// Optional outbound proxy, e.g. "socks5://127.0.0.1:1080" or
+    /// "http://user:pass@host:8080". Empty = use $ALL_PROXY, else direct.
+    #[serde(default)]
+    pub proxy: String,
+    /// Optional SSH jump host (bastion): the id of another saved SSH session to
+    /// tunnel this connection through, like OpenSSH's ProxyJump. Empty = direct.
+    /// Single hop only; the jump session supplies its own host/user/auth (#211).
+    #[serde(default)]
+    pub jump_session_id: String,
+    #[serde(default)]
+    pub last_used: Option<String>,
+    /// Optional folder/group name to organize sessions in the list (#41).
+    /// Empty = ungrouped. Sessions are grouped by this in Quick Connect.
+    #[serde(default)]
+    pub group: String,
+
+    // --- Transport ----------------------------------------------------------
+    /// SSH (default), Serial, or Telnet. Absent in old config files → Ssh.
+    #[serde(default)]
+    pub kind: SessionKind,
+
+    // --- Serial-only fields (ignored unless kind == Serial) -----------------
+    /// Serial device path, e.g. "COM3" (Windows) or "/dev/ttyUSB0" (Linux).
+    #[serde(default)]
+    pub serial_port: String,
+    #[serde(default = "default_baud")]
+    pub baud_rate: u32,
+    #[serde(default = "default_data_bits")]
+    pub data_bits: u8,
+    #[serde(default = "default_stop_bits")]
+    pub stop_bits: u8,
+    /// "none" | "odd" | "even".
+    #[serde(default = "default_parity")]
+    pub parity: String,
+    /// "none" | "hardware" | "software".
+    #[serde(default = "default_flow")]
+    pub flow_control: String,
+
+    // --- SSH port forwarding / tunnels (#56) --------------------------------
+    /// Tunnels established automatically when this SSH session connects.
+    #[serde(default)]
+    pub forwards: Vec<PortForward>,
+
+    /// Enable SSH X11 forwarding for this session. MeatShell forwards X11 channels
+    /// opened by the remote sshd to a local X server such as VcXsrv/Xming/X410.
+    /// This is equivalent to the first-stage `ssh -X` style workflow: users still
+    /// need a local X server running on Windows (usually display :0).
+    #[serde(default)]
+    pub x11_forwarding: bool,
+    /// Local X server display/address used by X11 forwarding. Accepts common
+    /// forms such as `:0`, `localhost:0`, `127.0.0.1:0.0`, or `host:6000`.
+    #[serde(default = "default_x11_display")]
+    pub x11_display: String,
+
+    /// Skip the shell-integration setup (the cwd-follow PROMPT_COMMAND hook + the
+    /// remote resource monitor). Those assume a POSIX shell; on a Windows server
+    /// whose shell is pwsh/cmd the injected hook breaks the shell. Turn this on
+    /// for such servers (#140).
+    #[serde(default)]
+    pub disable_shell_integration: bool,
+    /// Free-form note for this session — somewhere to stash extra info (jump-host
+    /// details, credentials hints, owner, etc.). Shown only in the edit dialog.
+    /// (B站 suggestion)
+    #[serde(default)]
+    pub note: String,
+}
+
+/// One SSH tunnel (#56). `kind` is "local" (-L), "remote" (-R) or
+/// "dynamic" (-D / SOCKS5). For local/remote, `host:host_port` is the target;
+/// for dynamic it is ignored (the SOCKS client picks the destination).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PortForward {
+    pub kind: String,
+    /// Optional label to tell rules apart (#100). Empty = unnamed.
+    #[serde(default)]
+    pub name: String,
+    /// Listener bind address (local side for L/D, remote side for R).
+    /// Empty → 127.0.0.1.
+    #[serde(default)]
+    pub bind_addr: String,
+    pub bind_port: u16,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub host_port: u16,
+}
+
+impl Session {
+    pub fn new_empty() -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: String::new(),
+            host: String::new(),
+            port: 22,
+            user: "root".into(),
+            auth: AuthMethod::Password,
+            password: Secret::default(),
+            private_key_path: String::new(),
+            private_key_inline: Secret::default(),
+            proxy: String::new(),
+            jump_session_id: String::new(),
+            last_used: None,
+            group: String::new(),
+            kind: SessionKind::Ssh,
+            serial_port: String::new(),
+            baud_rate: default_baud(),
+            data_bits: default_data_bits(),
+            stop_bits: default_stop_bits(),
+            parity: default_parity(),
+            flow_control: default_flow(),
+            forwards: Vec::new(),
+            x11_forwarding: false,
+            x11_display: default_x11_display(),
+            disable_shell_integration: false,
+            note: String::new(),
+        }
+    }
+}
+
+/// A saved quick command (#55): a named snippet the user clicks to send to the
+/// active terminal.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QuickCommand {
+    pub name: String,
+    pub command: String,
+    /// Optional group/folder name. Empty = the implicit "default" group (#55).
+    #[serde(default)]
+    pub group: String,
+    /// Whether clicking the chip sends + executes (appends Return). `false` only
+    /// drops the command into the input box to tweak first. Defaults to `true` so
+    /// existing quick commands keep running on click. (B站 suggestion)
+    #[serde(default = "default_true")]
+    pub send_enter: bool,
+}
+
+/// One user-defined client-side terminal highlighting rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputHighlightRule {
+    pub pattern: String,
+    #[serde(default)]
+    pub regex: bool,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub whole_line: bool,
+    /// Stable palette id: red | yellow | green | cyan | magenta | gray.
+    #[serde(default)]
+    pub color: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -294,6 +647,216 @@ fn normalize_highlight_color(color: &str) -> &'static str {
     }
 }
 
+/// On-disk layout. Keep additive to ease forward-compat.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConfigFile {
+    #[serde(default)]
+    pub sessions: Vec<Session>,
+    /// Preset SFTP download directory. Empty = ask each time.
+    #[serde(default)]
+    pub download_dir: String,
+    /// UI language code: "zh" (default) or "en".
+    #[serde(default)]
+    pub language: String,
+    /// Theme preference: "system" (default) | "dark" | "light".
+    #[serde(default)]
+    pub theme_pref: String,
+    /// Platform renderer preference. Windows uses software/auto/gpu; macOS uses
+    /// femtovg/skia. Missing or foreign-platform values use the platform default.
+    #[serde(default)]
+    pub renderer_mode: String,
+    /// UI color theme variant: "" / "vscode" (default) | "jiangnan".
+    #[serde(default)]
+    pub theme_variant: String,
+    /// Terminal font family. Empty = the built-in default ("Meatshell Mono").
+    #[serde(default)]
+    pub font_family: String,
+    /// Terminal font size in px. 0 = the built-in default.
+    #[serde(default)]
+    pub font_size: u32,
+    /// Force regular terminal text to render with a bold face (#262).
+    #[serde(default)]
+    pub terminal_bold: bool,
+    /// Terminal insertion cursor shape: block (default), bar, or underline (#275).
+    #[serde(default)]
+    pub terminal_cursor_style: String,
+    /// Custom terminal cursor colour as #RRGGBB. Empty follows the theme (#275).
+    #[serde(default)]
+    pub terminal_cursor_color: String,
+    /// Stored inverted so missing/legacy config keeps the automatic plain-text
+    /// output highlighter enabled by default.
+    #[serde(default)]
+    pub output_highlight_disabled: bool,
+    /// Built-in output highlight preset: "log" (default) or "devops".
+    #[serde(default)]
+    pub output_highlight_preset: String,
+    /// User-defined rules applied before the selected built-in preset.
+    #[serde(default)]
+    pub output_highlight_rules: Vec<OutputHighlightRule>,
+    /// Global UI scale in percent (#100). 0 = default (100%).
+    #[serde(default)]
+    pub ui_scale: u32,
+    /// Immersive wallpaper id: "" = none, "builtin:light" / "builtin:dark" /
+    /// "builtin:tech", or a filesystem path to a custom image. Drives the
+    /// wallpaper + tinted theme. Defaults to the "幻想 3048" built-in.
+    #[serde(default = "default_wallpaper")]
+    pub wallpaper: String,
+    /// Explicit session groups/folders (#41), including empty ones so a folder
+    /// can exist before any session is moved into it. "default" is implicit and
+    /// not stored here.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Quick Connect folders that were collapsed when the UI was last used.
+    /// `None` is a legacy/new config and starts with every folder collapsed;
+    /// `Some([])` means the user explicitly expanded every folder.
+    #[serde(default)]
+    pub collapsed_session_groups: Option<Vec<String>>,
+    /// Stored inverted ("don't follow") so both serde and the Default derive
+    /// yield `false` = the feature defaults to ON: the SFTP panel follows the
+    /// terminal's cd (OSC 7) unless the user opts out in Interface settings.
+    #[serde(default)]
+    pub sftp_no_follow_cd: bool,
+    /// Always prompt for the save location on each download instead of using the
+    /// preset download dir. Defaults to false (#87).
+    #[serde(default)]
+    pub download_always_ask: bool,
+    /// Saved quick commands (#55).
+    #[serde(default)]
+    pub quick_commands: Vec<QuickCommand>,
+    /// Explicit quick-command group names — mirrors `groups` for sessions so that
+    /// empty quick-command groups survive and can be renamed/deleted (#55).
+    #[serde(default)]
+    pub quick_groups: Vec<String>,
+    /// Opt-in docked quick-command sidebar (#215). The command-bar popup remains
+    /// available until the user actually drags it into the main dock layer.
+    #[serde(default)]
+    pub quick_commands_as_sidebar: bool,
+    #[serde(default)]
+    pub quick_panel_open: bool,
+    #[serde(default)]
+    pub quick_panel_collapsed: bool,
+    #[serde(default = "default_quick_panel_width")]
+    pub quick_panel_width: f32,
+    #[serde(default = "default_quick_panel_height")]
+    pub quick_panel_height: f32,
+    #[serde(default)]
+    pub quick_panel_dock: String,
+    /// Recent commands sent from the command box, oldest first, capped (#55).
+    #[serde(default)]
+    pub command_history: Vec<String>,
+    /// Collapse the left resource sidebar on startup (#78).
+    #[serde(default)]
+    pub collapse_sidebar_default: bool,
+    /// Last resource-sidebar collapsed state. None means fall back to
+    /// `collapse_sidebar_default` for older configs.
+    #[serde(default)]
+    pub sidebar_collapsed: Option<bool>,
+    /// User-adjustable width of the left resource sidebar, in logical pixels.
+    /// Persisted across restarts so the drag-resized width sticks.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    /// Resource-panel docking: size when docked top/bottom, and which edge it is
+    /// docked to (left|right|top|bottom). Persisted so the layout sticks (#dock).
+    #[serde(default = "default_sidebar_height")]
+    pub sidebar_height: f32,
+    #[serde(default)]
+    pub sidebar_dock: String,
+    /// SFTP-panel docking: extents (px) and docked edge, persisted (#dock).
+    #[serde(default = "default_sftp_width")]
+    pub sftp_panel_width: f32,
+    #[serde(default = "default_sftp_height")]
+    pub sftp_panel_height: f32,
+    #[serde(default)]
+    pub sftp_dock: String,
+    /// Last window size in logical px (0 = unset → use the built-in default).
+    /// Lets users keep their preferred window size across restarts.
+    #[serde(default)]
+    pub window_width: f32,
+    #[serde(default)]
+    pub window_height: f32,
+    /// Collapse the bottom SFTP panel on startup (#78).
+    #[serde(default)]
+    pub collapse_sftp_default: bool,
+    /// When session-sync is on, also mirror SFTP uploads to the other online
+    /// sessions (same path, falling back to each panel's current dir).
+    #[serde(default)]
+    pub sync_upload: bool,
+    /// WebDAV sync settings (#185). Password is encrypted at rest like session
+    /// passwords; remote_path is the JSON export object path under the endpoint.
+    #[serde(default)]
+    pub webdav_enabled: bool,
+    #[serde(default)]
+    pub webdav_url: String,
+    #[serde(default)]
+    pub webdav_username: String,
+    #[serde(default)]
+    pub webdav_password: Secret,
+    #[serde(default)]
+    pub webdav_remote_path: String,
+    #[serde(default)]
+    pub webdav_accept_invalid_certs: bool,
+    /// Render the welcome page (session list) as a docked left sidebar instead of
+    /// a "New tab" tab (v0.5). Persisted so the layout choice sticks.
+    #[serde(default)]
+    pub welcome_as_sidebar: bool,
+    /// Width (logical px) of the welcome/session sidebar when docked (v0.5).
+    #[serde(default)]
+    pub welcome_sidebar_width: f32,
+    /// Welcome/session sidebar dock edge (left|right|top|bottom).
+    #[serde(default)]
+    pub welcome_sidebar_dock: String,
+    /// Welcome sidebar collapsed to the edge icon strip (IDEA-style) (v0.5).
+    /// None means the user has not explicitly collapsed/expanded it yet.
+    #[serde(default)]
+    pub welcome_collapsed: Option<bool>,
+    /// Frosted-panel opacity over a wallpaper (0.30–1.00); user-adjustable via the
+    /// Interface › Wallpaper opacity slider. 0 = use the current default.
+    #[serde(default)]
+    pub wallpaper_overlay: f32,
+    /// Settings-panel font scale, percent (80–160). 0 = 100% default (v0.5).
+    #[serde(default)]
+    pub panel_font: u32,
+    /// Terminal shortcut preference: when true, Ctrl+C copies selection and
+    /// Ctrl+Shift+C sends the terminal interrupt (^C). When false, use the
+    /// traditional terminal mapping: Ctrl+C interrupts and Ctrl+Shift+C copies.
+    #[serde(default)]
+    pub terminal_ctrl_c_copy: bool,
+    /// Disable the startup "new version available" check (#184). Default false =
+    /// keep checking (preserves existing behaviour for upgrading users); turning
+    /// it on stops the GitHub releases query and the banner.
+    #[serde(default)]
+    pub update_check_disabled: bool,
+    /// One-time default-layout migration marker (#new-user-defaults). 0 = config
+    /// predates the migration. `migrate_defaults` bumps it to `DEFAULTS_REV` after
+    /// pushing the new look (default wallpaper / welcome-as-sidebar / right-docked
+    /// resource panel / wallpaper overlay) to users still sitting on old defaults.
+    #[serde(default)]
+    pub defaults_rev: u32,
+}
+
+/// Portable export file (issue #46): sessions with everything in plaintext
+/// **except** the password, which is encrypted with a fixed key baked into the
+/// binary so the file opens on *any* machine running meatshell.
+///
+/// Security note: a built-in key in open-source code is **obfuscation, not real
+/// security** — anyone with the source can derive it. It only stops a casual
+/// over-the-shoulder read of the file, same level as FinalShell's export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExportFile {
+    /// Format marker / version so the schema can evolve later.
+    meatshell_export: u32,
+    sessions: Vec<Session>,
+}
+
+pub struct ConfigStore {
+    path: PathBuf,
+    backup_dir: Option<PathBuf>,
+    cache: ConfigFile,
+    /// ChaCha20-Poly1305 key loaded from (or freshly generated into)
+    /// `secret.key` in the same directory as `sessions.json`.
+    key: [u8; 32],
+}
+
 /// Remove duplicate entries in place, keeping the *last* (most recent)
 /// occurrence of each and preserving relative order (#113). The list is capped
 /// at 200, so the quadratic scan is trivial.
@@ -305,37 +868,6 @@ fn dedup_keep_last(items: &mut Vec<String>) {
         } else {
             i += 1;
         }
-    }
-}
-
-/// Display-only session groups that must never be persisted as user folders.
-/// `default` maps to an empty group; `system` is owned by built-in local shells.
-pub(crate) fn is_reserved_session_group(name: &str) -> bool {
-    name.eq_ignore_ascii_case("default") || name.eq_ignore_ascii_case("system")
-}
-
-/// Repair configurations created before #316/#324, when the Move-to menu exposed
-/// the built-in `system` group as a destination for saved server sessions.
-fn normalize_reserved_session_groups(cfg: &mut ConfigFile) -> bool {
-    let old_group_count = cfg.groups.len();
-    cfg.groups
-        .retain(|group| !is_reserved_session_group(group.trim()));
-    let mut changed = cfg.groups.len() != old_group_count;
-    for session in &mut cfg.sessions {
-        if is_reserved_session_group(session.group.trim()) {
-            session.group.clear();
-            changed = true;
-        }
-    }
-    changed
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn normalize_macos_renderer_mode(mode: &str) -> &'static str {
-    match mode {
-        "femtovg" => "femtovg",
-        "skia" => "skia",
-        _ => "software",
     }
 }
 
@@ -466,13 +998,9 @@ impl ConfigStore {
                     // Clean up any duplicate history accumulated before #113,
                     // keeping the last (most recent) occurrence of each command.
                     dedup_keep_last(&mut cfg.command_history);
-                    // `system` and `default` are display-only group names. Older
-                    // builds allowed moving saved servers into `system`, creating
-                    // a duplicate empty-menu folder (#316, #324).
-                    migrated |= normalize_reserved_session_groups(&mut cfg);
                     // One-time push of the new default layout to existing users
                     // (only for items they never changed). (#new-user-defaults)
-                    migrated |= migrate_defaults(&mut cfg);
+                    migrated = migrate_defaults(&mut cfg);
                     cfg
                 }
                 Err(err) => {
@@ -518,10 +1046,7 @@ impl ConfigStore {
         &mut self.cache.sessions
     }
 
-    pub fn upsert(&mut self, mut session: Session) {
-        if is_reserved_session_group(session.group.trim()) {
-            session.group.clear();
-        }
+    pub fn upsert(&mut self, session: Session) {
         if let Some(existing) = self.cache.sessions.iter_mut().find(|s| s.id == session.id) {
             *existing = session;
         } else {
@@ -531,6 +1056,32 @@ impl ConfigStore {
 
     pub fn remove(&mut self, id: &str) {
         self.cache.sessions.retain(|s| s.id != id);
+    }
+
+    /// Move one session before/after another session in the same group.
+    /// The UI keeps groups separate; this only changes the vector order inside
+    /// `sessions.json` and leaves all session fields untouched.
+    pub fn reorder_session_near(&mut self, id: &str, target_id: &str, before: bool) -> bool {
+        if id == target_id || id.is_empty() || target_id.is_empty() {
+            return false;
+        }
+        let Some(from) = self.cache.sessions.iter().position(|s| s.id == id) else {
+            return false;
+        };
+        let moving = self.cache.sessions.remove(from);
+        let moving_group = moving.group.clone();
+        let Some(target) = self
+            .cache
+            .sessions
+            .iter()
+            .position(|s| s.id == target_id && s.group == moving_group)
+        else {
+            self.cache.sessions.insert(from, moving);
+            return false;
+        };
+        let insert_at = if before { target } else { target + 1 };
+        self.cache.sessions.insert(insert_at, moving);
+        true
     }
 
     pub fn get(&self, id: &str) -> Option<&Session> {
@@ -574,12 +1125,15 @@ impl ConfigStore {
     /// Renderer preference for the current platform.
     #[cfg(target_os = "macos")]
     pub fn renderer_mode(&self) -> &str {
-        normalize_macos_renderer_mode(&self.cache.renderer_mode)
+        match self.cache.renderer_mode.as_str() {
+            "skia" => "skia",
+            _ => "femtovg",
+        }
     }
 
     /// Missing and invalid Windows values deliberately use software so upgrades
     /// preserve the high-DPI/VM compatibility from #224.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub fn renderer_mode(&self) -> &str {
         match self.cache.renderer_mode.as_str() {
             "auto" => "auto",
@@ -590,21 +1144,13 @@ impl ConfigStore {
 
     #[cfg(target_os = "macos")]
     pub fn set_renderer_mode(&mut self, mode: String) {
-        self.cache.renderer_mode = normalize_macos_renderer_mode(&mode).into();
+        self.cache.renderer_mode = match mode.as_str() {
+            "skia" => "skia".into(),
+            _ => "femtovg".into(),
+        };
     }
 
-    /// Linux previously used Slint's automatic renderer selection and had no
-    /// settings entry. Keep that behaviour for existing configurations.
-    #[cfg(target_os = "linux")]
-    pub fn renderer_mode(&self) -> &str {
-        match self.cache.renderer_mode.as_str() {
-            "gpu" => "gpu",
-            "software" => "software",
-            _ => "auto",
-        }
-    }
-
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub fn set_renderer_mode(&mut self, mode: String) {
         self.cache.renderer_mode = match mode.as_str() {
             "auto" => "auto".into(),
@@ -613,13 +1159,17 @@ impl ConfigStore {
         };
     }
 
-    #[cfg(target_os = "linux")]
-    pub fn set_renderer_mode(&mut self, mode: String) {
-        self.cache.renderer_mode = match mode.as_str() {
-            "gpu" => "gpu".into(),
-            "software" => "software".into(),
-            _ => "auto".into(),
-        };
+    /// UI color theme variant: "" / "vscode" (default) | "jiangnan".
+    pub fn theme_variant(&self) -> &str {
+        if self.cache.theme_variant.is_empty() {
+            "vscode"
+        } else {
+            &self.cache.theme_variant
+        }
+    }
+
+    pub fn set_theme_variant(&mut self, variant: String) {
+        self.cache.theme_variant = variant;
     }
 
     /// Terminal font family ("" = built-in default).
@@ -642,43 +1192,6 @@ impl ConfigStore {
 
     pub fn set_font_size(&mut self, size: u32) {
         self.cache.font_size = size.clamp(8, 32);
-    }
-
-    pub fn terminal_line_spacing(&self) -> f32 {
-        let value = self.cache.terminal_line_spacing;
-        if value <= 0.0 {
-            1.0
-        } else {
-            value.clamp(0.8, 1.5)
-        }
-    }
-
-    pub fn set_terminal_line_spacing(&mut self, value: f32) {
-        self.cache.terminal_line_spacing = value.clamp(0.8, 1.5);
-    }
-
-    pub fn paste_confirm_enabled(&self) -> bool {
-        !self.cache.paste_confirm_disabled
-    }
-
-    pub fn set_paste_confirm_enabled(&mut self, enabled: bool) {
-        self.cache.paste_confirm_disabled = !enabled;
-    }
-
-    pub fn extra_paste_shortcuts_enabled(&self) -> bool {
-        !self.cache.extra_paste_shortcuts_disabled
-    }
-
-    pub fn set_extra_paste_shortcuts_enabled(&mut self, enabled: bool) {
-        self.cache.extra_paste_shortcuts_disabled = !enabled;
-    }
-
-    pub fn zen_mode(&self) -> bool {
-        self.cache.zen_mode
-    }
-
-    pub fn set_zen_mode(&mut self, enabled: bool) {
-        self.cache.zen_mode = enabled;
     }
 
     /// Force regular terminal text to render with a bold face (#262).
@@ -1041,9 +1554,6 @@ impl ConfigStore {
     pub fn set_sidebar_dock(&mut self, v: String) {
         self.cache.sidebar_dock = v;
     }
-    pub fn sidebar_collapsed(&self) -> Option<bool> {
-        self.cache.sidebar_collapsed
-    }
     pub fn set_sidebar_collapsed(&mut self, v: bool) {
         self.cache.sidebar_collapsed = Some(v);
     }
@@ -1110,6 +1620,13 @@ impl ConfigStore {
     pub fn set_panel_font(&mut self, percent: u32) {
         self.cache.panel_font = percent.clamp(80, 160);
     }
+    /// Whether Ctrl+C copies selected terminal text instead of sending ^C.
+    pub fn terminal_ctrl_c_copy(&self) -> bool {
+        self.cache.terminal_ctrl_c_copy
+    }
+    pub fn set_terminal_ctrl_c_copy(&mut self, enabled: bool) {
+        self.cache.terminal_ctrl_c_copy = enabled;
+    }
     pub fn sftp_panel_width(&self) -> f32 {
         let w = self.cache.sftp_panel_width;
         if w <= 0.0 {
@@ -1131,17 +1648,6 @@ impl ConfigStore {
     }
     pub fn set_sftp_panel_height(&mut self, v: f32) {
         self.cache.sftp_panel_height = v;
-    }
-    pub fn sftp_tree_width(&self) -> f32 {
-        let width = self.cache.sftp_tree_width;
-        if width <= 0.0 {
-            default_sftp_tree_width()
-        } else {
-            width.clamp(120.0, 420.0)
-        }
-    }
-    pub fn set_sftp_tree_width(&mut self, width: f32) {
-        self.cache.sftp_tree_width = width.clamp(120.0, 420.0);
     }
     pub fn sftp_dock(&self) -> String {
         let d = self.cache.sftp_dock.trim();
@@ -1287,43 +1793,26 @@ impl ConfigStore {
         }
     }
 
-    /// Whether a user group already exists, including groups inferred from
-    /// sessions that were created before explicit group records were added.
-    pub fn session_group_exists(&self, name: &str) -> bool {
-        let target = name.trim();
-        if target.is_empty() {
-            return false;
-        }
-        self.cache
-            .groups
-            .iter()
-            .any(|group| group.trim().eq_ignore_ascii_case(target))
-            || self.cache.sessions.iter().any(|session| {
-                !session.group.trim().is_empty()
-                    && session.group.trim().eq_ignore_ascii_case(target)
-            })
-    }
-
-    /// Create an empty group. Ignores blank/reserved names and duplicates.
+    /// Create an empty group. Ignores blank names, the reserved "default", and
+    /// duplicates.
     pub fn add_group(&mut self, name: String) {
         let n = name.trim().to_string();
-        if n.is_empty() || is_reserved_session_group(&n) || self.session_group_exists(&n) {
+        if n.is_empty() || n.eq_ignore_ascii_case("default") {
             return;
         }
-        self.cache.groups.push(n.clone());
-        if let Some(groups) = &mut self.cache.collapsed_session_groups {
-            groups.push(n);
-            groups.sort();
-            groups.dedup();
+        if !self.cache.groups.iter().any(|g| g == &n) {
+            self.cache.groups.push(n.clone());
+            if let Some(groups) = &mut self.cache.collapsed_session_groups {
+                groups.push(n);
+                groups.sort();
+                groups.dedup();
+            }
         }
     }
 
     /// Delete a group. Any session still in it falls back to ungrouped — the UI
     /// only offers delete on empty groups, but we clear sessions defensively.
     pub fn remove_group(&mut self, name: &str) {
-        if is_reserved_session_group(name.trim()) {
-            return;
-        }
         self.cache.groups.retain(|g| g != name);
         if let Some(groups) = &mut self.cache.collapsed_session_groups {
             groups.retain(|group| group != name);
@@ -1335,15 +1824,10 @@ impl ConfigStore {
         }
     }
 
-    /// Rename a group, moving its sessions along. No-op for reserved names.
+    /// Rename a group, moving its sessions along. No-op for blank / "default".
     pub fn rename_group(&mut self, old: &str, new: String) {
         let n = new.trim().to_string();
-        if n.is_empty()
-            || is_reserved_session_group(old.trim())
-            || is_reserved_session_group(&n)
-            || n == old
-            || (!n.eq_ignore_ascii_case(old) && self.session_group_exists(&n))
-        {
+        if n.is_empty() || n.eq_ignore_ascii_case("default") || n == old {
             return;
         }
         for g in &mut self.cache.groups {
@@ -1560,7 +2044,7 @@ impl ConfigStore {
                 continue;
             }
             s.id = Uuid::new_v4().to_string();
-            self.upsert(s);
+            self.cache.sessions.push(s);
             added += 1;
         }
         if added > 0 {
@@ -1608,7 +2092,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     fn renderer_mode_preserves_compatibility_default_and_validates() {
         let mut store = temp_store();
         assert_eq!(store.renderer_mode(), "software");
@@ -1622,23 +2106,6 @@ mod tests {
 
         store.cache = serde_json::from_str("{}").expect("legacy config must deserialize");
         assert_eq!(store.renderer_mode(), "software");
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn renderer_mode_preserves_linux_automatic_default_and_validates() {
-        let mut store = temp_store();
-        assert_eq!(store.renderer_mode(), "auto");
-
-        store.set_renderer_mode("gpu".into());
-        assert_eq!(store.renderer_mode(), "gpu");
-        store.set_renderer_mode("software".into());
-        assert_eq!(store.renderer_mode(), "software");
-        store.set_renderer_mode("unexpected".into());
-        assert_eq!(store.renderer_mode(), "auto");
-
-        store.cache = serde_json::from_str("{}").expect("legacy config must deserialize");
-        assert_eq!(store.renderer_mode(), "auto");
     }
 
     #[test]
@@ -1667,96 +2134,20 @@ mod tests {
     }
 
     #[test]
-    fn issue_316_reserved_system_groups_are_repaired_and_rejected() {
-        let mut system_session = sample_session("misfiled");
-        system_session.group = "system".into();
-        system_session.password = Secret::default();
-        let mut default_session = sample_session("legacy-default");
-        default_session.group = "Default".into();
-        let mut cfg = ConfigFile {
-            sessions: vec![system_session, default_session],
-            groups: vec![
-                "system".into(),
-                "System".into(),
-                "default".into(),
-                "prod".into(),
-            ],
-            collapsed_session_groups: Some(vec!["system".into(), "prod".into()]),
-            ..ConfigFile::default()
-        };
-
-        assert!(normalize_reserved_session_groups(&mut cfg));
-        assert_eq!(cfg.groups, ["prod"]);
-        assert!(cfg.sessions.iter().all(|session| session.group.is_empty()));
-        assert!(cfg.sessions[0].password.is_empty());
-        // The built-in system folder's collapse preference is display state,
-        // not a user-created group, so normalization must preserve it.
-        assert_eq!(
-            cfg.collapsed_session_groups.as_deref(),
-            Some(["system".to_string(), "prod".to_string()].as_slice())
-        );
-
-        let mut store = temp_store();
-        store.add_group("system".into());
-        store.add_group("DEFAULT".into());
-        store.add_group("prod".into());
-        store.rename_group("prod", "System".into());
-        assert_eq!(store.groups(), ["prod"]);
-
-        let mut session = sample_session("server");
-        session.group = "SYSTEM".into();
-        let id = session.id.clone();
-        store.upsert(session);
-        assert_eq!(store.get(&id).unwrap().group, "");
-    }
-
-    #[test]
-    fn session_group_names_are_unique_case_insensitively() {
-        let mut store = temp_store();
-        store.add_group("Production".into());
-        store.add_group("production".into());
-        assert_eq!(store.groups(), ["Production"]);
-        assert!(store.session_group_exists(" PRODUCTION "));
-
-        let mut session = sample_session("staging-server");
-        session.group = "Staging".into();
-        store.upsert(session);
-        assert!(store.session_group_exists("staging"));
-
-        store.rename_group("Production", "STAGING".into());
-        assert_eq!(store.groups(), ["Production"]);
-
-        // Changing only the spelling/case of the same group remains valid.
-        store.rename_group("Production", "production".into());
-        assert_eq!(store.groups(), ["production"]);
-    }
-
-    #[test]
-    fn macos_renderer_mode_defaults_to_cpu_and_preserves_gpu_choices() {
-        assert_eq!(normalize_macos_renderer_mode(""), "software");
-        assert_eq!(normalize_macos_renderer_mode("software"), "software");
-        assert_eq!(normalize_macos_renderer_mode("femtovg"), "femtovg");
-        assert_eq!(normalize_macos_renderer_mode("skia"), "skia");
-        assert_eq!(normalize_macos_renderer_mode("unexpected"), "software");
-    }
-
-    #[test]
     #[cfg(target_os = "macos")]
     fn renderer_mode_uses_macos_backends_and_validates() {
         let mut store = temp_store();
-        assert_eq!(store.renderer_mode(), "software");
+        assert_eq!(store.renderer_mode(), "femtovg");
 
         store.set_renderer_mode("skia".into());
         assert_eq!(store.renderer_mode(), "skia");
         store.set_renderer_mode("femtovg".into());
         assert_eq!(store.renderer_mode(), "femtovg");
-        store.set_renderer_mode("software".into());
-        assert_eq!(store.renderer_mode(), "software");
         store.set_renderer_mode("unexpected".into());
-        assert_eq!(store.renderer_mode(), "software");
+        assert_eq!(store.renderer_mode(), "femtovg");
 
         store.cache = serde_json::from_str("{}").expect("legacy config must deserialize");
-        assert_eq!(store.renderer_mode(), "software");
+        assert_eq!(store.renderer_mode(), "femtovg");
     }
 
     #[test]
@@ -1950,6 +2341,14 @@ mod tests {
     }
 
     #[test]
+    fn fresh_layout_defaults_to_left_activity_bar() {
+        let cfg = fresh_config();
+        assert!(cfg.welcome_as_sidebar);
+        assert_eq!(cfg.welcome_sidebar_dock, "left");
+        assert_eq!(cfg.sidebar_dock, "left");
+    }
+
+    #[test]
     fn export_import_roundtrip_preserves_password() {
         let mut a = temp_store();
         a.cache.sessions.push(Session {
@@ -1983,29 +2382,5 @@ mod tests {
         let _ = std::fs::remove_file(&export_path);
         let _ = std::fs::remove_file(&a.path);
         let _ = std::fs::remove_file(&b.path);
-    }
-
-    #[test]
-    fn issue_300_interface_defaults_and_ranges_are_safe() {
-        let mut store = temp_store();
-
-        // Legacy configs keep the safe confirmation and familiar paste aliases.
-        store.cache = serde_json::from_str("{}").unwrap();
-        assert!(store.paste_confirm_enabled());
-        assert!(store.extra_paste_shortcuts_enabled());
-        assert!(!store.zen_mode());
-        assert_eq!(store.terminal_line_spacing(), 1.0);
-
-        store.set_terminal_line_spacing(0.1);
-        assert_eq!(store.terminal_line_spacing(), 0.8);
-        store.set_terminal_line_spacing(9.0);
-        assert_eq!(store.terminal_line_spacing(), 1.5);
-
-        store.set_paste_confirm_enabled(false);
-        store.set_extra_paste_shortcuts_enabled(false);
-        store.set_zen_mode(true);
-        assert!(!store.paste_confirm_enabled());
-        assert!(!store.extra_paste_shortcuts_enabled());
-        assert!(store.zen_mode());
     }
 }

@@ -58,7 +58,7 @@ async fn run_local(
     initial_cols: u32,
     initial_rows: u32,
 ) -> Result<()> {
-    let (program, args) = local_program(&session);
+    let (program, args) = local_program(&session.host);
     let label = if session.name.trim().is_empty() {
         program.clone()
     } else {
@@ -154,7 +154,9 @@ async fn run_local(
             }
             SessionCommand::AddTunnel { .. }
             | SessionCommand::StopTunnel(_)
-            | SessionCommand::SetResourceMonitoring(_) => {}
+            | SessionCommand::ClearFailedTunnels
+            | SessionCommand::TunnelStarted(_)
+            | SessionCommand::TunnelFailed(_) => {}
             SessionCommand::KillProcess { reply, .. } => {
                 let _ = reply.send(crate::ssh::ProcessKillResult {
                     success: false,
@@ -174,8 +176,8 @@ async fn run_local(
     Ok(())
 }
 
-fn local_program(session: &Session) -> (String, Vec<String>) {
-    match session.host.as_str() {
+fn local_program(kind: &str) -> (String, Vec<String>) {
+    match kind {
         #[cfg(windows)]
         "cmd" => (
             "cmd.exe".to_string(),
@@ -186,20 +188,7 @@ fn local_program(session: &Session) -> (String, Vec<String>) {
             ],
         ),
         #[cfg(windows)]
-        "wsl" => {
-            let mut args = Vec::new();
-            if !session.local_distribution.trim().is_empty() {
-                args.push("--distribution".to_string());
-                args.push(session.local_distribution.clone());
-            }
-            args.push("--cd".to_string());
-            args.push(if session.local_working_dir.trim().is_empty() {
-                "~".to_string()
-            } else {
-                session.local_working_dir.clone()
-            });
-            ("wsl.exe".to_string(), args)
-        }
+        "wsl" => ("wsl.exe".to_string(), Vec::new()),
         #[cfg(windows)]
         "powershell" | _ => (
             "powershell.exe".to_string(),
@@ -221,29 +210,15 @@ fn local_program(session: &Session) -> (String, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::local_program;
-    use crate::config::Session;
 
     #[cfg(windows)]
     #[test]
     fn windows_shells_start_in_utf8_mode() {
-        let mut session = Session::new_empty();
-        session.host = "powershell".to_string();
-        let (_, ps_args) = local_program(&session);
+        let (_, ps_args) = local_program("powershell");
         assert!(ps_args.iter().any(|arg| arg.contains("OutputEncoding")));
         assert!(ps_args.iter().any(|arg| arg.contains("InputEncoding")));
 
-        session.host = "cmd".to_string();
-        let (_, cmd_args) = local_program(&session);
+        let (_, cmd_args) = local_program("cmd");
         assert!(cmd_args.iter().any(|arg| arg.contains("chcp 65001")));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn wsl_uses_distribution_and_home_by_default() {
-        let mut session = Session::new_empty();
-        session.host = "wsl".to_string();
-        session.local_distribution = "Ubuntu-24.04".to_string();
-        let (_, args) = local_program(&session);
-        assert_eq!(args, ["--distribution", "Ubuntu-24.04", "--cd", "~"]);
     }
 }

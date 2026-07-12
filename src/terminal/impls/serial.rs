@@ -196,7 +196,9 @@ async fn run_serial(
             SessionCommand::Resize(_, _) => {}
             SessionCommand::AddTunnel { .. }
             | SessionCommand::StopTunnel(_)
-            | SessionCommand::SetResourceMonitoring(_) => {}
+            | SessionCommand::ClearFailedTunnels
+            | SessionCommand::TunnelStarted(_)
+            | SessionCommand::TunnelFailed(_) => {}
             SessionCommand::KillProcess { reply, .. } => {
                 let _ = reply.send(crate::ssh::ProcessKillResult {
                     success: false,
