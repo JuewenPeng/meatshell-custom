@@ -37,10 +37,12 @@ jobs:
                   | grep -oP '"tag_name":\s*"\K[^"]+')
           fi
           VER="${VER#v}"   # strip leading v
-          echo "Publishing meatshell-bin $VER"
-          sed -i "s/^pkgver=.*/pkgver=${VER}/" packaging/aur/PKGBUILD
+          AUR_VER="${VER//-/_}"
+          echo "Publishing meatshell-bin $AUR_VER"
+          sed -i "s/^pkgver=.*/pkgver=${AUR_VER}/" packaging/aur/PKGBUILD
           sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/aur/PKGBUILD
           echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "AUR_VER=$AUR_VER" >> "$GITHUB_ENV"
 
       - name: Publish meatshell-bin to the AUR
         # Skips cleanly until all required AUR secrets are configured.
@@ -52,6 +54,6 @@ jobs:
           commit_username: ${{ env.AUR_USERNAME }}
           commit_email: ${{ env.AUR_EMAIL }}
           ssh_private_key: ${{ env.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "Update to ${{ env.VER }}"
+          commit_message: "Update to ${{ env.AUR_VER }}"
           updpkgsums: true
           ssh_keyscan_types: rsa,ed25519
