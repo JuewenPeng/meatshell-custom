@@ -9027,12 +9027,11 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             let tab_id = tab_id.to_string();
             // A pasted path may carry trailing whitespace / newline (#54).
             let path = path.trim();
-            let resolved = if path == ".." {
-                let current = weak.upgrade().and_then(|w| {
+            let current = weak
+                .upgrade()
+                .and_then(|w| {
                     let terminals_rc = w.get_terminals();
-                    let terminals = terminals_rc
-                        .as_any()
-                        .downcast_ref::<VecModel<TerminalState>>()?;
+                    let terminals = terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>()?;
                     for i in 0..terminals.row_count() {
                         if let Some(row) = terminals.row_data(i) {
                             if row.id.as_str() == tab_id {
@@ -9041,8 +9040,10 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
                         }
                     }
                     None
-                });
-                parent_path(&current.unwrap_or_else(|| "/".to_string()))
+                })
+                .unwrap_or_else(|| "/".to_string());
+            let resolved = if path == ".." {
+                parent_path(&current)
             } else {
                 path.to_string()
             };
@@ -9052,8 +9053,27 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             sftp_last_cwd.lock().unwrap().remove(&tab_id);
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(&tab_id) {
-                    h.reveal_tree_path(resolved.clone());
-                    h.list_dir(resolved);
+                    h.navigate_to(current, resolved);
+                }
+            }
+        });
+    }
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_navigate_back(move |tab_id: SharedString| {
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(tab_id.as_str()) {
+                    h.navigate_back();
+                }
+            }
+        });
+    }
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_navigate_forward(move |tab_id: SharedString| {
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(tab_id.as_str()) {
+                    h.navigate_forward();
                 }
             }
         });
