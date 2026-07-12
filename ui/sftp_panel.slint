@@ -193,6 +193,7 @@ export component SftpPanel inherits Rectangle {
     in property <string>  status: @tr("SFTP not connected");
     in property <bool>    loading: false;
     in property <[SftpTreeNode]> tree-nodes: [];
+    in property <int> tree-focus-index: -1;
     in property <string> current-tab-id;
     in property <[TabInfo]> transfer-targets: [];
     in property <string> sort-key: "";
@@ -244,6 +245,8 @@ export component SftpPanel inherits Rectangle {
     property <string> focused-tree-path;
     property <bool> tree-name-click-pending: false;
     property <string> pending-tree-click-path;
+    property <bool> tree-scroll-pending: false;
+    property <string> last-tree-scroll-path;
     property <int> selection-anchor-row: -1;
     property <bool> suppress-double-open: false;
     in property <int> selected-count;      // number of checked entries (#100)
@@ -364,6 +367,14 @@ export component SftpPanel inherits Rectangle {
         running: root.tree-name-click-pending;
         triggered => { root.tree-name-click-pending = false; }
     }
+
+    changed tree-focus-index => {
+        if (root.tree-focus-index >= 0 && root.current-path != root.last-tree-scroll-path) {
+            root.tree-scroll-pending = true;
+            root.last-tree-scroll-path = root.current-path;
+        }
+    }
+
     toolbar-tooltip-delay := Timer {
         interval: 250ms;
         running: root.toolbar-tooltip-pending-text != "";
@@ -518,25 +529,6 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
 
-                up-btn := Rectangle {
-                    visible: root.panel-mode == "files" && root.toolbar-enabled;
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: (root.toolbar-enabled && up-ta.has-hover) ? Theme.bg-hover : transparent;
-                    up-ta := TouchArea {
-                        mouse-cursor: root.toolbar-enabled ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Parent directory" : "上级目录", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Parent directory" : "上级目录"); }
-                        }
-                        clicked => { if (root.toolbar-enabled) { root.navigate(".."); } }
-                    }
-                    Text { text: "\u{E5D8}"; font-family: "Material Icons";
-                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-md;
-                           horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
-                }
-
                 // Upload: a small menu offers file vs folder (#85). The remote
                 // SFTP upload handles both; only the local picker differs.
                 ul-btn := Rectangle {
@@ -686,6 +678,24 @@ export component SftpPanel inherits Rectangle {
                     }
                     Text { text: "\u{E14F}"; font-family: "Material Icons";
                            color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
+                }
+
+                Rectangle {
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: (root.toolbar-enabled && up-ta.has-hover) ? Theme.bg-hover : transparent;
+                    up-ta := TouchArea {
+                        mouse-cursor: root.toolbar-enabled ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Parent directory" : "上级目录", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Parent directory" : "上级目录"); }
+                        }
+                        clicked => { if (root.toolbar-enabled) { root.navigate(".."); } }
+                    }
+                    Text { text: "\u{E5D8}"; font-family: "Material Icons";
+                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-md;
                            horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
                 }
@@ -939,6 +949,20 @@ export component SftpPanel inherits Rectangle {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    tree-scroll-timer := Timer {
+                        interval: 0ms;
+                        running: root.tree-scroll-pending;
+                        triggered => {
+                            if (root.tree-focus-index >= 0
+                                    && (root.tree-focus-index * 22px < -tree-list.viewport-y
+                                        || (root.tree-focus-index + 1) * 22px > -tree-list.viewport-y + tree-list.height)) {
+                                tree-list.viewport-y = min(0px,
+                                    tree-list.height / 5 - root.tree-focus-index * 22px - 11px);
+                            }
+                            root.tree-scroll-pending = false;
                         }
                     }
 
