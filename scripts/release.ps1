@@ -7,105 +7,109 @@ param(
     [switch] $DryRun
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
 function Run-Git {
-    param([string[]] $GitArgs)
+    param([Parameter(Mandatory = $true)][string[]] $CommandArgs)
 
     if ($DryRun) {
-        Write-Host "git $($GitArgs -join ' ')"
+        Write-Host "git $($CommandArgs -join ' ')"
         return
     }
 
-    & git @GitArgs
+    & git @CommandArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "git $($GitArgs -join ' ') failed"
+        throw "git $($CommandArgs -join ' ') failed"
     }
 }
 
 function Run-Cargo {
-    param([string[]] $CargoArgs)
+    param([Parameter(Mandatory = $true)][string[]] $CommandArgs)
 
     if ($DryRun) {
-        Write-Host "cargo $($CargoArgs -join ' ')"
+        Write-Host "cargo $($CommandArgs -join ' ')"
         return
     }
 
-    & cargo @CargoArgs
+    & cargo @CommandArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "cargo $($CargoArgs -join ' ') failed"
+        throw "cargo $($CommandArgs -join ' ') failed"
     }
 }
 
-function Run-CheckedOutput {
+function Read-TextFile {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $reader = New-Object System.IO.StreamReader($Path, $true)
+    try {
+        return $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
+
+function Write-Utf8NoBom {
     param(
-        [string] $Expected,
-        [Parameter(ValueFromRemainingArguments = $true)][string[]] $Command
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Content
     )
 
-    if ($DryRun) {
-        Write-Host "$($Command -join ' ')"
-        return
-    }
-
-    $rawOutput = & $Command[0] @($Command | Select-Object -Skip 1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "$($Command -join ' ') failed"
-    }
-    $output = ($rawOutput | Out-String).Trim()
-    if ($output -ne $Expected) {
-        throw "Expected '$Expected' but got '$output'."
-    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
 }
 
 $repoRoot = (& git rev-parse --show-toplevel).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repoRoot)) {
-    throw "This script must be run inside a git repository."
+    throw 'This script must be run inside a git repository.'
 }
 
 Set-Location $repoRoot
 
 & git diff --quiet --exit-code
 if ($LASTEXITCODE -ne 0) {
-    throw "Tracked files have unstaged changes. Commit or stash them before releasing."
+    throw 'Tracked files have unstaged changes. Commit or stash them before releasing.'
 }
 
 & git diff --cached --quiet --exit-code
 if ($LASTEXITCODE -ne 0) {
-    throw "Tracked files have staged changes. Commit or stash them before releasing."
+    throw 'Tracked files have staged changes. Commit or stash them before releasing.'
 }
 
-$existingTag = (& git tag --list $Tag)
+$existingTag = & git tag --list $Tag
 if ($existingTag) {
     throw "Tag '$Tag' already exists."
 }
 
 $version = $Tag.Substring(1)
-$cargoTomlPath = Join-Path $repoRoot "Cargo.toml"
-$cargoLockPath = Join-Path $repoRoot "Cargo.lock"
-$androidCargoTomlPath = Join-Path $repoRoot "android/Cargo.toml"
-$androidCargoLockPath = Join-Path $repoRoot "android/Cargo.lock"
+$escapedVersion = [regex]::Escape($version)
+$cargoTomlPath = Join-Path $repoRoot 'Cargo.toml'
+$cargoLockPath = Join-Path $repoRoot 'Cargo.lock'
 
-$cargoToml = Get-Content -LiteralPath $cargoTomlPath -Raw
+$cargoToml = Read-TextFile $cargoTomlPath
 $newCargoToml = [regex]::Replace(
     $cargoToml,
-    '(?ms)^(\[package\]\s+.*?^version\s*=\s*")[^"]+(")',
+    '(?ms)^(\[package\]\s+.*?^version\s*=\s*")[^"]+("\s*)$',
     "`${1}$version`${2}",
     1
 )
-if ($newCargoToml -eq $cargoToml) {
-    throw "Could not update [package].version in Cargo.toml."
+
+$cargoTomlVersionPattern = '(?m)^version\s*=\s*"{0}"\s*$' -f $escapedVersion
+if ($newCargoToml -eq $cargoToml -and $cargoToml -notmatch $cargoTomlVersionPattern) {
+    throw 'Could not update [package].version in Cargo.toml.'
 }
 
-$cargoLock = Get-Content -LiteralPath $cargoLockPath -Raw
+$cargoLock = Read-TextFile $cargoLockPath
 $newCargoLock = [regex]::Replace(
     $cargoLock,
-    '(?ms)^(name\s*=\s*"meatshell"\s*)(\r?\n)(version\s*=\s*")[^"]+(")',
+    '(?ms)^(name\s*=\s*"meatshell"\s*)(\r?\n)(version\s*=\s*")[^"]+("\s*)$',
     "`${1}`${2}`${3}$version`${4}",
     1
 )
-if ($newCargoLock -eq $cargoLock) {
-    throw "Could not update meatshell version in Cargo.lock."
+
+$cargoLockVersionPattern = '(?ms)^name\s*=\s*"meatshell"\s*\r?\nversion\s*=\s*"{0}"\s*$' -f $escapedVersion
+if ($newCargoLock -eq $cargoLock -and $cargoLock -notmatch $cargoLockVersionPattern) {
+    throw 'Could not update meatshell version in Cargo.lock.'
 }
 
 $androidCargoToml = Get-Content -LiteralPath $androidCargoTomlPath -Raw
@@ -131,38 +135,48 @@ if ($newAndroidCargoLock -eq $androidCargoLock) {
 }
 
 if ($DryRun) {
-    Write-Host "Would update desktop and Android Cargo manifests/locks to $version."
-} else {
-    # Windows PowerShell 5 uses the active ANSI code page for Set-Content by
-    # default, which corrupts non-ASCII comments and makes Cargo reject the
-    # manifests as invalid UTF-8. Write explicit UTF-8 without a BOM instead.
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($cargoTomlPath, $newCargoToml, $utf8NoBom)
-    [System.IO.File]::WriteAllText($cargoLockPath, $newCargoLock, $utf8NoBom)
-    [System.IO.File]::WriteAllText($androidCargoTomlPath, $newAndroidCargoToml, $utf8NoBom)
-    [System.IO.File]::WriteAllText($androidCargoLockPath, $newAndroidCargoLock, $utf8NoBom)
+    Write-Host "Would set Cargo.toml and Cargo.lock version to $version."
+}
+else {
+    Write-Utf8NoBom $cargoTomlPath $newCargoToml
+    Write-Utf8NoBom $cargoLockPath $newCargoLock
 }
 
-Run-Cargo -CargoArgs @("check", "--locked")
-Run-CheckedOutput -Expected "meatshell $version" -Command @(
-    "cargo", "run", "--locked", "--", "--version"
-)
+Run-Cargo @('check', '--locked')
 
-Run-Git -GitArgs @(
-    "add",
-    "Cargo.toml",
-    "Cargo.lock",
-    "android/Cargo.toml",
-    "android/Cargo.lock"
-)
-Run-Git -GitArgs @("commit", "-m", "Release $Tag")
-Run-Git -GitArgs @("tag", "-a", $Tag, "-m", "Release $Tag")
+if ($DryRun) {
+    Write-Host 'cargo run --locked -- --version'
+    Write-Host "Would verify output equals: meatshell $version"
+}
+else {
+    Write-Host 'Verifying executable version...'
+
+    $versionOutput = @(& cargo run --locked -- --version)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'cargo run --locked -- --version failed'
+    }
+
+    $actualVersion = ($versionOutput | Select-Object -Last 1).ToString().Trim()
+    $expectedVersion = "meatshell $version"
+
+    Write-Host "Expected: $expectedVersion"
+    Write-Host "Actual:   $actualVersion"
+
+    if ($actualVersion -ne $expectedVersion) {
+        throw "Binary version mismatch. Expected '$expectedVersion', got '$actualVersion'."
+    }
+}
+
+Run-Git @('add', 'Cargo.toml', 'Cargo.lock')
+Run-Git @('commit', '-m', "Release $Tag")
+Run-Git @('tag', '-a', $Tag, '-m', "Release $Tag")
 
 if ($Push) {
-    Run-Git -GitArgs @("push", "origin", "HEAD")
-    Run-Git -GitArgs @("push", "origin", $Tag)
+    Run-Git @('push', 'origin', 'HEAD')
+    Run-Git @('push', 'origin', $Tag)
     Write-Host "Released $Tag and pushed branch + tag."
-} else {
+}
+else {
     Write-Host "Created release commit and tag $Tag."
     Write-Host "Push with: git push origin HEAD && git push origin $Tag"
 }

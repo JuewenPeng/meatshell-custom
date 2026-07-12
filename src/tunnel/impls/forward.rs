@@ -65,6 +65,8 @@ pub fn spawn_local(
     target_host: String,
     target_port: u16,
     events: UnboundedSender<SessionEvent>,
+    tunnel_id: String,
+    command_tx: UnboundedSender<crate::ssh::SessionCommand>,
 ) -> JoinHandle<()> {
     let bind = bind_target(&bind_addr, bind_port);
     tokio::spawn(async move {
@@ -72,9 +74,11 @@ pub fn spawn_local(
             Ok(l) => l,
             Err(e) => {
                 notice(&events, format!("-L {bind} 监听失败 / bind failed: {e}"));
+                let _ = command_tx.send(crate::ssh::SessionCommand::TunnelFailed(tunnel_id));
                 return;
             }
         };
+        let _ = command_tx.send(crate::ssh::SessionCommand::TunnelStarted(tunnel_id));
         notice(&events, format!("-L {bind} → {target_host}:{target_port}"));
         loop {
             let (mut inbound, peer) = match listener.accept().await {
@@ -108,6 +112,8 @@ pub fn spawn_dynamic(
     bind_addr: String,
     bind_port: u16,
     events: UnboundedSender<SessionEvent>,
+    tunnel_id: String,
+    command_tx: UnboundedSender<crate::ssh::SessionCommand>,
 ) -> JoinHandle<()> {
     let bind = bind_target(&bind_addr, bind_port);
     tokio::spawn(async move {
@@ -115,9 +121,11 @@ pub fn spawn_dynamic(
             Ok(l) => l,
             Err(e) => {
                 notice(&events, format!("-D {bind} 监听失败 / bind failed: {e}"));
+                let _ = command_tx.send(crate::ssh::SessionCommand::TunnelFailed(tunnel_id));
                 return;
             }
         };
+        let _ = command_tx.send(crate::ssh::SessionCommand::TunnelStarted(tunnel_id));
         notice(&events, format!("-D {bind} (SOCKS5)"));
         loop {
             let (inbound, peer) = match listener.accept().await {

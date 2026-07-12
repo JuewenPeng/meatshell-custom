@@ -102,6 +102,91 @@ export component GhostButton inherits Rectangle {
     }
 }
 
+// --- AutoScrollTextInput ---------------------------------------------------
+// A bare single-line TextInput that keeps the cursor visible horizontally.
+// It intentionally draws no background/border so callers can keep their custom
+// field chrome while still getting LineEdit-like cursor-follow behavior.
+export component AutoScrollTextInput inherits Rectangle {
+    in-out property <string> text;
+    in property <string> font-family;
+    in property <length> font-size;
+    in property <int> font-weight;
+    in property <brush> text-color: Theme.text-primary;
+    in property <InputType> input-type: InputType.text;
+    in property <bool> read-only: false;
+    in property <bool> input-enabled: true;
+    in property <bool> auto-focus: false;
+    out property <bool> has-focus: input.has-focus;
+    out property <int> cursor-position_byte-offset: input.cursor-position_byte-offset;
+    callback accepted();
+    callback edited();
+    callback input-key-pressed(KeyEvent) -> EventResult;
+    callback input-key-released(KeyEvent) -> EventResult;
+
+    property <length> scroll-x;
+    clip: true;
+    min-width: 1px;
+
+    public function focus-input() {
+        input.focus();
+        root.scroll-to-end();
+    }
+
+    public function set-selection-offsets(start: int, end: int) {
+        input.set-selection-offsets(start, end);
+        root.keep-cursor-visible({ x: input.preferred-width, y: 0px });
+    }
+
+    public function select-all() { input.select-all(); }
+    public function clear-selection() { input.clear-selection(); }
+    public function cut() { input.cut(); }
+    public function copy() { input.copy(); }
+    public function paste() { input.paste(); }
+
+    public function scroll-to-end() {
+        input.set-selection-offsets(1000000, 1000000);
+        root.scroll-x = min(0px, root.width - input.preferred-width - input.text-cursor-width);
+    }
+
+    public function keep-cursor-visible(pos: Point) {
+        if (pos.x + root.scroll-x < 0px) {
+            root.scroll-x = -pos.x;
+        } else if (pos.x + root.scroll-x > root.width - input.text-cursor-width) {
+            root.scroll-x = root.width - input.text-cursor-width - pos.x;
+        }
+    }
+
+    changed width => {
+        root.keep-cursor-visible({ x: input.preferred-width, y: 0px });
+    }
+
+    input := TextInput {
+        x: root.scroll-x;
+        width: max(root.width, self.preferred-width);
+        height: root.height;
+        text <=> root.text;
+        color: root.text-color;
+        font-family: root.font-family;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        vertical-alignment: center;
+        single-line: true;
+        input-type: root.input-type;
+        read-only: root.read-only;
+        enabled: root.input-enabled;
+        init => {
+            if (root.auto-focus) {
+                root.focus-input();
+            }
+        }
+        cursor-position-changed(pos) => { root.keep-cursor-visible(pos); }
+        accepted => { root.accepted(); }
+        edited => { root.edited(); }
+        key-pressed(e) => { root.input-key-pressed(e) }
+        key-released(e) => { root.input-key-released(e) }
+    }
+}
+
 // --- LabeledInput ----------------------------------------------------------
 export component LabeledInput inherits VerticalLayout {
     in property <string> label;
@@ -115,7 +200,7 @@ export component LabeledInput inherits VerticalLayout {
     callback canceled();   // Esc pressed in the field (#140-3)
     spacing: 4px;
     property <bool> focus-pending: false;
-    public function focus-input() { input.focus(); }
+    public function focus-input() { input.focus-input(); }
 
     // A LabeledInput is often created inside a conditional dialog. Focusing its
     // TextInput during `init` asks Slint for IME geometry while the surrounding
@@ -127,7 +212,7 @@ export component LabeledInput inherits VerticalLayout {
         running: root.focus-pending;
         triggered => {
             root.focus-pending = false;
-            if (root.auto-focus) { input.focus(); }
+            if (root.auto-focus) { input.focus-input(); }
         }
     }
 
@@ -144,23 +229,21 @@ export component LabeledInput inherits VerticalLayout {
         border-color: input.has-focus ? Theme.accent : root.idle-border;
         background: root.input-background;
 
-        input := TextInput {
+        input := AutoScrollTextInput {
             x: 10px;
             y: 0px;
             width: parent.width - 20px;
             height: parent.height;
             text <=> root.value;
-            color: Theme.text-primary;
+            text-color: Theme.text-primary;
             // A CJK-capable family — TextInput doesn't glyph-fallback reliably
             // across machines, so typed Chinese (incl. punctuation like 、) can
             // render as tofu without an explicit font (#54).
             font-family: Theme.ui-font-family;
             font-size: Theme.fs-md;
-            vertical-alignment: center;
-            single-line: true;
             input-type: root.password ? InputType.password : InputType.text;
             accepted => { root.accepted(); }
-            key-pressed(e) => {
+            input-key-pressed(e) => {
                 if (e.text == Key.Escape) { root.canceled(); accept }
                 else { reject }   // let TextInput handle normal typing
             }
@@ -213,18 +296,17 @@ export component Sparkline inherits Rectangle {
 export component ToolStrip inherits Rectangle {
     in property <string> dock-edge;   // left | right | top | bottom
     in property <string> glyph;       // the panel's tool icon (Material Icons)
+    in property <bool> active: false;
     in property <bool> show-second: false;
     in property <string> second-glyph;
-    in property <bool> show-third: false;
-    in property <string> third-glyph;
+    in property <bool> second-active: false;
     in property <string> tooltip;
     in property <bool> enabled: true;
     callback expand();
     callback expand-second();
-    callback expand-third();
     property <bool> horizontal: root.dock-edge == "top" || root.dock-edge == "bottom";
 
-    background: Theme.bg-panel-alt;
+    background: Theme.bg-toolstrip;
     // Hairline on the inner edge (facing the central content).
     Rectangle {
         x: root.dock-edge == "left" ? parent.width - self.width : 0px;
@@ -240,13 +322,16 @@ export component ToolStrip inherits Rectangle {
         x: root.horizontal ? 4px : (parent.width - self.width) / 2;
         y: root.horizontal ? (parent.height - self.height) / 2 : 4px;
         border-radius: Theme.radius-sm;
-          background: root.enabled && ta.has-hover ? Theme.bg-hover : transparent;
-          Text {
-              text: root.glyph;
-              font-family: "Material Icons";
-              font-size: 18px;
-              color: !root.enabled ? Theme.text-muted.with-alpha(0.45)
-                  : ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+         background: !root.enabled ? transparent
+             : root.active ? Theme.accent.with-alpha(0.18)
+             : ta.has-hover ? Theme.bg-hover : transparent;
+         Text {
+             text: root.glyph;
+             font-family: "Material Icons";
+             font-size: 18px;
+             color: !root.enabled ? Theme.text-muted.with-alpha(0.45)
+                 : root.active ? Theme.accent
+                 : ta.has-hover ? Theme.text-primary : Theme.text-secondary;
             horizontal-alignment: center;
             vertical-alignment: center;
             width: parent.width;
@@ -267,12 +352,14 @@ export component ToolStrip inherits Rectangle {
         x: root.horizontal ? 38px : (parent.width - self.width) / 2;
         y: root.horizontal ? (parent.height - self.height) / 2 : 38px;
         border-radius: Theme.radius-sm;
-        background: ta2.has-hover ? Theme.bg-hover : transparent;
+        background: root.second-active ? Theme.accent.with-alpha(0.18)
+            : ta2.has-hover ? Theme.bg-hover : transparent;
         Text {
             text: root.second-glyph;
             font-family: "Material Icons";
             font-size: 18px;
-            color: ta2.has-hover ? Theme.text-primary : Theme.text-secondary;
+            color: root.second-active ? Theme.accent
+                : ta2.has-hover ? Theme.text-primary : Theme.text-secondary;
             horizontal-alignment: center;
             vertical-alignment: center;
             width: parent.width;
@@ -283,28 +370,6 @@ export component ToolStrip inherits Rectangle {
             clicked => { root.expand-second(); }
         }
     }
-    if root.show-third : Rectangle {
-        width: 30px;
-        height: 30px;
-        x: root.horizontal ? 72px : (parent.width - self.width) / 2;
-        y: root.horizontal ? (parent.height - self.height) / 2 : 72px;
-        border-radius: Theme.radius-sm;
-        background: ta3.has-hover ? Theme.bg-hover : transparent;
-        Text {
-            text: root.third-glyph;
-            font-family: "Material Icons";
-            font-size: 18px;
-            color: ta3.has-hover ? Theme.text-primary : Theme.text-secondary;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            width: parent.width;
-            height: parent.height;
-        }
-        ta3 := TouchArea {
-            mouse-cursor: pointer;
-            clicked => { root.expand-third(); }
-        }
-    }
 }
 
 export component DockExpandButton inherits Rectangle {
@@ -312,6 +377,7 @@ export component DockExpandButton inherits Rectangle {
     // For top/bottom docks, hug the right corner instead of the left. SFTP uses
     // this so the expand button stays on the side its controls live on.
     in property <bool> hug-right: false;
+    in property <bool> flat: false;
     callback expand();
     // Root is a transparent overlay that fills the host area; the actual button
     // positions itself within it (a component's own root may not reference
@@ -324,10 +390,10 @@ export component DockExpandButton inherits Rectangle {
          : (root.dock-edge == "top" || root.dock-edge == "bottom")
            ? (root.hug-right ? parent.width - self.width - 6px : 6px)
          : 2px;
-        y: root.dock-edge == "bottom" ? parent.height - self.height - 1px : 8px;
+        y: (root.dock-edge == "top" || root.dock-edge == "bottom") ? (parent.height - self.height) / 2 : 8px;
         border-radius: Theme.radius-sm;
-        background: ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
-        border-width: 1px;
+        background: ta.has-hover ? Theme.bg-hover : (root.flat ? transparent : Theme.bg-elevated);
+        border-width: root.flat ? 0px : 1px;
         border-color: Theme.border-subtle;
         ta := TouchArea {
             mouse-cursor: pointer;

@@ -534,41 +534,8 @@ msgstr "Terminating process..."
 msgid "Terminate"
 msgstr "Terminate"
 
-msgid "Search by name or host..."
-msgstr "Search by name or host..."
+msgid "Files"
+msgstr "Files"
 
-msgid "No matching sessions"
-msgstr "No matching sessions"
-
-msgid "Clear search"
-msgstr "Clear search"
-
-msgid "新建窗口"
-msgstr "New Window"
-
-msgid "Session name"
-msgstr "Session name"
-
-msgid "Leave empty to restore the default name"
-msgstr "Leave empty to restore the default name"
-
-msgid "Login triggers"
-msgstr "Login triggers"
-
-msgid "Expected output"
-msgstr "Expected output"
-
-msgid "Response (leave blank to keep saved value)"
-msgstr "Response (leave blank to keep saved value)"
-
-msgid "Send Enter"
-msgstr "Send Enter"
-
-msgid "Repeat"
-msgstr "Repeat"
-
-msgid "Add trigger"
-msgstr "Add trigger"
-
-msgid "When expected text appears, send the response automatically. Responses are stored encrypted."
-msgstr "When expected text appears, send the response automatically. Responses are stored encrypted."
+msgid "Tunnels"
+msgstr "Tunnels"
