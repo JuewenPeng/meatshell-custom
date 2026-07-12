@@ -7073,7 +7073,6 @@ fn apply_session_event_to_window(
                     is_dir: n.is_dir,
                 })
                 .collect();
-            let model = ModelRc::from(std::rc::Rc::new(VecModel::from(slint_nodes)));
             update_terminal(&|t| {
                 let current_path = t.sftp_path.to_string();
                 t.sftp_tree_focus_index = nodes
@@ -7081,7 +7080,18 @@ fn apply_session_event_to_window(
                     .position(|n| n.path == current_path)
                     .map(|i| i as i32)
                     .unwrap_or(-1);
-                t.sftp_tree_nodes = model.clone();
+                // Keep ListView's viewport stable across tree refreshes. Replacing
+                // the model after a wheel scroll makes Slint recreate the view and
+                // shifts it by a row on the next node click.
+                if let Some(existing) = t
+                    .sftp_tree_nodes
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpTreeNode>>()
+                {
+                    existing.set_vec(slint_nodes.clone());
+                } else {
+                    t.sftp_tree_nodes = ModelRc::from(std::rc::Rc::new(VecModel::from(slint_nodes.clone())));
+                }
             });
         }
         SessionEvent::SftpMoveTreeUpdate(nodes) => {
@@ -8267,6 +8277,7 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             sftp_last_cwd.lock().unwrap().remove(&tab_id);
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(&tab_id) {
+                    h.reveal_tree_path(resolved.clone());
                     h.list_dir(resolved);
                 }
             }
