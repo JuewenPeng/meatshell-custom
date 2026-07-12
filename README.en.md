@@ -40,6 +40,10 @@ This branch is based on the original meatshell project with a few custom changes
 - Improved SFTP header dragging so columns that reached their minimum width follow the mouse immediately when dragged back, without accumulating out-of-bounds distance.
 - When the SFTP panel is collapsed, unavailable path fields and file-operation buttons are hidden while expand / collapse controls remain available.
 - SFTP panel drag-to-dock is limited to the drag handle left of the path bar, avoiding accidental drags from file-list or directory-tree whitespace.
+- The SFTP panel now has `Files` and `Port Forwarding` tabs. Connected sessions can create runtime local `-L` and dynamic `-D` (SOCKS5) forwards, view starting / running / failed state, stop forwards, and clear failed records.
+- SFTP directory-tree refreshes preserve the manually chosen scroll position; navigating to a folder outside the visible range expands and places the selected folder near the upper part of the tree.
+- The SFTP content area supports mouse-button back / forward navigation. Each session keeps up to 20 path-only history entries; normal navigation clears forward history, while refresh does not create history.
+- During large-directory loading, consecutive queued directory navigation and refresh requests are coalesced so only the latest view request runs after the current operation finishes.
 
 ## Screenshots
 
