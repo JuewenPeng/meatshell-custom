@@ -119,6 +119,11 @@ export component TerminalView inherits Rectangle {
     in property <[SftpTreeNode]> sftp-move-tree-nodes: [];
     in property <int> sftp-tree-focus-index: -1;
     in property <int> sftp-move-tree-focus-index: -1;
+    in property <int> sftp-restore-selected-row: -1;
+    in property <length> sftp-restore-viewport-y;
+    in property <bool> sftp-has-restore-viewport: false;
+    in property <int> sftp-list-scroll-token: 0;
+    in property <int> sftp-list-scroll-mode: 0;
     in property <[TabInfo]> sftp-transfer-targets: [];
     in property <string> sftp-sort-key: "";
     in property <int> sftp-sort-dir: 0;
@@ -189,6 +194,7 @@ export component TerminalView inherits Rectangle {
     callback cycle-tab(bool /* reverse */);
     callback terminal-resize(float, float);
     callback sftp-navigate(string);
+    callback sftp-remember-list-position(string, length);
     callback sftp-navigate-back();
     callback sftp-navigate-forward();
     callback sftp-download(string);
@@ -1655,6 +1661,11 @@ export component TerminalView inherits Rectangle {
             loading:       root.sftp-loading;
             tree-nodes:    root.sftp-tree-nodes;
             tree-focus-index: root.sftp-tree-focus-index;
+            restore-selected-row: root.sftp-restore-selected-row;
+            restore-viewport-y: root.sftp-restore-viewport-y;
+            has-restore-viewport: root.sftp-has-restore-viewport;
+            list-scroll-token: root.sftp-list-scroll-token;
+            list-scroll-mode: root.sftp-list-scroll-mode;
             transfer-targets: root.sftp-transfer-targets;
             selected-count: root.sftp-selected-count;
             sort-key: root.sftp-sort-key;
@@ -1673,6 +1684,7 @@ export component TerminalView inherits Rectangle {
                 }
             }
             navigate(path)      => { root.sftp-navigate(path); }
+            remember-list-position(path, viewport-y) => { root.sftp-remember-list-position(path, viewport-y); }
             navigate-back()     => { root.sftp-navigate-back(); }
             navigate-forward()  => { root.sftp-navigate-forward(); }
             download(path)      => { root.sftp-download(path); }
