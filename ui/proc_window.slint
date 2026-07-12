@@ -26,6 +26,7 @@ export component ProcWindow inherits Window {
     // defaults (dark) unless Rust mirrors the main window's theme/scale/font here.
     // These two-way bindings give Rust one knob per setting (see sync in app.rs).
     in-out property <bool> dark-mode <=> Theme.dark;
+    in-out property <string> theme-variant <=> Theme.variant;
     in-out property <float> ui-scale <=> Theme.ui-scale;
     in-out property <string> ui-font-family <=> Theme.ui-font-family;
     // Immersive wallpaper — mirrored from the main window so this detached window

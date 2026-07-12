@@ -1,4 +1,4 @@
-//! Top-level UI state machine.
+﻿//! Top-level UI state machine.
 //!
 //! Responsibilities:
 //!   * Load the config store and expose sessions to Slint.
@@ -645,6 +645,7 @@ pub fn run() -> Result<()> {
     {
         let is_dark = theme_pref_is_dark(&store.borrow());
         window.set_dark_mode(is_dark);
+        window.set_theme_variant(store.borrow().theme_variant().into());
     }
     // On macOS, app shortcuts use Cmd (⌘) so physical Ctrl stays free for the
     // shell (#158); on Windows/Linux they stay Ctrl-based.
@@ -661,6 +662,7 @@ pub fn run() -> Result<()> {
         window.set_term_font_size(s.font_size() as f32);
         window.set_ui_scale(s.ui_scale() as f32 / 100.0); // global UI zoom (#100)
         window.set_panel_font(s.panel_font() as f32 / 100.0); // settings-panel font scale
+        window.set_terminal_ctrl_c_copy(s.terminal_ctrl_c_copy());
     }
 
     // Apply the saved immersive wallpaper (overrides dark/light when set; a
@@ -724,8 +726,10 @@ pub fn run() -> Result<()> {
         });
     }
 
-    // Interface setting: collapse the sidebars by default (#78). Seed the
-    // checkboxes, apply the collapsed state once at startup, and persist toggles.
+    // Interface setting: collapse the panels by default (#78). Seed the
+    // checkboxes and apply the default only once at startup; changing the
+    // preference while the app is running affects the next launch, not the
+    // currently open panels.
     {
         let s = store.borrow();
         let collapse_sidebar = s.collapse_sidebar_default();
@@ -733,7 +737,7 @@ pub fn run() -> Result<()> {
         let sidebar_dock = s.sidebar_dock();
         let welcome_as_sidebar = s.welcome_as_sidebar();
         let welcome_sidebar_dock = s.welcome_sidebar_dock();
-        let mut sidebar_collapsed = s.sidebar_collapsed().unwrap_or(collapse_sidebar);
+        let mut sidebar_collapsed = collapse_sidebar;
         let welcome_collapsed = s.welcome_collapsed().unwrap_or(false);
         if welcome_as_sidebar
             && sidebar_dock == welcome_sidebar_dock
@@ -836,15 +840,6 @@ pub fn run() -> Result<()> {
             let _ = s.save();
         });
     }
-    {
-        let store = store.clone();
-        window.on_set_collapse_sftp_default(move |v| {
-            let mut s = store.borrow_mut();
-            s.set_collapse_sftp_default(v);
-            let _ = s.save();
-        });
-    }
-
     // Session-sync upload setting (#sync). Persisted; only has effect while the
     // session-sync toggle is on. Read live from the window in the upload handler.
     window.set_sync_upload_enabled(store.borrow().sync_upload());
@@ -996,6 +991,20 @@ pub fn run() -> Result<()> {
             }
         });
     }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_terminal_ctrl_c_copy(move |enabled: bool| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_terminal_ctrl_c_copy(enabled);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_terminal_ctrl_c_copy(enabled);
+            }
+        });
+    }
 
     // Wallpaper: pick a built-in / none, or open the file dialog for a custom one.
     {
@@ -1111,6 +1120,16 @@ pub fn run() -> Result<()> {
 
     let terminals_model: Rc<VecModel<TerminalState>> = Rc::new(VecModel::default());
     window.set_terminals(ModelRc::from(terminals_model.clone()));
+    let startup_collapse_sftp_default = store.borrow().collapse_sftp_default();
+
+    {
+        let store = store.clone();
+        window.on_set_collapse_sftp_default(move |v| {
+            let mut s = store.borrow_mut();
+            s.set_collapse_sftp_default(v);
+            let _ = s.save();
+        });
+    }
 
     // Split-pane layout tree (v0.5). Starts as a single pane owning the welcome
     // tab; tab opens/closes/moves mutate it and re-flatten into the `panes`
@@ -1263,6 +1282,7 @@ pub fn run() -> Result<()> {
         local_snap.clone(),
         local_net_hist.clone(),
         sftp_follow_cd.clone(),
+        startup_collapse_sftp_default,
     );
 
     // Recompute the sidebar whenever the active tab changes (fired from Slint's
@@ -1310,7 +1330,8 @@ pub fn run() -> Result<()> {
         });
     }
 
-    // Theme toggle: flip dark ↔ light, persist the preference, and re-render
+    // Theme toggle: cycle dark -> light -> Jiangnan light -> dark, persist the
+    // preference, and re-render
     // every open terminal with the new ANSI palette so historical output is
     // also recoloured (not just new output).
     {
@@ -1320,9 +1341,17 @@ pub fn run() -> Result<()> {
         let proc_weak = proc_win.as_weak();
         window.on_toggle_theme(move || {
             let Some(w) = weak.upgrade() else { return };
-            let next_dark = !w.get_dark_mode();
+            let current_variant = w.get_theme_variant().to_string();
+            let (next_dark, next_variant) = if w.get_dark_mode() {
+                (false, "vscode")
+            } else if current_variant == "jiangnan" {
+                (true, "vscode")
+            } else {
+                (false, "jiangnan")
+            };
             // Flip theme + every terminal buffer + re-render (shared with wallpaper).
             apply_dark_mode(&w, &bufs_theme, next_dark);
+            w.set_theme_variant(next_variant.into());
             // Mirror the flip onto the detached process window (its Theme global
             // is a separate instance) so an open process window follows.
             if let Some(p) = proc_weak.upgrade() {
@@ -1331,6 +1360,7 @@ pub fn run() -> Result<()> {
             let pref = if next_dark { "dark" } else { "light" };
             let mut s = store.borrow_mut();
             s.set_theme_pref(pref.to_string());
+            s.set_theme_variant(next_variant.to_string());
             let _ = s.save();
         });
     }
@@ -2435,8 +2465,8 @@ fn jump_candidates(
 
 fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
     // Group sessions by their `group` (named groups alphabetically, ungrouped
-    // last), then by name within each group, and tag the first row of every
-    // group with a header so the welcome list can render a folder heading (#41).
+    // last), preserve the stored order within each group, and tag the first row
+    // of every group with a header so the welcome list can render a folder heading (#41).
     let sessions = store.sessions();
 
     // Ordered list of display groups:
@@ -2481,12 +2511,14 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
 
     let mut rows: Vec<SessionInfo> = Vec::new();
     for group in &display_groups {
-        let mut gs: Vec<&Session> = if group == "default" {
+        let gs: Vec<&Session> = if group == "default" {
             sessions.iter().filter(|s| s.group.is_empty()).collect()
         } else {
             sessions.iter().filter(|s| &s.group == group).collect()
         };
-        gs.sort_by_key(|s| s.name.to_lowercase());
+        // Preserve the order stored in sessions.json. This lets drag-reorder in
+        // the session list persist across restarts instead of falling back to an
+        // alphabetical sort.
 
         if gs.is_empty() {
             rows.push(blank(group));
@@ -2518,6 +2550,55 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
     model.set_vec(rows);
 }
 
+fn session_reorder_preview_target(
+    model: &VecModel<SessionInfo>,
+    id: &str,
+    delta_y: f32,
+) -> Option<(String, bool)> {
+    const ROW_STEP: f32 = 38.0; // SessionRow 36px + VerticalLayout spacing 2px.
+
+    let mut group = String::new();
+    for i in 0..model.row_count() {
+        if let Some(row) = model.row_data(i) {
+            if row.id == id {
+                group = row.group.to_string();
+                break;
+            }
+        }
+    }
+    if group.is_empty() && !id.is_empty() {
+        // Empty group is a valid stored group for "default" rows, so only bail
+        // out after we tried to find the source row and failed below.
+    }
+
+    let mut rows: Vec<String> = Vec::new();
+    for i in 0..model.row_count() {
+        if let Some(row) = model.row_data(i) {
+            if !row.id.is_empty() && !row.collapsed && row.group == group {
+                rows.push(row.id.to_string());
+            }
+        }
+    }
+
+    let Some(from_pos) = rows.iter().position(|row_id| row_id == id) else {
+        return None;
+    };
+    if rows.len() <= 1 {
+        return None;
+    }
+
+    let step = (delta_y / ROW_STEP).round() as isize;
+    let mut target_pos = from_pos as isize + step;
+    target_pos = target_pos.clamp(0, rows.len() as isize - 1);
+    let target_pos = target_pos as usize;
+    if target_pos == from_pos {
+        return None;
+    }
+
+    let before = target_pos < from_pos;
+    Some((rows[target_pos].clone(), before))
+}
+
 // ---------------------------------------------------------------------------
 // Session callbacks (welcome page + dialog)
 // ---------------------------------------------------------------------------
@@ -2543,6 +2624,7 @@ fn wire_session_callbacks(
     local_snap: LocalSnap,
     local_net_hist: NetHist,
     sftp_follow_cd: Arc<std::sync::atomic::AtomicBool>,
+    startup_collapse_sftp_default: bool,
 ) {
     // Working set of port forwards (#56) for the session being created/edited.
     // The forward add/delete callbacks mutate it; saving reads it into
@@ -2588,6 +2670,8 @@ fn wire_session_callbacks(
             w.set_dialog_stop_bits("1".into());
             w.set_dialog_parity("none".into());
             w.set_dialog_flow("none".into());
+            w.set_dialog_x11_forwarding(false);
+            w.set_dialog_x11_display("127.0.0.1:0.0".into());
             w.set_dialog_disable_shell_integration(false);
             w.set_dialog_note("".into());
             w.set_dialog_editing(false);
@@ -2799,6 +2883,8 @@ fn wire_session_callbacks(
                 w.set_dialog_stop_bits(session.stop_bits.to_string().into());
                 w.set_dialog_parity(session.parity.clone().into());
                 w.set_dialog_flow(session.flow_control.clone().into());
+                w.set_dialog_x11_forwarding(session.x11_forwarding);
+                w.set_dialog_x11_display(session.x11_display.clone().into());
                 w.set_dialog_disable_shell_integration(session.disable_shell_integration);
                 w.set_dialog_note(session.note.clone().into());
                 w.set_dialog_editing(true);
@@ -2879,6 +2965,72 @@ fn wire_session_callbacks(
             sync_sessions_to_model(&store.borrow(), &sessions_model);
             if let Some(w) = weak.upgrade() {
                 let _ = w.get_sessions();
+            }
+        });
+    }
+
+    // Drag-reorder sessions inside the current group. The UI only shows a live
+    // insertion marker while dragging; the model is rebuilt once on mouse-up.
+    {
+        let weak = window.as_weak();
+        let sessions_model = sessions_model.clone();
+        window.on_session_reorder_preview(
+            move |id: SharedString, _row_index: i32, delta_y: f32| {
+                if let Some(w) = weak.upgrade() {
+                    let id_string = id.to_string();
+                    w.set_session_drag_id(id.clone());
+                    if let Some((target_id, before)) =
+                        session_reorder_preview_target(&sessions_model, &id_string, delta_y)
+                    {
+                        w.set_session_drop_id(target_id.into());
+                        w.set_session_drop_before(before);
+                    } else {
+                        w.set_session_drop_id("".into());
+                        w.set_session_drop_before(false);
+                    }
+                }
+            },
+        );
+    }
+
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let sessions_model = sessions_model.clone();
+        window.on_session_reorder_drop(move |id: SharedString| {
+            if let Some(w) = weak.upgrade() {
+                let target_id = w.get_session_drop_id().to_string();
+                let before = w.get_session_drop_before();
+                w.set_session_drag_id("".into());
+                w.set_session_drop_id("".into());
+                w.set_session_drop_before(false);
+
+                if !target_id.is_empty() {
+                    let changed = {
+                        let mut s = store.borrow_mut();
+                        let changed = s.reorder_session_near(&id.to_string(), &target_id, before);
+                        if changed {
+                            if let Err(err) = s.save() {
+                                tracing::warn!("failed to save config: {err:#}");
+                            }
+                        }
+                        changed
+                    };
+                    if changed {
+                        sync_sessions_to_model(&store.borrow(), &sessions_model);
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let weak = window.as_weak();
+        window.on_session_reorder_cancel(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_session_drag_id("".into());
+                w.set_session_drop_id("".into());
+                w.set_session_drop_before(false);
             }
         });
     }
@@ -3048,6 +3200,8 @@ fn wire_session_callbacks(
                 parity: draft.parity.to_string(),
                 flow_control: draft.flow_control.to_string(),
                 forwards: edit_forwards.borrow().clone(),
+                x11_forwarding: draft.x11_forwarding,
+                x11_display: draft.x11_display.to_string(),
                 disable_shell_integration: draft.disable_shell_integration,
                 note: draft.note.to_string(),
                 jump_session_id: draft.jump_session_id.to_string(),
@@ -3233,6 +3387,7 @@ fn wire_session_callbacks(
         let local_snap = local_snap.clone();
         let local_net_hist = local_net_hist.clone();
         let sftp_follow_cd = sftp_follow_cd.clone();
+        let startup_collapse_sftp_default = startup_collapse_sftp_default;
         window.on_connect_session(move |id: SharedString| {
             let id = id.to_string();
             let session = match store.borrow().get(&id).cloned() {
@@ -3274,19 +3429,13 @@ fn wire_session_callbacks(
                 kind: "terminal".into(),
                 connected: false,
             });
-            // Each session keeps its own SFTP collapse state + sizes, seeded from
-            // the global defaults (the "collapse SFTP by default" pref and the
-            // persisted panel sizes) so they no longer bleed across panes (#v0.5).
-            let (sftp_collapsed_default, sftp_h_default, sftp_w_default) = weak
+            // Each session keeps its own SFTP collapse state + sizes. Collapse is
+            // seeded from the default captured at app startup, so changing the
+            // preference while running affects the next launch only.
+            let (sftp_h_default, sftp_w_default) = weak
                 .upgrade()
-                .map(|w| {
-                    (
-                        w.get_collapse_sftp_default(),
-                        w.get_sftp_panel_height(),
-                        w.get_sftp_panel_width(),
-                    )
-                })
-                .unwrap_or((false, 220.0, 380.0));
+                .map(|w| (w.get_sftp_panel_height(), w.get_sftp_panel_width()))
+                .unwrap_or((220.0, 380.0));
             terminals_model.push(TerminalState {
                 id: tab_id.clone().into(),
                 status: t("连接中...", "Connecting...").into(),
@@ -3314,11 +3463,16 @@ fn wire_session_callbacks(
                 sftp_tree_nodes: ModelRc::from(std::rc::Rc::new(
                     VecModel::<SftpTreeNode>::default(),
                 )),
+                sftp_move_tree_nodes: ModelRc::from(std::rc::Rc::new(
+                    VecModel::<SftpTreeNode>::default(),
+                )),
+                sftp_tree_focus_index: -1,
+                sftp_move_tree_focus_index: -1,
                 sftp_selected_count: 0,
                 sftp_sort_key: "".into(),
                 sftp_sort_dir: 0,
                 tunnels: ModelRc::from(std::rc::Rc::new(VecModel::<TunnelInfo>::default())),
-                sftp_collapsed: sftp_collapsed_default,
+                sftp_collapsed: startup_collapse_sftp_default,
                 sftp_panel_height: sftp_h_default,
                 sftp_panel_width: sftp_w_default,
                 sftp_saved_height: sftp_h_default,
@@ -3714,28 +3868,14 @@ fn terminal_sftp_paths(w: &AppWindow) -> HashMap<String, String> {
     out
 }
 
-fn sorted_sftp_entries_from_model(
-    model: &ModelRc<SftpEntry>,
-    key: &str,
-    dir: i32,
-) -> ModelRc<SftpEntry> {
-    let Some(vec_model) = model.as_any().downcast_ref::<VecModel<SftpEntry>>() else {
-        return model.clone();
-    };
-    let mut entries = Vec::with_capacity(vec_model.row_count());
-    for i in 0..vec_model.row_count() {
-        if let Some(entry) = vec_model.row_data(i) {
-            entries.push(entry);
-        }
-    }
-    sort_sftp_entries(&mut entries, key, dir);
-    ModelRc::from(std::rc::Rc::new(VecModel::from(entries)))
-}
-
 fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
     use std::cmp::Ordering;
 
     let name_cmp = |a: &SftpEntry, b: &SftpEntry| natural_name_cmp(&a.name, &b.name);
+    let is_special = |e: &SftpEntry| {
+        e.full_path.as_str() == "__MEATSHELL_LOAD_MORE__"
+            || e.full_path.as_str() == "__MEATSHELL_LOAD_ALL__"
+    };
     let default_cmp = |a: &SftpEntry, b: &SftpEntry| match (a.is_dir, b.is_dir) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
@@ -3748,6 +3888,15 @@ fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
     }
 
     entries.sort_by(|a, b| {
+        let special = match (is_special(a), is_special(b)) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => Ordering::Equal,
+        };
+        if special != Ordering::Equal {
+            return special;
+        }
         let group = match (a.is_dir, b.is_dir) {
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
@@ -3758,14 +3907,24 @@ fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
         }
         let ord = match key {
             "size" => a
-                .size_bytes
-                .partial_cmp(&b.size_bytes)
-                .unwrap_or(Ordering::Equal)
+                .raw_size
+                .cmp(&b.raw_size)
+                .then_with(|| default_cmp(a, b)),
+            "type" => a
+                .kind
+                .as_str()
+                .cmp(b.kind.as_str())
                 .then_with(|| default_cmp(a, b)),
             "modified" => a
-                .modified_ts
-                .partial_cmp(&b.modified_ts)
-                .unwrap_or(Ordering::Equal)
+                .raw_modified
+                .cmp(&b.raw_modified)
+                .then_with(|| default_cmp(a, b)),
+            "permissions" => a.mode.cmp(&b.mode).then_with(|| default_cmp(a, b)),
+            "owner" => a
+                .owner
+                .as_str()
+                .cmp(b.owner.as_str())
+                .then_with(|| a.group.as_str().cmp(b.group.as_str()))
                 .then_with(|| default_cmp(a, b)),
             _ => name_cmp(a, b).then_with(|| default_cmp(a, b)),
         };
@@ -3891,6 +4050,7 @@ fn proc_rows(procs: &[ProcInfo]) -> Vec<ProcRow> {
 /// compile-time (dark) defaults until we copy these across (#23).
 fn sync_proc_theme(main: &AppWindow, proc: &ProcWindow) {
     proc.set_dark_mode(main.get_dark_mode());
+    proc.set_theme_variant(main.get_theme_variant());
     proc.set_ui_scale(main.get_ui_scale());
     proc.set_ui_font_family(main.get_ui_font_family());
     // Mirror the immersive wallpaper so the detached window shares the frosted
@@ -4120,6 +4280,219 @@ fn clear_sftp_selection(terminals: &VecModel<TerminalState>, tab_id: &str) {
         r.sftp_selected_count = 0;
         terminals.set_row_data(ti, r);
         break;
+    }
+}
+
+fn count_sftp_selected(entries: &VecModel<SftpEntry>) -> i32 {
+    let mut n = 0;
+    for i in 0..entries.row_count() {
+        if entries.row_data(i).map(|e| e.selected).unwrap_or(false) {
+            n += 1;
+        }
+    }
+    n
+}
+
+fn set_sftp_selected_count(terminals: &VecModel<TerminalState>, row_index: usize, count: i32) {
+    if let Some(mut row) = terminals.row_data(row_index) {
+        row.sftp_selected_count = count;
+        terminals.set_row_data(row_index, row);
+    }
+}
+
+fn sftp_mode_string(is_dir: bool, mode: i32) -> String {
+    if mode == 0 {
+        return "-".to_string();
+    }
+    let mut out = String::with_capacity(10);
+    out.push(if is_dir { 'd' } else { '-' });
+    for bit in [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001] {
+        out.push(match bit {
+            0o400 | 0o040 | 0o004 => if mode & bit != 0 { 'r' } else { '-' },
+            0o200 | 0o020 | 0o002 => if mode & bit != 0 { 'w' } else { '-' },
+            _ => if mode & bit != 0 { 'x' } else { '-' },
+        });
+    }
+    out
+}
+
+fn sftp_entry_ext(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    let (_, ext) = trimmed.rsplit_once('.')?;
+    if ext.is_empty() {
+        None
+    } else {
+        Some(ext.to_ascii_lowercase())
+    }
+}
+
+fn sftp_entry_kind(name: &str, is_dir: bool) -> String {
+    if is_dir {
+        return "文件夹".to_string();
+    }
+
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        ".bashrc" | ".zshrc" | ".profile" | ".bash_profile" | ".bash_login" | ".zprofile" => {
+            return "Shell 配置文件".to_string();
+        }
+        ".bash_history" | ".zsh_history" | ".python_history" | ".mysql_history"
+        | ".psql_history" | ".sqlite_history" | ".wget-hsts" | ".lesshst" | ".viminfo" => {
+            return format!("{} 文件", trimmed.trim_start_matches('.').to_ascii_uppercase());
+        }
+        ".gitconfig" => return "Git Config 源文件".to_string(),
+        ".gitignore" | ".gitattributes" | ".editorconfig" => return "配置文件".to_string(),
+        _ => {}
+    }
+
+    let Some(ext) = sftp_entry_ext(trimmed) else {
+        return "文件".to_string();
+    };
+
+    match ext.as_str() {
+        "txt" | "text" => "文本文档".to_string(),
+        "md" | "markdown" => "Markdown 文件".to_string(),
+        "rs" => "Rust 源文件".to_string(),
+        "py" => "Python 源文件".to_string(),
+        "js" | "mjs" | "cjs" => "JavaScript 源文件".to_string(),
+        "ts" | "tsx" => "TypeScript 源文件".to_string(),
+        "jsx" => "React 源文件".to_string(),
+        "sh" | "bash" | "zsh" | "fish" => "Shell 脚本".to_string(),
+        "c" => "C 源文件".to_string(),
+        "h" | "hpp" => "C/C++ 头文件".to_string(),
+        "cpp" | "cc" | "cxx" => "C++ 源文件".to_string(),
+        "java" => "Java 源文件".to_string(),
+        "go" => "Go 源文件".to_string(),
+        "php" => "PHP 源文件".to_string(),
+        "rb" => "Ruby 源文件".to_string(),
+        "html" | "htm" => "HTML 文件".to_string(),
+        "css" | "scss" | "sass" | "less" => "样式表文件".to_string(),
+        "json" => "JSON 文件".to_string(),
+        "yaml" | "yml" => "YAML 文件".to_string(),
+        "toml" => "TOML 文件".to_string(),
+        "xml" => "XML 文件".to_string(),
+        "ini" | "conf" | "cfg" | "cnf" | "env" => "配置文件".to_string(),
+        "log" => "日志文件".to_string(),
+        "csv" => "CSV 文件".to_string(),
+        "sql" => "SQL 文件".to_string(),
+        "png" => "PNG 文件".to_string(),
+        "jpg" | "jpeg" => "JPG 文件".to_string(),
+        "gif" => "GIF 文件".to_string(),
+        "webp" => "WEBP 文件".to_string(),
+        "svg" => "SVG 文件".to_string(),
+        "bmp" => "BMP 文件".to_string(),
+        "ico" => "ICO 文件".to_string(),
+        "mp3" => "MP3 文件".to_string(),
+        "wav" => "WAV 文件".to_string(),
+        "flac" => "FLAC 文件".to_string(),
+        "aac" | "ogg" | "m4a" | "wma" => format!("{} 文件", ext.to_ascii_uppercase()),
+        "mp4" => "MP4 文件".to_string(),
+        "mkv" => "MKV 文件".to_string(),
+        "mov" => "MOV 文件".to_string(),
+        "avi" | "webm" | "flv" | "wmv" | "m4v" => format!("{} 文件", ext.to_ascii_uppercase()),
+        "zip" => "ZIP 压缩文件".to_string(),
+        "tar" => "TAR 压缩文件".to_string(),
+        "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" => {
+            format!("{} 压缩文件", ext.to_ascii_uppercase())
+        }
+        "exe" | "msi" | "appimage" => "可执行文件".to_string(),
+        "run" => "RUN 文件".to_string(),
+        _ => format!("{} 文件", ext.to_ascii_uppercase()),
+    }
+}
+
+fn sftp_entry_kind_en(name: &str, is_dir: bool) -> String {
+    if is_dir {
+        return "Folder".to_string();
+    }
+
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        ".bashrc" | ".zshrc" | ".profile" | ".bash_profile" | ".bash_login" | ".zprofile" => {
+            return "Shell Config File".to_string();
+        }
+        ".bash_history" | ".zsh_history" | ".python_history" | ".mysql_history"
+        | ".psql_history" | ".sqlite_history" | ".wget-hsts" | ".lesshst" | ".viminfo" => {
+            return format!("{} File", trimmed.trim_start_matches('.').to_ascii_uppercase());
+        }
+        ".gitconfig" => return "Git Config Source File".to_string(),
+        ".gitignore" | ".gitattributes" | ".editorconfig" => return "Config File".to_string(),
+        _ => {}
+    }
+
+    let Some(ext) = sftp_entry_ext(trimmed) else {
+        return "File".to_string();
+    };
+
+    match ext.as_str() {
+        "txt" | "text" => "Text Document".to_string(),
+        "md" | "markdown" => "Markdown File".to_string(),
+        "rs" => "Rust Source File".to_string(),
+        "py" => "Python Source File".to_string(),
+        "js" | "mjs" | "cjs" => "JavaScript Source File".to_string(),
+        "ts" | "tsx" => "TypeScript Source File".to_string(),
+        "jsx" => "React Source File".to_string(),
+        "sh" | "bash" | "zsh" | "fish" => "Shell Script".to_string(),
+        "c" => "C Source File".to_string(),
+        "h" | "hpp" => "C/C++ Header File".to_string(),
+        "cpp" | "cc" | "cxx" => "C++ Source File".to_string(),
+        "java" => "Java Source File".to_string(),
+        "go" => "Go Source File".to_string(),
+        "php" => "PHP Source File".to_string(),
+        "rb" => "Ruby Source File".to_string(),
+        "html" | "htm" => "HTML File".to_string(),
+        "css" | "scss" | "sass" | "less" => "Style Sheet".to_string(),
+        "json" => "JSON File".to_string(),
+        "yaml" | "yml" => "YAML File".to_string(),
+        "toml" => "TOML File".to_string(),
+        "xml" => "XML File".to_string(),
+        "ini" | "conf" | "cfg" | "cnf" | "env" => "Config File".to_string(),
+        "log" => "Log File".to_string(),
+        "csv" => "CSV File".to_string(),
+        "sql" => "SQL File".to_string(),
+        "png" => "PNG File".to_string(),
+        "jpg" | "jpeg" => "JPG File".to_string(),
+        "gif" => "GIF File".to_string(),
+        "webp" => "WEBP File".to_string(),
+        "svg" => "SVG File".to_string(),
+        "bmp" => "BMP File".to_string(),
+        "ico" => "ICO File".to_string(),
+        "mp3" => "MP3 File".to_string(),
+        "wav" => "WAV File".to_string(),
+        "flac" => "FLAC File".to_string(),
+        "aac" | "ogg" | "m4a" | "wma" => format!("{} File", ext.to_ascii_uppercase()),
+        "mp4" => "MP4 File".to_string(),
+        "mkv" => "MKV File".to_string(),
+        "mov" => "MOV File".to_string(),
+        "avi" | "webm" | "flv" | "wmv" | "m4v" => format!("{} File", ext.to_ascii_uppercase()),
+        "zip" => "ZIP Archive".to_string(),
+        "tar" => "TAR Archive".to_string(),
+        "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" => {
+            format!("{} Archive", ext.to_ascii_uppercase())
+        }
+        "exe" | "msi" | "appimage" => "Executable File".to_string(),
+        "run" => "RUN File".to_string(),
+        _ => format!("{} File", ext.to_ascii_uppercase()),
+    }
+}
+
+fn sftp_entry_icon(name: &str, is_dir: bool) -> &'static str {
+    if is_dir {
+        return "📁";
+    }
+    let ext = sftp_entry_ext(name).unwrap_or_default();
+    match ext.as_str() {
+        "txt" | "md" | "markdown" | "log" | "json" | "yaml" | "yml" | "toml" | "xml"
+        | "csv" | "ini" | "conf" | "cfg" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx"
+        | "html" | "css" | "scss" | "sql" | "sh" | "ps1" | "bat" | "cmd" => "📝",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tif" | "tiff" => "🖼️",
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" => "🎵",
+        "mp4" | "mkv" | "mov" | "avi" | "webm" | "flv" | "wmv" | "m4v" => "🎬",
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" => "📦",
+        "exe" | "bin" | "run" | "msi" | "appimage" | "service" | "desktop" | "env" => "⚙️",
+        _ => "📄",
     }
 }
 
@@ -4701,43 +5074,100 @@ fn apply_session_event_to_window(
         SessionEvent::CwdChanged(path) => {
             // Just update the displayed path; the pump thread already sent
             // SftpCommand::ListDir so a SftpEntries event is inbound.
+            // Changing directories invalidates checked rows from the previous
+            // listing, so clear the batch-selection counter immediately (#100).
             update_terminal(&|t| {
                 t.sftp_path = path.clone().into();
                 t.sftp_loading = true;
+                t.sftp_selected_count = 0;
             });
         }
         SessionEvent::SftpEntries { path, entries } => {
-            let mut slint_entries: Vec<SftpEntry> = entries
+            let slint_entries: Vec<SftpEntry> = entries
                 .iter()
                 .map(|e| SftpEntry {
                     name: e.name.clone().into(),
                     full_path: e.full_path.clone().into(),
                     is_dir: e.is_dir,
-                    size: if e.is_dir {
+                    size: if e.full_path == "__MEATSHELL_LOAD_MORE__"
+                        || e.full_path == "__MEATSHELL_LOAD_ALL__"
+                        || e.is_dir
+                    {
                         "".into()
                     } else {
                         format_size(e.size).into()
                     },
-                    size_bytes: e.size as f32,
-                    modified: format_mtime(e.modified).into(),
-                    modified_ts: e.modified as f32,
+                    raw_size: e.size.min(i32::MAX as u64) as i32,
+                    modified: if e.full_path == "__MEATSHELL_LOAD_MORE__"
+                        || e.full_path == "__MEATSHELL_LOAD_ALL__"
+                    {
+                        "".into()
+                    } else {
+                        format_mtime(e.modified).into()
+                    },
+                    raw_modified: e.modified.min(i32::MAX as u32) as i32,
                     mode: (e.mode & 0o7777) as i32,
+                    kind: if e.full_path == "__MEATSHELL_LOAD_MORE__"
+                        || e.full_path == "__MEATSHELL_LOAD_ALL__"
+                    {
+                        "".into()
+                    } else {
+                        sftp_entry_kind(&e.name, e.is_dir).into()
+                    },
+                    kind_en: if e.full_path == "__MEATSHELL_LOAD_MORE__"
+                        || e.full_path == "__MEATSHELL_LOAD_ALL__"
+                    {
+                        "".into()
+                    } else {
+                        sftp_entry_kind_en(&e.name, e.is_dir).into()
+                    },
+                    icon: if e.full_path == "__MEATSHELL_LOAD_MORE__"
+                        || e.full_path == "__MEATSHELL_LOAD_ALL__"
+                    {
+                        "".into()
+                    } else {
+                        sftp_entry_icon(&e.name, e.is_dir).into()
+                    },
+                    permissions: if e.full_path == "__MEATSHELL_LOAD_MORE__"
+                        || e.full_path == "__MEATSHELL_LOAD_ALL__"
+                    {
+                        "".into()
+                    } else {
+                        sftp_mode_string(e.is_dir, (e.mode & 0o7777) as i32).into()
+                    },
+                    owner: if e.full_path == "__MEATSHELL_LOAD_MORE__"
+                        || e.full_path == "__MEATSHELL_LOAD_ALL__"
+                    {
+                        "".into()
+                    } else {
+                        e.owner.clone().into()
+                    },
+                    group: if e.full_path == "__MEATSHELL_LOAD_MORE__"
+                        || e.full_path == "__MEATSHELL_LOAD_ALL__"
+                    {
+                        "".into()
+                    } else {
+                        e.group.clone().into()
+                    },
                     selected: false,
                 })
                 .collect();
-            let (sort_key, sort_dir) = (0..terminals.row_count())
-                .find_map(|i| {
-                    let row = terminals.row_data(i)?;
-                    (row.id.as_str() == tab_id)
-                        .then(|| (row.sftp_sort_key.to_string(), row.sftp_sort_dir))
-                })
-                .unwrap_or_default();
-            sort_sftp_entries(&mut slint_entries, &sort_key, sort_dir);
-            let model = ModelRc::from(std::rc::Rc::new(VecModel::from(slint_entries)));
             update_terminal(&|t| {
                 t.sftp_path = path.clone().into();
-                t.sftp_entries = model.clone();
+                // Keep the same VecModel instance when refreshing a directory.
+                // Replacing the model makes Slint's ListView recreate its viewport,
+                // which can nudge the file-list scrollbar up by one row on refresh.
+                if let Some(existing) = t
+                    .sftp_entries
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpEntry>>()
+                {
+                    existing.set_vec(slint_entries.clone());
+                } else {
+                    t.sftp_entries = ModelRc::from(Rc::new(VecModel::from(slint_entries.clone())));
+                }
                 t.sftp_loading = false;
+                t.sftp_selected_count = 0;
             });
         }
         SessionEvent::SftpStatus(msg) => {
@@ -4798,10 +5228,42 @@ fn apply_session_event_to_window(
                     depth: n.depth as i32,
                     expanded: n.expanded,
                     has_children: n.has_children,
+                    is_dir: n.is_dir,
                 })
                 .collect();
             let model = ModelRc::from(std::rc::Rc::new(VecModel::from(slint_nodes)));
-            update_terminal(&|t| t.sftp_tree_nodes = model.clone());
+            update_terminal(&|t| {
+                let current_path = t.sftp_path.to_string();
+                t.sftp_tree_focus_index = nodes
+                    .iter()
+                    .position(|n| n.path == current_path)
+                    .map(|i| i as i32)
+                    .unwrap_or(-1);
+                t.sftp_tree_nodes = model.clone();
+            });
+        }
+        SessionEvent::SftpMoveTreeUpdate(nodes) => {
+            let slint_nodes: Vec<SftpTreeNode> = nodes
+                .iter()
+                .map(|n| SftpTreeNode {
+                    path: n.path.clone().into(),
+                    name: n.name.clone().into(),
+                    depth: n.depth as i32,
+                    expanded: n.expanded,
+                    has_children: n.has_children,
+                    is_dir: n.is_dir,
+                })
+                .collect();
+            let model = ModelRc::from(std::rc::Rc::new(VecModel::from(slint_nodes)));
+            update_terminal(&|t| {
+                let current_path = t.sftp_path.to_string();
+                t.sftp_move_tree_focus_index = nodes
+                    .iter()
+                    .position(|n| n.path == current_path)
+                    .map(|i| i as i32)
+                    .unwrap_or(-1);
+                t.sftp_move_tree_nodes = model.clone();
+            });
         }
         SessionEvent::SftpTransfer {
             id,
@@ -4841,14 +5303,7 @@ fn apply_session_event_to_window(
             } else {
                 0.0
             };
-            let rec = TransferInfo {
-                id: id.clone().into(),
-                name: name.into(),
-                detail: detail.into(),
-                percent,
-                state: state as i32,
-                is_upload,
-            };
+            let is_temp_open = id.starts_with("open-temp:");
             if let Some(model) = win
                 .get_transfers()
                 .as_any()
@@ -4863,6 +5318,36 @@ fn apply_session_event_to_window(
                         }
                     }
                 }
+
+                // External view/edit first downloads a temporary local copy.
+                // Keep its row while active so the user can cancel a slow large-file
+                // transfer, but do not leave a completed history item after success.
+                // If no other transfer is still active, close the popup that was
+                // auto-opened for this temporary transfer.
+                if is_temp_open && state == 1 {
+                    if let Some(i) = found {
+                        model.remove(i);
+                    }
+                    let has_active = (0..model.row_count()).any(|i| {
+                        model
+                            .row_data(i)
+                            .map(|row| row.state == 0 || row.state == 3)
+                            .unwrap_or(false)
+                    });
+                    if !has_active {
+                        win.set_download_open(false);
+                    }
+                    return;
+                }
+
+                let rec = TransferInfo {
+                    id: id.clone().into(),
+                    name: name.into(),
+                    detail: detail.into(),
+                    percent,
+                    state: state as i32,
+                    is_upload,
+                };
                 match found {
                     Some(i) => model.set_row_data(i, rec),
                     None => model.insert(0, rec), // newest at top
@@ -5384,7 +5869,7 @@ fn refresh_panes(
                 h: p.h,
                 active_id: p.active.clone().into(),
                 focused: p.focused,
-                reserve_right: if top_right { 140.0 } else { 0.0 },
+                reserve_right: if top_right { 120.0 } else { 0.0 },
                 tabs: ModelRc::from(Rc::new(VecModel::from(tabs))),
             }
         })
@@ -5963,38 +6448,6 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
         window.on_sftp_download(move |tab_id: SharedString, remote_path: SharedString| {
             let tab_id = tab_id.to_string();
             let remote_path = remote_path.to_string();
-            // If the user has checked 2+ entries, ANY download (right-click,
-            // row button or the toolbar) packs the whole checked set into one
-            // archive (#100) — this matches "download these together". A single
-            // checked item (or none) downloads the clicked file as-is.
-            let (arc_dir, arc_names) = weak
-                .upgrade()
-                .and_then(|w| {
-                    let terminals = w.get_terminals();
-                    let tm = terminals
-                        .as_any()
-                        .downcast_ref::<VecModel<TerminalState>>()?;
-                    let paths = collect_sftp_selected(tm, &tab_id);
-                    if paths.len() >= 2 {
-                        let dir = active_sftp_path(&w, &tab_id);
-                        let names: Vec<String> = paths
-                            .iter()
-                            .map(|p| {
-                                p.trim_end_matches('/')
-                                    .rsplit(['/', '\\'])
-                                    .next()
-                                    .unwrap_or(p)
-                                    .to_string()
-                            })
-                            .collect();
-                        clear_sftp_selection(tm, &tab_id);
-                        Some((dir, names))
-                    } else {
-                        None
-                    }
-                })
-                .map(|(d, n)| (Some(d), n))
-                .unwrap_or((None, Vec::new()));
             // "Always ask" (#87) forces the folder picker, ignoring the preset.
             let (preset, always_ask) = weak
                 .upgrade()
@@ -6008,11 +6461,7 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             if !always_ask && !preset.is_empty() {
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(&tab_id) {
-                        if let Some(ref dir) = arc_dir {
-                            h.download_archive(dir.clone(), arc_names.clone(), preset);
-                        } else {
-                            h.download(remote_path, preset);
-                        }
+                        h.download(remote_path, preset);
                         // Pop the transfers panel so progress is visible (user
                         // request: any download opens the download popup).
                         if let Some(w) = weak.upgrade() {
@@ -6029,11 +6478,7 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
                     let local_dir = dir.to_string_lossy().to_string();
                     if let Ok(handles) = sftp_handles.lock() {
                         if let Some(h) = handles.get(&tab_id) {
-                            if let Some(ref rdir) = arc_dir {
-                                h.download_archive(rdir.clone(), arc_names.clone(), local_dir);
-                            } else {
-                                h.download(remote_path, local_dir);
-                            }
+                            h.download(remote_path, local_dir);
                         }
                     }
                     let _ = weak.upgrade_in_event_loop(|w| w.set_download_open(true));
@@ -6114,9 +6559,16 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
     // Refresh the current directory listing.
     {
         let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
         window.on_sftp_refresh(move |tab_id: SharedString, path: SharedString| {
             let tab_id = tab_id.to_string();
             let path = path.to_string();
+            if let Some(w) = weak.upgrade() {
+                let terminals = w.get_terminals();
+                if let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() {
+                    clear_sftp_selection(tm, &tab_id);
+                }
+            }
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(&tab_id) {
                     // Refresh re-syncs the left tree too, not just the file list (#189).
@@ -6126,20 +6578,143 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
         });
     }
 
-    // Toggle tree node expand/collapse and navigate to that directory.
+    // SFTP large directory pagination: reveal the next page of cached entries.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_load_more(move |tab_id: SharedString| {
+            let tab_id = tab_id.to_string();
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(&tab_id) {
+                    h.load_more();
+                }
+            }
+        });
+    }
+
+    // SFTP large directory pagination: reveal all cached entries.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_load_all(move |tab_id: SharedString| {
+            let tab_id = tab_id.to_string();
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(&tab_id) {
+                    h.load_all();
+                }
+            }
+        });
+    }
+
+    // Toggle tree node expand/collapse. Expanding navigates the right pane;
+    // collapsing only affects the left tree and keeps the right path unchanged.
     {
         let sftp_handles = sftp_handles.clone();
         let sftp_last_cwd = sftp_last_cwd.clone();
-        window.on_sftp_tree_expand(move |tab_id: SharedString, path: SharedString| {
+        window.on_sftp_tree_expand(
+            move |tab_id: SharedString, path: SharedString, was_expanded: bool| {
+                let tab_id = tab_id.to_string();
+                let path = path.to_string();
+                // Forget the followed cwd (see on_sftp_navigate): tree navigation
+                // must never permanently disable cd-follow.
+                sftp_last_cwd.lock().unwrap().remove(&tab_id);
+                if let Ok(handles) = sftp_handles.lock() {
+                    if let Some(h) = handles.get(&tab_id) {
+                        // The tree arrow only expands/collapses the left tree.
+                        // Navigating the right file list is handled separately by
+                        // clicking the node name area in the SFTP panel.
+                        let _ = was_expanded;
+                        h.toggle_tree_node(path);
+                    }
+                }
+            },
+        );
+    }
+
+    // Move-target dialog tree has independent expanded/collapsed state so
+    // browsing destinations does not alter the main SFTP panel tree.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_move_tree_expand(
+            move |tab_id: SharedString, path: SharedString, _was_expanded: bool| {
+                let tab_id = tab_id.to_string();
+                let path = path.to_string();
+                if let Ok(handles) = sftp_handles.lock() {
+                    if let Some(h) = handles.get(&tab_id) {
+                        h.toggle_move_tree_node(path);
+                    }
+                }
+            },
+        );
+    }
+
+    // Probe a tree node's children without expanding it. The move-target dialog
+    // uses this when the user single-clicks a folder: if the folder has sub-folders,
+    // the arrow appears; if it is empty, it stays arrowless.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_tree_probe(move |tab_id: SharedString, path: SharedString| {
             let tab_id = tab_id.to_string();
             let path = path.to_string();
-            // Forget the followed cwd (see on_sftp_navigate): tree navigation
-            // must never permanently disable cd-follow.
-            sftp_last_cwd.lock().unwrap().remove(&tab_id);
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(&tab_id) {
-                    h.toggle_tree_node(path.clone());
-                    h.list_dir(path);
+                    h.probe_tree_node(path);
+                }
+            }
+        });
+    }
+
+    // Reveal more child directories in one left-tree branch.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_tree_load_more(move |tab_id: SharedString, path: SharedString| {
+            let tab_id = tab_id.to_string();
+            let path = path.to_string();
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(&tab_id) {
+                    h.load_more_tree(path);
+                }
+            }
+        });
+    }
+
+    // Reveal all child directories in one move-target dialog branch.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_move_tree_load_more(move |tab_id: SharedString, path: SharedString| {
+            let tab_id = tab_id.to_string();
+            let path = path.to_string();
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(&tab_id) {
+                    h.load_more_move_tree(path);
+                }
+            }
+        });
+    }
+
+    // Ensure the SFTP directory tree has enough expanded parents to make a path
+    // visible. Used before opening the move-target dialog, so the current folder
+    // can be scrolled into view even when it was not previously rendered.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_tree_reveal(move |tab_id: SharedString, path: SharedString| {
+            let tab_id = tab_id.to_string();
+            let path = path.to_string();
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(&tab_id) {
+                    h.reveal_tree_path(path);
+                }
+            }
+        });
+    }
+
+    // Reveal a path in the move-target dialog only.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_move_tree_reveal(move |tab_id: SharedString, path: SharedString| {
+            let tab_id = tab_id.to_string();
+            let path = path.to_string();
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(&tab_id) {
+                    h.reveal_move_tree_path(path);
                 }
             }
         });
@@ -6159,45 +6734,36 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
         });
     }
 
-    // SFTP file-list sorting (#248): click a header to cycle asc -> desc -> default.
     {
         let weak = window.as_weak();
-        window.on_sftp_sort_request(move |tab_id: SharedString, key: SharedString| {
+        window.on_sftp_sort(move |tab_id: SharedString, column: SharedString, ascending: bool| {
             let Some(w) = weak.upgrade() else { return };
             let terminals = w.get_terminals();
             let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
                 return;
             };
-            update_terminal_row(tm, tab_id.as_str(), |row| {
-                let key = key.to_string();
-                let next_dir = if row.sftp_sort_key.as_str() != key || row.sftp_sort_dir == 0 {
-                    1
-                } else if row.sftp_sort_dir > 0 {
-                    -1
-                } else {
-                    0
-                };
-                let next_key = if next_dir == 0 { String::new() } else { key };
-                row.sftp_entries =
-                    sorted_sftp_entries_from_model(&row.sftp_entries, &next_key, next_dir);
-                row.sftp_sort_key = next_key.into();
-                row.sftp_sort_dir = next_dir;
-            });
-        });
-    }
-    {
-        let weak = window.as_weak();
-        window.on_sftp_clear_sort(move |tab_id: SharedString| {
-            let Some(w) = weak.upgrade() else { return };
-            let terminals = w.get_terminals();
-            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
-                return;
-            };
-            update_terminal_row(tm, tab_id.as_str(), |row| {
-                row.sftp_entries = sorted_sftp_entries_from_model(&row.sftp_entries, "", 0);
-                row.sftp_sort_key = "".into();
-                row.sftp_sort_dir = 0;
-            });
+
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                if let Some(em) = row
+                    .sftp_entries
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpEntry>>()
+                {
+                    let mut entries: Vec<SftpEntry> =
+                        (0..em.row_count()).filter_map(|i| em.row_data(i)).collect();
+                    sort_sftp_entries(
+                        &mut entries,
+                        column.as_str(),
+                        if ascending { 1 } else { -1 },
+                    );
+                    em.set_vec(entries);
+                }
+                break;
+            }
         });
     }
 
@@ -6225,15 +6791,116 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
                         e.selected = !e.selected;
                         em.set_row_data(i, e);
                     }
-                    let mut n = 0;
+                    set_sftp_selected_count(tm, ti, count_sftp_selected(em));
+                }
+                break;
+            }
+        });
+    }
+
+    {
+        let weak = window.as_weak();
+        window.on_sftp_select_single(move |tab_id: SharedString, idx: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                if let Some(em) = row
+                    .sftp_entries
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpEntry>>()
+                {
+                    let target = idx as usize;
                     for ei in 0..em.row_count() {
-                        if em.row_data(ei).map(|x| x.selected).unwrap_or(false) {
-                            n += 1;
+                        if let Some(mut e) = em.row_data(ei) {
+                            e.selected = ei == target
+                                && e.full_path.as_str() != "__MEATSHELL_LOAD_MORE__"
+                                && e.full_path.as_str() != "__MEATSHELL_LOAD_ALL__";
+                            em.set_row_data(ei, e);
                         }
                     }
-                    let mut r = row.clone();
-                    r.sftp_selected_count = n;
-                    tm.set_row_data(ti, r);
+                    set_sftp_selected_count(tm, ti, count_sftp_selected(em));
+                }
+                break;
+            }
+        });
+    }
+
+    {
+        let weak = window.as_weak();
+        window.on_sftp_select_range(
+            move |tab_id: SharedString, anchor: i32, idx: i32, keep_existing: bool| {
+                let Some(w) = weak.upgrade() else { return };
+                let terminals = w.get_terminals();
+                let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                    return;
+                };
+                for ti in 0..tm.row_count() {
+                    let Some(row) = tm.row_data(ti) else { continue };
+                    if row.id.as_str() != tab_id.as_str() {
+                        continue;
+                    }
+                    if let Some(em) = row
+                        .sftp_entries
+                        .as_any()
+                        .downcast_ref::<VecModel<SftpEntry>>()
+                    {
+                        let lo = anchor.min(idx).max(0) as usize;
+                        let hi = anchor.max(idx).max(0) as usize;
+                        for ei in 0..em.row_count() {
+                            if let Some(mut e) = em.row_data(ei) {
+                                let in_range = ei >= lo
+                                    && ei <= hi
+                                    && e.full_path.as_str() != "__MEATSHELL_LOAD_MORE__"
+                                    && e.full_path.as_str() != "__MEATSHELL_LOAD_ALL__";
+                                e.selected = if keep_existing {
+                                    e.selected || in_range
+                                } else {
+                                    in_range
+                                };
+                                em.set_row_data(ei, e);
+                            }
+                        }
+                        set_sftp_selected_count(tm, ti, count_sftp_selected(em));
+                    }
+                    break;
+                }
+            },
+        );
+    }
+
+    {
+        let weak = window.as_weak();
+        window.on_sftp_select_all(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                if let Some(em) = row
+                    .sftp_entries
+                    .as_any()
+                    .downcast_ref::<VecModel<SftpEntry>>()
+                {
+                    for ei in 0..em.row_count() {
+                        if let Some(mut e) = em.row_data(ei) {
+                            e.selected = e.full_path.as_str() != "__MEATSHELL_LOAD_MORE__"
+                                && e.full_path.as_str() != "__MEATSHELL_LOAD_ALL__";
+                            em.set_row_data(ei, e);
+                        }
+                    }
+                    set_sftp_selected_count(tm, ti, count_sftp_selected(em));
                 }
                 break;
             }
@@ -6253,10 +6920,103 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             if paths.is_empty() {
                 return;
             }
-            // Single selection downloads as a plain file (no compression, #100.3);
-            // multiple selections are tar-packed into one archive on the remote
-            // (#100.2) — this also avoids the concurrent-transfer races (#100.1).
-            let single = paths.len() == 1;
+            let preset = w.get_download_dir().to_string();
+            let always_ask = w.get_download_always_ask();
+            if !always_ask && !preset.is_empty() {
+                if let Ok(handles) = sftp_handles.lock() {
+                    if let Some(h) = handles.get(tab_id.as_str()) {
+                        for path in &paths {
+                            h.download(path.clone(), preset.clone());
+                        }
+                    }
+                }
+                w.set_download_open(true);
+            } else {
+                let sftp_handles = sftp_handles.clone();
+                let weak2 = weak.clone();
+                let tab = tab_id.to_string();
+                std::thread::spawn(move || {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        let dir = dir.to_string_lossy().to_string();
+                        if let Ok(handles) = sftp_handles.lock() {
+                            if let Some(h) = handles.get(&tab) {
+                                for path in &paths {
+                                    h.download(path.clone(), dir.clone());
+                                }
+                            }
+                        }
+                        let _ = weak2.upgrade_in_event_loop(|w| w.set_download_open(true));
+                    }
+                });
+            }
+            clear_sftp_selection(tm, tab_id.as_str());
+        });
+    }
+
+    // SFTP archive download: tar one target on the remote, then download it.
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_archive_download(move |tab_id: SharedString, remote_path: SharedString| {
+            let tab_id = tab_id.to_string();
+            let remote_path = remote_path.to_string();
+            let remote_dir = parent_path(&remote_path);
+            let name = remote_path
+                .trim_end_matches('/')
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(remote_path.as_str())
+                .to_string();
+            let (preset, always_ask) = weak
+                .upgrade()
+                .map(|w| {
+                    (
+                        w.get_download_dir().to_string(),
+                        w.get_download_always_ask(),
+                    )
+                })
+                .unwrap_or_default();
+            if !always_ask && !preset.is_empty() {
+                if let Ok(handles) = sftp_handles.lock() {
+                    if let Some(h) = handles.get(&tab_id) {
+                        h.download_archive(remote_dir, vec![name], preset);
+                    }
+                }
+                if let Some(w) = weak.upgrade() {
+                    w.set_download_open(true);
+                }
+                return;
+            }
+            let sftp_handles = sftp_handles.clone();
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    let local_dir = dir.to_string_lossy().to_string();
+                    if let Ok(handles) = sftp_handles.lock() {
+                        if let Some(h) = handles.get(&tab_id) {
+                            h.download_archive(remote_dir, vec![name], local_dir);
+                        }
+                    }
+                    let _ = weak.upgrade_in_event_loop(|w| w.set_download_open(true));
+                }
+            });
+        });
+    }
+
+    // SFTP archive download for checked entries: tar them into one archive.
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_archive_download_selected(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            let paths = collect_sftp_selected(tm, tab_id.as_str());
+            if paths.is_empty() {
+                return;
+            }
             let remote_dir = active_sftp_path(&w, tab_id.as_str());
             let names: Vec<String> = paths
                 .iter()
@@ -6273,11 +7033,7 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             if !always_ask && !preset.is_empty() {
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(tab_id.as_str()) {
-                        if single {
-                            h.download(paths[0].clone(), preset.clone());
-                        } else {
-                            h.download_archive(remote_dir.clone(), names.clone(), preset.clone());
-                        }
+                        h.download_archive(remote_dir.clone(), names.clone(), preset.clone());
                     }
                 }
                 w.set_download_open(true);
@@ -6290,15 +7046,7 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
                         let dir = dir.to_string_lossy().to_string();
                         if let Ok(handles) = sftp_handles.lock() {
                             if let Some(h) = handles.get(&tab) {
-                                if single {
-                                    h.download(paths[0].clone(), dir.clone());
-                                } else {
-                                    h.download_archive(
-                                        remote_dir.clone(),
-                                        names.clone(),
-                                        dir.clone(),
-                                    );
-                                }
+                                h.download_archive(remote_dir.clone(), names.clone(), dir.clone());
                             }
                         }
                         let _ = weak2.upgrade_in_event_loop(|w| w.set_download_open(true));
@@ -6308,6 +7056,7 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             clear_sftp_selection(tm, tab_id.as_str());
         });
     }
+
     // SFTP multi-select: delete all checked entries (confirmed in the UI) (#100).
     {
         let sftp_handles = sftp_handles.clone();
@@ -6397,6 +7146,105 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             },
         );
     }
+
+    // SFTP move within the same remote session. Implemented with SFTP rename: the
+    // server moves the item when the destination path is in another directory.
+    {
+        let sftp_handles = sftp_handles.clone();
+        window.on_sftp_move_submit(
+            move |tab_id: SharedString, source: SharedString, target_dir: SharedString| {
+                let source = source.to_string();
+                let mut target_dir = target_dir.to_string();
+                target_dir = target_dir.trim().trim_end_matches('/').to_string();
+                if target_dir.is_empty() {
+                    target_dir = "/".to_string();
+                }
+                let source_trimmed = source.trim_end_matches('/').to_string();
+                if source_trimmed.is_empty() || source_trimmed == "/" {
+                    return;
+                }
+                // Avoid moving a directory into itself or one of its children.
+                let source_prefix = format!("{}/", source_trimmed);
+                if target_dir == source_trimmed || target_dir.starts_with(&source_prefix) {
+                    return;
+                }
+                let name = source_trimmed
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(source_trimmed.as_str());
+                let dest = if target_dir == "/" {
+                    format!("/{}", name)
+                } else {
+                    format!("{}/{}", target_dir, name)
+                };
+                if dest == source_trimmed {
+                    return;
+                }
+                if let Ok(handles) = sftp_handles.lock() {
+                    if let Some(h) = handles.get(tab_id.as_str()) {
+                        h.rename(source_trimmed, dest);
+                    }
+                }
+            },
+        );
+    }
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_move_selected_submit(
+            move |tab_id: SharedString, target_dir: SharedString| {
+                let Some(w) = weak.upgrade() else { return };
+                let terminals = w.get_terminals();
+                let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                    return;
+                };
+                let paths = collect_sftp_selected(tm, tab_id.as_str());
+                if paths.is_empty() {
+                    return;
+                }
+                let mut target_dir = target_dir.to_string();
+                target_dir = target_dir.trim().trim_end_matches('/').to_string();
+                if target_dir.is_empty() {
+                    target_dir = "/".to_string();
+                }
+                if let Ok(handles) = sftp_handles.lock() {
+                    if let Some(h) = handles.get(tab_id.as_str()) {
+                        let mut moves = Vec::new();
+                        for source in &paths {
+                            let source_trimmed = source.trim_end_matches('/').to_string();
+                            if source_trimmed.is_empty() || source_trimmed == "/" {
+                                continue;
+                            }
+                            let source_prefix = format!("{}/", source_trimmed);
+                            if target_dir == source_trimmed
+                                || target_dir.starts_with(&source_prefix)
+                            {
+                                continue;
+                            }
+                            let name = source_trimmed
+                                .rsplit('/')
+                                .next()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(source_trimmed.as_str());
+                            let dest = if target_dir == "/" {
+                                format!("/{}", name)
+                            } else {
+                                format!("{}/{}", target_dir, name)
+                            };
+                            if dest != source_trimmed {
+                                moves.push((source_trimmed, dest));
+                            }
+                        }
+                        if !moves.is_empty() {
+                            h.move_many(moves);
+                        }
+                    }
+                }
+                clear_sftp_selection(tm, tab_id.as_str());
+            },
+        );
+    }
     {
         let sftp_handles = sftp_handles.clone();
         window.on_sftp_view(move |tab_id: SharedString, path: SharedString| {
@@ -6422,20 +7270,28 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
     // re-uploads on every change.
     {
         let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
         window.on_sftp_open_external(move |tab_id: SharedString, path: SharedString| {
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(tab_id.as_str()) {
                     h.open_temp(path.to_string(), false);
+                    if let Some(w) = weak.upgrade() {
+                        w.set_download_open(true);
+                    }
                 }
             }
         });
     }
     {
         let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
         window.on_sftp_edit_external(move |tab_id: SharedString, path: SharedString| {
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(tab_id.as_str()) {
                     h.open_temp(path.to_string(), true);
+                    if let Some(w) = weak.upgrade() {
+                        w.set_download_open(true);
+                    }
                 }
             }
         });
@@ -6649,6 +7505,14 @@ fn wire_key_input(
             }
         });
     }
+    {
+        let handles_rc = handles.clone();
+        window.on_clear_failed_tunnels(move |tab_id: SharedString| {
+            if let Some(handle) = handles_rc.borrow().get(tab_id.as_str()) {
+                handle.clear_failed_tunnels();
+            }
+        });
+    }
 
     // --- Command bar (#55): run command + quick-command management ---------
     {
@@ -6827,13 +7691,24 @@ fn wire_key_input(
         window.on_edit_quick_command(move |index: i32| {
             let i = index as usize;
             let cmd = store_rc.borrow().quick_commands().get(i).cloned();
-            if let (Some(c), Some(w)) = (cmd, weak.upgrade()) {
-                w.set_qcm_name(c.name.into());
-                w.set_qcm_command(c.command.into());
-                w.set_qcm_group(c.group.into());
-                w.set_qcm_send_enter(c.send_enter);
-                w.set_qcm_edit_index(index);
-                w.set_quick_cmd_manage_open(true);
+
+            // Defer opening/populating the edit dialog until the current Slint
+            // click / PopupWindow event has fully unwound. Opening the dialog
+            // immediately from the popup's click handler can re-enter winit/Slint
+            // while an internal RefCell is still borrowed, which panics with
+            // "RefCell already borrowed".
+            if let Some(c) = cmd {
+                let weak = weak.clone();
+                slint::Timer::single_shot(std::time::Duration::from_millis(50), move || {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_qcm_name(c.name.into());
+                        w.set_qcm_command(c.command.into());
+                        w.set_qcm_group(c.group.into());
+                        w.set_qcm_send_enter(c.send_enter);
+                        w.set_qcm_edit_index(index);
+                        w.set_quick_cmd_manage_open(true);
+                    }
+                });
             }
         });
     }
@@ -9158,7 +10033,7 @@ fn vt_default_fg_rgb(is_dark: bool) -> (u8, u8, u8) {
 
 fn vt_default_bg_rgb(is_dark: bool) -> (u8, u8, u8) {
     if is_dark {
-        (0x0e, 0x0f, 0x13)
+        (0x14, 0x16, 0x1c)
     } else {
         (0xfa, 0xfa, 0xfa)
     }
@@ -9451,9 +10326,15 @@ mod selection_tests {
             full_path: format!("/{name}").into(),
             is_dir,
             size: String::new().into(),
-            size_bytes: 0.0,
+            raw_size: 0,
             modified: String::new().into(),
-            modified_ts: 0.0,
+            raw_modified: 0,
+            kind: String::new().into(),
+            kind_en: String::new().into(),
+            icon: String::new().into(),
+            permissions: String::new().into(),
+            owner: String::new().into(),
+            group: String::new().into(),
             mode: 0,
             selected: false,
         }

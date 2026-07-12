@@ -13,6 +13,10 @@
 export global Theme {
     // Set by Rust on startup (system detection) and on user toggle.
     in-out property <bool> dark: true;
+    // Theme variant: "" / "vscode" = default VS Code-like palette;
+    // "jiangnan" = a soft Jiangnan mist light palette.
+    in-out property <string> variant: "";
+    property <bool> jiangnan: !dark && root.variant == "jiangnan";
 
     // --- Immersive wallpaper (set by Rust from the wallpaper module) -------
     // When a wallpaper is active the window paints `wallpaper` behind everything
@@ -40,21 +44,27 @@ export global Theme {
     // --- Palette -----------------------------------------------------------
     // Opaque window base — the wallpaper Image covers it when active, so panels
     // frost over the image rather than over this.
-    out property <brush> window-base: dark ? #1b1d23 : #f5f5f7;
+    out property <brush> window-base: dark ? #1e1e1e : (jiangnan ? #faf8f1 : #ffffff);
 
-    property <color> base-bg-root:      dark ? #1b1d23 : #f5f5f7;
-    property <color> base-bg-panel:     dark ? #23262d : #ffffff;
-    property <color> base-bg-panel-alt: dark ? #2a2d35 : #f2f2f7;
-    property <color> base-bg-elevated:  dark ? #30333c : #e8e8ed;
-    property <color> base-bg-hover:     dark ? #373a44 : #e0e0e6;
-    property <color> base-bg-active:    dark ? #3f4350 : #d8d8de;
+    property <color> base-bg-root:      dark ? #1e1e1e : (jiangnan ? #faf8f1 : #ffffff);
+    property <color> base-bg-panel:     dark ? #262626 : (jiangnan ? #f2f0eb : #f3f3f3);
+    property <color> base-bg-panel-alt: dark ? #2d2d2d : (jiangnan ? #e6e9e4 : #ececec);
+    property <color> base-bg-topbar:    dark ? #3c3c3c : (jiangnan ? #6f8593 : #dddddd);
+    property <color> base-bg-toolstrip: dark ? #333333 : (jiangnan ? #e0e3de : #e6e6e6);
+    property <color> base-bg-elevated:  dark ? #3c3c3c : (jiangnan ? #d5d9d4 : #dddddd);
+    property <color> base-bg-hover:     dark ? #484848 : (jiangnan ? #c8d5c5 : #d2d2d2);
+    property <color> base-bg-active:    dark ? #094771 : (jiangnan ? #c2dec5 : #cce8ff);
 
     // bg-root frosts lighter (lower alpha) so the wallpaper reads clearly in
     // empty / inset areas; panels stay mostly opaque for legible text.
     out property <brush> bg-root:      frost(base-bg-root, max(0.0, root.panel-alpha - 0.44));
+    out property <brush> bg-root-panel: frost(base-bg-root, root.panel-alpha);
     out property <brush> bg-panel:     frost(base-bg-panel, root.panel-alpha);
     out property <brush> bg-panel-alt: frost(base-bg-panel-alt, root.panel-alpha);
+    out property <brush> bg-topbar:    frost(base-bg-topbar, root.panel-alpha);
+    out property <brush> bg-toolstrip: frost(base-bg-toolstrip, root.panel-alpha);
     out property <brush> bg-elevated:  frost(base-bg-elevated, root.panel-alpha);
+    out property <brush> bg-row-alt:   frost(dark ? #2d2d2d : (jiangnan ? #f8f6f0 : #fafafa), root.panel-alpha);
     out property <brush> bg-hover:     frost(base-bg-hover, min(1.0, root.panel-alpha + 0.04));
     out property <brush> bg-active:    frost(base-bg-active, min(1.0, root.panel-alpha + 0.08));
     // Settings dialog: 20% less transparent than the other panels so its dense
@@ -66,34 +76,40 @@ export global Theme {
     // clear step darker/lighter than the surrounding tab bar (#200).
     out property <brush> tab-active-bg: root.wallpaper-active
         ? root.wp-tint.mix(root.wp-accent, 0.68).with-alpha(min(1.0, root.panel-alpha + 0.10))
-        : (dark ? #171a20 : #ffffff);
+        : (dark ? #1e1e1e : (jiangnan ? #faf8f1 : #ffffff));
     out property <brush> tab-active-border: root.wallpaper-active
         ? root.wp-accent.with-alpha(0.72)
-        : (dark ? #06070a : #c7c7cc);
+        : (dark ? #007acc : (jiangnan ? #5f8e86 : #007acc));
 
-    out property <brush> border-subtle: dark ? #3a3d46 : #e2e2e8;
-    out property <brush> border-strong: dark ? #4a4e59 : #c7c7cc;
+    out property <brush> border-subtle: dark ? #3c3c3c : (jiangnan ? #d5d9d4 : #d4d4d4);
+    out property <brush> border-strong: dark ? #5a5a5a : (jiangnan ? #b8c5bc : #c8c8c8);
 
-    out property <brush> text-primary:   dark ? #e6e8ee : #1d1d1f;
+    out property <brush> text-primary:   dark ? #cccccc : (jiangnan ? #364139 : #1d1d1f);
     // Light-mode secondary/muted darkened further (was #55555a / #7c7c82): over a
     // see-through frosted-wallpaper panel the greys were still too faint to read.
-    out property <brush> text-secondary: dark ? #b4b9c4 : #45454a;
-    out property <brush> text-muted:     dark ? #9196a3 : #606066;
+    out property <brush> text-secondary: dark ? #bbbbbb : (jiangnan ? #536057 : #444444);
+    out property <brush> text-muted:     dark ? #858585 : (jiangnan ? #758078 : #6a6a6a);
+    out property <brush> topbar-fg:      jiangnan ? #f7f4ea : text-secondary;
+    out property <brush> topbar-hover:   jiangnan ? #c8d5c5 : bg-hover;
+    property <color> sftp-row-state-base: jiangnan ? #76ac86 : #4a90e2;
+    out property <brush> sftp-row-hover: sftp-row-state-base.with-alpha(0.15);
+    out property <brush> sftp-row-focus: sftp-row-state-base.with-alpha(0.25);
+    out property <brush> sftp-row-selected: sftp-row-state-base.with-alpha(0.25);
 
-    out property <brush> accent:         root.wallpaper-active ? root.wp-accent          : (dark ? #4a90e2 : #0071e3);
-    out property <brush> accent-hover:   root.wallpaper-active ? root.wp-accent.brighter(0.12) : (dark ? #5aa0f2 : #0077ed);
-    out property <brush> accent-pressed: root.wallpaper-active ? root.wp-accent.darker(0.12)   : (dark ? #3a80d2 : #006adb);
+    out property <brush> accent:         root.wallpaper-active ? root.wp-accent          : (dark ? #007acc : (jiangnan ? #76ac86 : #0071e3));
+    out property <brush> accent-hover:   root.wallpaper-active ? root.wp-accent.brighter(0.12) : (dark ? #0098ff : (jiangnan ? #86bb96 : #2188f5));
+    out property <brush> accent-pressed: root.wallpaper-active ? root.wp-accent.darker(0.12)   : (dark ? #006bb3 : (jiangnan ? #639874 : #006adb));
 
-    out property <brush> success: dark ? #4ec9b0 : #34c759;
-    out property <brush> warning: dark ? #e2a84a : #ff9f0a;
-    out property <brush> danger:  dark ? #e25c5c : #ff3b30;
+    out property <brush> success: dark ? #89d185 : #34c759;
+    out property <brush> warning: dark ? #cca700 : #ff9f0a;
+    out property <brush> danger:  dark ? #f14c4c : #ff3b30;
 
     // Terminal uses its own background so it stays readable regardless of
     // what the shell / remote app outputs via ANSI colour codes. With a
     // wallpaper it frosts (kept neutral, not tinted) so text stays legible.
-    property <color> base-term-bg: dark ? #0e0f13 : #fafafa;
+    property <color> base-term-bg: dark ? #1e1e1e : (jiangnan ? #faf8f1 : #ffffff);
     out property <brush> term-bg: root.wallpaper-active ? base-term-bg.with-alpha(max(0.0, root.panel-alpha - 0.14)) : base-term-bg;
-    out property <brush> term-fg: dark ? #d4d4d4 : #2d2d2f;
+    out property <brush> term-fg: dark ? #d4d4d4 : (jiangnan ? #354049 : #2d2d2f);
 
     // True on macOS (set by Rust). App shortcuts use Cmd (⌘) here instead of
     // Ctrl, so the physical Ctrl key stays free for the shell (^C/^X…) (#158).

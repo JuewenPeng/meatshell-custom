@@ -497,3 +497,9 @@ msgstr "已复制"
 
 msgid "Clear sort"
 msgstr "清除排序"
+
+msgid "Files"
+msgstr "文件"
+
+msgid "Tunnels"
+msgstr "端口转发"

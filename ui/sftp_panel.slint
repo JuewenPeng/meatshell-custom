@@ -1,6 +1,7 @@
 ﻿import { Theme } from "theme.slint";
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView, ListView } from "std-widgets.slint";
 import { TabInfo } from "tabs.slint";
+import { AutoScrollTextInput } from "widgets.slint";
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -11,11 +12,97 @@ export struct SftpEntry {
     full-path: string,
     is-dir: bool,
     size: string,
-    size-bytes: float,
+    raw-size: int,
     modified: string,
-    modified-ts: float,
+    raw-modified: int,
+    kind: string,
+    kind-en: string,
+    icon: string,
+    permissions: string,
+    owner: string,
+    group: string,
     mode: int,        // POSIX permission bits, for the chmod dialog (#84)
     selected: bool,   // multi-select checkbox state (#100)
+}
+
+component SftpHeaderCell inherits Rectangle {
+    in property <string> label;
+    in property <string> column;
+    in property <string> sort-column;
+    in property <bool> sort-asc: true;
+    in property <bool> align-right: false;
+    in property <bool> left-align: false;
+    in property <bool> resizable: true;
+    in property <length> current-width: 0px;
+    in property <length> col-min-w: 0px;
+    in property <length> col-max-w: 100000px;
+    callback clicked(string);
+    callback resize-to(length);
+    property <length> drag-start-x;
+    property <length> drag-start-width;
+    property <length> drag-current-x;
+    property <length> drag-target-w;
+
+    height: 20px;
+    background: ta.has-hover ? Theme.bg-hover : transparent;
+    ta := TouchArea {
+        width: parent.width - (root.resizable ? 6px : 0px);
+        height: parent.height;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(root.column); }
+    }
+    HorizontalLayout {
+        x: 6px;
+        width: parent.width - 12px;
+        height: parent.height;
+        alignment: root.left-align ? start : center;
+        spacing: 2px;
+        Text {
+            text: root.label;
+            color: root.sort-column == root.column ? Theme.text-primary : Theme.text-muted;
+            font-size: Theme.fs-xs;
+            horizontal-alignment: root.left-align ? left : center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            width: root.sort-column == root.column ? 12px : 0px;
+            text: root.sort-column == root.column ? (root.sort-asc ? "\u{E5CE}" : "\u{E5CF}") : "";
+            color: Theme.text-primary;
+            font-family: "Material Icons";
+            font-size: Theme.fs-sm;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    if root.resizable : Rectangle {
+        x: parent.width - 3px;
+        width: 6px;
+        height: parent.height;
+        background: transparent;
+        Rectangle {
+            x: 3px;
+            width: 1px;
+            height: parent.height;
+            background: Theme.border-strong;
+        }
+        resize-ta := TouchArea {
+            mouse-cursor: ew-resize;
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down) {
+                    root.drag-start-x = self.absolute-position.x + self.mouse-x;
+                    root.drag-start-width = root.current-width;
+                }
+            }
+            moved => {
+                if (self.pressed) {
+                    root.drag-current-x = self.absolute-position.x + self.mouse-x;
+                    root.drag-target-w = root.drag-start-width + root.drag-current-x - root.drag-start-x;
+                    root.resize-to(max(root.col-min-w, min(root.col-max-w, root.drag-target-w)));
+                }
+            }
+        }
+    }
 }
 
 export struct SftpTreeNode {
@@ -24,6 +111,7 @@ export struct SftpTreeNode {
     depth: int,
     expanded: bool,
     has-children: bool,
+    is-dir: bool,
 }
 
 export struct TunnelInfo {
@@ -34,6 +122,39 @@ export struct TunnelInfo {
     target: string,
     status: string,
     active: bool,
+}
+
+component SftpTooltip inherits Rectangle {
+    in property <string> text;
+    in property <length> anchor-x;
+    in property <length> anchor-y;
+    in property <length> anchor-width: 24px;
+    in property <length> anchor-height: 22px;
+    in property <length> path-left: 120px;
+
+    y: root.anchor-y + root.anchor-height + 6px;
+    x: root.anchor-x >= root.path-left
+        ? root.anchor-x + root.anchor-width - self.width
+        : root.anchor-x;
+    width: tip-txt.preferred-width + 16px;
+    height: 22px;
+    background: Theme.bg-hover;
+    border-radius: Theme.radius-sm;
+    border-width: 0px;
+    border-color: Theme.border-strong;
+    drop-shadow-blur: 4px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: #00000060;
+    tip-txt := Text {
+        text: root.text;
+        color: Theme.text-primary;
+        font-size: Theme.fs-xs;
+        horizontal-alignment: left;
+        vertical-alignment: center;
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+    }
 }
 
 // One row of the file-list right-click context menu.
@@ -51,16 +172,18 @@ component SftpMenuItem inherits Rectangle {
     }
     Text {
         x: 10px;
+        width: parent.width - 20px;
         text: root.label;
         color: root.enabled ? root.tint : Theme.text-muted;
         font-size: Theme.fs-sm;
+        overflow: elide;
         vertical-alignment: center;
         height: parent.height;
     }
 }
 
 // ---------------------------------------------------------------------------
-// SftpPanel — left directory tree + right file listing
+// SftpPanel - left directory tree + right file listing
 // ---------------------------------------------------------------------------
 
 export component SftpPanel inherits Rectangle {
@@ -75,28 +198,63 @@ export component SftpPanel inherits Rectangle {
     in property <string> sort-key: "";
     in property <int> sort-dir: 0; // 0 default / 1 asc / -1 desc
     in property <[TunnelInfo]> tunnels: [];
+    in property <bool> lang-en: false;
+    in property <string> dock-edge: "bottom";
     in property <bool> collapsed: false;   // when true only the toolbar shows
     in property <bool> show-tree: true;    // hide the directory tree when narrow (#dock)
     in property <bool> compact: false;     // side-docked + collapsed → render nothing but a clean strip (#dock)
+    property <length> tree-min-width: 96px;
+    property <length> tree-width: 180px;
+    property <length> tree-reserve-width: 240px;
+    property <length> tree-max-width: max(root.tree-min-width, root.width - root.tree-reserve-width);
     // Responsive columns: only when docked left/right (narrow, width-adjustable).
     // Docked top/bottom the panel is wide and can only be resized vertically, so
     // always show every column there (show-tree is true exactly in that case).
-    // When narrow, drop Size then Modified the moment keeping them would squeeze
-    // the Name column below `name-min` (names start eliding to "…"). Reserved
-    // widths: checkbox+padding+spacing 36px, Size col 76px, Modified 120px.
-    property <length> list-w: root.show-tree ? root.width - 161px : root.width;
+    // In side dock, hide columns from the right edge as the list becomes too
+    // narrow. The name column always remains visible.
+    property <length> list-w: root.show-tree ? root.width - root.tree-width : root.width;
     property <length> name-min: 180px;     // narrower than this → start dropping columns
-    property <bool> show-size-col: root.show-tree || (root.list-w - 36px - 76px - 120px > root.name-min);
-    property <bool> show-modified-col: root.show-tree || (root.list-w - 36px - 120px > root.name-min);
+    property <length> name-col-w: 480px;
+    property <length> size-col-w: 76px;
+    property <length> type-col-w: 80px;
+    property <length> modified-col-w: 124px;
+    property <length> perm-col-w: 92px;
+    property <length> owner-col-w: 120px;
+    property <length> owner-min-w: 120px;
+    property <bool> side-docked: !root.show-tree;
+    property <bool> show-owner-col: true;
+    property <bool> show-perm-col: true;
+    property <bool> show-modified-col: true;
+    property <bool> show-type-col: true;
+    property <bool> show-size-col: true;
+    property <length> visible-size-col-w: root.show-size-col ? root.size-col-w : 0px;
+    property <length> visible-type-col-w: root.show-type-col ? root.type-col-w : 0px;
+    property <length> visible-modified-col-w: root.show-modified-col ? root.modified-col-w : 0px;
+    property <length> visible-perm-col-w: root.show-perm-col ? root.perm-col-w : 0px;
+    property <length> visible-owner-min-w: root.show-owner-col ? root.owner-min-w : 0px;
+    property <length> name-col-view-w: root.name-col-w;
+    property <length> size-col-view-w: root.visible-size-col-w;
+    property <length> type-col-view-w: root.visible-type-col-w;
+    property <length> modified-col-view-w: root.visible-modified-col-w;
+    property <length> perm-col-view-w: root.visible-perm-col-w;
+    property <bool> toolbar-enabled: !root.collapsed;
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
+    property <string> sort-column: "name";
+    property <bool> sort-asc: true;
+    property <string> focused-tree-path;
+    property <bool> tree-name-click-pending: false;
+    property <string> pending-tree-click-path;
+    property <int> selection-anchor-row: -1;
+    property <bool> suppress-double-open: false;
     in property <int> selected-count;      // number of checked entries (#100)
     // Panel-level right-click context menu (#84). One menu for the whole list:
     // an empty `menu-target` means the click landed on whitespace, which greys
-    // out the item-specific actions (download/rename/…) but keeps new/refresh.
+    // out the item-specific actions (download/rename/etc.) but keeps new/refresh.
     property <length> menu-x;
     property <length> menu-y;
     property <string> menu-target;          // "" = whitespace
     property <string> menu-target-name;
+    property <int>    menu-target-row: -1;
     property <bool>   menu-target-is-dir;
     property <int>    menu-target-mode;     // permission bits for the chmod dialog
     property <string> panel-mode: "files";
@@ -106,17 +264,43 @@ export component SftpPanel inherits Rectangle {
     property <string> tunnel-bind-port: "1080";
     property <string> tunnel-host: "127.0.0.1";
     property <string> tunnel-host-port: "80";
+    property <length> tree-menu-x;
+    property <length> tree-menu-y;
+    property <string> toolbar-tooltip-text;
+    property <string> toolbar-tooltip-pending-text;
+    property <length> toolbar-tooltip-pending-x;
+    property <length> toolbar-tooltip-pending-y;
+    property <length> toolbar-tooltip-pending-width: 24px;
+    property <length> toolbar-tooltip-pending-path-left: 120px;
+    property <length> toolbar-tooltip-x;
+    property <length> toolbar-tooltip-y;
+    property <length> toolbar-tooltip-width: 24px;
+    property <length> toolbar-tooltip-path-left: 120px;
+    property <string> load-more-label: root.lang-en ? "Load more..." : "加载更多...";
+    property <string> load-all-label: root.lang-en ? "Load all..." : "加载全部...";
 
     // --- Callbacks ---------------------------------------------------------
     callback toggle-collapsed();    // minimise / restore the panel
     callback navigate(string);
     callback download(string);
+    callback archive-download(string);
     callback upload-clicked(string /* remote dir */, bool /* folder */);
     callback refresh(string);
-    callback tree-expand(string);   // toggle expand/collapse + navigate
+    callback load-more();
+    callback load-all();
+    callback sort-request(string /* column */, bool /* ascending */);
+    callback tree-expand(string, bool);   // toggle expand/collapse; navigate only when expanding
+    callback tree-probe(string);          // load child information without expanding
+    callback tree-load-more(string);
     callback delete(string);        // remove a remote file/dir
+    callback move-request(string /* path */, string /* current name */);
+    callback move-selected-request();
     callback toggle-select(int);    // toggle a row's multi-select checkbox (#100)
+    callback select-single(int);    // clear selection and select one row
+    callback select-range(int /* anchor */, int /* row */, bool /* keep existing */);
+    callback select-all();
     callback download-selected();   // download all checked entries (#100)
+    callback archive-download-selected(); // tar checked entries into one archive
     callback delete-selected();     // delete all checked entries (#100)
     callback copy-to-target(string /* path */, string /* target tab */);
     callback copy-selected-to-target(string /* target tab */);
@@ -124,13 +308,13 @@ export component SftpPanel inherits Rectangle {
     callback edit(string);          // open writable in the built-in editor
     callback open-external(string);     // open with the OS default app (#81)
     callback edit-external(string);     // open externally + watch/re-upload (#81)
-    callback sort-request(string /* name|size|modified */);
-    callback clear-sort();
     callback tunnel-add(string /* name */, string /* kind */, string /* bind */, string /* bind-port */, string /* host */, string /* host-port */);
     callback tunnel-stop(string /* id */);
+    callback clear-failed-tunnels();
     // Context-menu extensions (#69). The *-request callbacks open dialogs in
     // the app shell; copy-path goes straight to the system clipboard.
     callback rename-request(string /* path */, string /* current name */);
+    callback rename-submit(string /* path */, string /* new name */);
     callback chmod-request(string /* path */, string /* name */, int /* mode */);
     callback copy-path(string);
     callback new-folder(string /* parent dir */);
@@ -142,23 +326,85 @@ export component SftpPanel inherits Rectangle {
 
     // -----------------------------------------------------------------------
     background: Theme.bg-panel;
+    // Focus sink used to blur the path input without changing layout.
+    input-blur-scope := FocusScope {
+        key-pressed(e) => {
+            if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
+                    && (e.text == "a" || e.text == "A" || e.text == "\u{0001}")) {
+                root.select-all();
+                accept
+            } else {
+                reject
+            }
+        }
+    }
 
     // Keep the editable path bar in sync when the directory changes elsewhere
     // (tree click, file double-click, terminal cd) (#54).
-    changed current-path => { path-input.text = root.current-path; root.selected-row = -1; }
+    changed current-path => {
+        path-input.text = root.current-path;
+        root.scroll-path-to-end();
+        root.selected-row = -1;
+        root.focused-tree-path = root.current-path;
+    }
 
-    // Drag empty space to re-dock; interactive widgets (file list, tree, toolbar
-    // buttons) sit in front and capture their own events (#dock).
-    dock-bg := TouchArea {
-        mouse-cursor: move;
-        moved => {
-            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
-                                self.absolute-position.y + self.mouse-y);
-        }
-        pointer-event(ev) => {
-            if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+    changed collapsed => {
+        if (!root.collapsed) {
+            root.scroll-path-to-end();
         }
     }
+
+    public function scroll-path-to-end() {
+        path-input.set-selection-offsets(1000000, 1000000);
+        path-input.scroll-to-end();
+    }
+
+    tree-name-click-delay := Timer {
+        interval: 600ms;
+        running: root.tree-name-click-pending;
+        triggered => { root.tree-name-click-pending = false; }
+    }
+    toolbar-tooltip-delay := Timer {
+        interval: 250ms;
+        running: root.toolbar-tooltip-pending-text != "";
+        triggered => {
+            root.toolbar-tooltip-text = root.toolbar-tooltip-pending-text;
+            root.toolbar-tooltip-x = root.toolbar-tooltip-pending-x;
+            root.toolbar-tooltip-y = root.toolbar-tooltip-pending-y;
+            root.toolbar-tooltip-width = root.toolbar-tooltip-pending-width;
+            root.toolbar-tooltip-path-left = root.toolbar-tooltip-pending-path-left;
+            root.toolbar-tooltip-pending-text = "";
+        }
+    }
+
+    public function open-entry(path: string, is-dir: bool) {
+        if (is-dir) {
+            root.navigate(path);
+        } else {
+            root.open-external(path);
+        }
+    }
+
+    public function show-toolbar-tooltip(text: string, abs-x: length, abs-y: length, width: length) {
+        root.toolbar-tooltip-text = "";
+        root.toolbar-tooltip-pending-text = text;
+        root.toolbar-tooltip-pending-x = abs-x - root.absolute-position.x;
+        root.toolbar-tooltip-pending-y = abs-y - root.absolute-position.y;
+        root.toolbar-tooltip-pending-width = width;
+        root.toolbar-tooltip-pending-path-left = path-wrap.absolute-position.x - root.absolute-position.x;
+    }
+
+    public function hide-toolbar-tooltip(text: string) {
+        if (root.toolbar-tooltip-pending-text == text) {
+            root.toolbar-tooltip-pending-text = "";
+        }
+        if (root.toolbar-tooltip-text == text) {
+            root.toolbar-tooltip-text = "";
+        }
+    }
+
+    // Re-docking is intentionally limited to the toolbar grip immediately left
+    // of the path input, so file-list/tree whitespace keeps normal pointer use.
 
     // Hidden entirely when side-docked + collapsed: the horizontal toolbar would
     // otherwise squish into an unusable vertical strip. `visible` (not `if`) so
@@ -170,21 +416,24 @@ export component SftpPanel inherits Rectangle {
 
         // --- Toolbar (full width) ------------------------------------------
         Rectangle {
-            height: 34px;
+            width: root.width;
+            height: 32px;
             background: Theme.bg-panel-alt;
+            clip: true;
 
             HorizontalLayout {
                 padding-left: 6px;
                 padding-right: 6px;
-                padding-top: 6px;
-                padding-bottom: 6px;
+                padding-top: 5px;
+                padding-bottom: 5px;
                 spacing: 4px;
 
                 // Dedicated drag handle to re-dock the panel. The toolbar is full
                 // of controls, so dragging "empty space" is unreliable; this grip
                 // is always grabbable and reports window-space coords (#dock).
                 Rectangle {
-                    width: 16px;
+                    visible: root.toolbar-enabled;
+                    width: 20px;
                     y: (parent.height - self.height) / 2;
                     height: 22px;
                     grip-ta := TouchArea {
@@ -206,6 +455,19 @@ export component SftpPanel inherits Rectangle {
                         vertical-alignment: center;
                         width: parent.width;
                         height: parent.height;
+                    }
+                }
+
+                Rectangle {
+                    visible: root.toolbar-enabled;
+                    width: 8px;
+                    height: 22px;
+                    Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 1px;
+                        height: 14px;
+                        background: Theme.border-strong;
                     }
                 }
 
@@ -244,95 +506,56 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
 
-                // Editable path bar: type or paste a path and press Enter to
-                // jump there; copy / paste-jump buttons sit right after it (#54).
-                Rectangle {
-                    visible: root.panel-mode == "files";
-                    horizontal-stretch: 1;
+                if root.panel-mode == "files" && root.toolbar-enabled : Rectangle {
+                    width: 8px;
                     height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: Theme.bg-root;
-                    border-width: 1px;
-                    border-color: path-input.has-focus ? Theme.accent : Theme.border-subtle;
-                    path-input := TextInput {
-                        x: 6px;
-                        width: parent.width - 12px;
-                        height: parent.height;
-                        text: root.current-path;
-                        color: Theme.text-primary;
-                        // CJK-capable font so typed Chinese isn't tofu (#54).
-                        font-family: Theme.ui-font-family;
-                        font-size: Theme.fs-sm;
-                        vertical-alignment: center;
-                        single-line: true;
-                        accepted => { root.navigate(self.text); }
+                    Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 1px;
+                        height: 14px;
+                        background: Theme.border-strong;
                     }
-                }
-
-                // Copy the current path to the clipboard.
-                Rectangle {
-                    visible: root.panel-mode == "files";
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: copy-ta.has-hover ? Theme.bg-hover : transparent;
-                    copy-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            path-input.select-all();
-                            path-input.copy();
-                            path-input.clear-selection();
-                        }
-                    }
-                    Text { text: "\u{E14D}"; font-family: "Material Icons";
-                           color: Theme.text-secondary; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
-                }
-
-                // Paste a path from the clipboard and jump straight to it.
-                Rectangle {
-                    visible: root.panel-mode == "files";
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: pj-ta.has-hover ? Theme.bg-hover : transparent;
-                    pj-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            path-input.select-all();
-                            path-input.paste();
-                            root.navigate(path-input.text);
-                        }
-                    }
-                    Text { text: "\u{E14F}"; font-family: "Material Icons";
-                           color: Theme.text-secondary; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 up-btn := Rectangle {
-                    visible: root.panel-mode == "files";
+                    visible: root.panel-mode == "files" && root.toolbar-enabled;
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
-                    background: up-ta.has-hover ? Theme.bg-hover : transparent;
+                    background: (root.toolbar-enabled && up-ta.has-hover) ? Theme.bg-hover : transparent;
                     up-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.navigate(".."); }
+                        mouse-cursor: root.toolbar-enabled ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Parent directory" : "上级目录", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Parent directory" : "上级目录"); }
+                        }
+                        clicked => { if (root.toolbar-enabled) { root.navigate(".."); } }
                     }
-                    Text { text: "↑"; color: Theme.text-secondary; font-size: Theme.fs-md;
-                           horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "\u{E5D8}"; font-family: "Material Icons";
+                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-md;
+                           horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
                 }
 
                 // Upload: a small menu offers file vs folder (#85). The remote
-                // SFTP upload handles both — only the local picker differs.
+                // SFTP upload handles both; only the local picker differs.
                 ul-btn := Rectangle {
-                    visible: root.panel-mode == "files";
-                    width: 52px; height: 22px;
+                    visible: root.panel-mode == "files" && root.toolbar-enabled;
+                    width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
-                    background: ul-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                    background: (root.toolbar-enabled && ul-ta.has-hover) ? Theme.bg-hover : transparent;
                     ul-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { ul-menu.show(); }
+                        mouse-cursor: root.toolbar-enabled ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Upload" : "上传", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Upload" : "上传"); }
+                        }
+                        clicked => { if (root.toolbar-enabled) { ul-menu.show(); } }
                     }
-                    Text { text: @tr("Upload"); color: #ffffff; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "\u{E2C6}"; font-family: "Material Icons";
+                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-md;
+                           horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
                     ul-menu := PopupWindow {
                         x: 0; y: parent.height + 2px;
                         width: 124px;
@@ -360,43 +583,171 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
 
-                // Batch actions on checked entries — only when something's checked (#100).
-                if root.panel-mode == "files" && root.selected-count > 0 : Text {
-                    text: "✓" + root.selected-count;
-                    color: Theme.accent;
-                    font-size: Theme.fs-sm;
-                    vertical-alignment: center;
-                }
-                if root.panel-mode == "files" && root.selected-count > 0 : Rectangle {
+                // Batch actions on checked entries (#100).
+                if root.panel-mode == "files" : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
-                    background: dls-ta.has-hover ? Theme.bg-hover : transparent;
-                    dls-ta := TouchArea { mouse-cursor: pointer; clicked => { root.download-selected(); } }
+                    opacity: root.toolbar-enabled && root.selected-count > 0 ? 1 : 0.4;
+                    background: (root.toolbar-enabled && root.selected-count > 0 && dls-ta.has-hover) ? Theme.bg-hover : transparent;
+                    dls-ta := TouchArea {
+                        mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover && root.toolbar-enabled && root.selected-count > 0) { root.show-toolbar-tooltip(root.lang-en ? "Download" : "下载", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Download" : "下载"); }
+                        }
+                        clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.download-selected(); } }
+                    }
                     Text { text: "\u{E2C4}"; font-family: "Material Icons"; color: Theme.text-secondary;
-                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
+                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
                 }
-                if root.panel-mode == "files" && root.selected-count > 0 : Rectangle {
+                if root.panel-mode == "files" : Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
-                    background: dels-ta.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
-                    dels-ta := TouchArea { mouse-cursor: pointer; clicked => { root.delete-selected(); } }
+                    opacity: root.toolbar-enabled && root.selected-count > 0 ? 1 : 0.4;
+                    background: (root.toolbar-enabled && root.selected-count > 0 && mvs-ta.has-hover) ? Theme.bg-hover : transparent;
+                    mvs-ta := TouchArea {
+                        mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover && root.toolbar-enabled && root.selected-count > 0) { root.show-toolbar-tooltip(root.lang-en ? "Move" : "移动", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Move" : "移动"); }
+                        }
+                        clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.move-selected-request(); } }
+                    }
+                    Text { text: "\u{E675}"; font-family: "Material Icons"; color: Theme.text-secondary;
+                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
+                }
+                if root.panel-mode == "files" : HorizontalLayout {
+                    spacing: 6px;
+                    Rectangle {
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    opacity: root.toolbar-enabled && root.selected-count > 0 ? 1 : 0.4;
+                    background: (root.toolbar-enabled && root.selected-count > 0 && dels-ta.has-hover) ? Theme.danger.with-alpha(0.18) : transparent;
+                    dels-ta := TouchArea {
+                        mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover && root.toolbar-enabled && root.selected-count > 0) { root.show-toolbar-tooltip(root.lang-en ? "Delete" : "删除", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Delete" : "删除"); }
+                        }
+                        clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.delete-selected(); } }
+                    }
                     Text { text: "\u{E872}"; font-family: "Material Icons"; color: Theme.danger;
-                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
+                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
+                }
+
+                // Copy the current path to the clipboard.
+                Rectangle {
+                    visible: root.toolbar-enabled;
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: (root.toolbar-enabled && copy-ta.has-hover) ? Theme.bg-hover : transparent;
+                    copy-ta := TouchArea {
+                        mouse-cursor: root.toolbar-enabled ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Copy path" : "复制路径", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Copy path" : "复制路径"); }
+                        }
+                        clicked => {
+                            if (root.toolbar-enabled) {
+                                path-input.select-all();
+                                path-input.copy();
+                                path-input.clear-selection();
+                            }
+                        }
+                    }
+                    Text { text: "\u{E14D}"; font-family: "Material Icons";
+                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
+                }
+
+                // Paste a path from the clipboard and jump straight to it.
+                Rectangle {
+                    visible: root.toolbar-enabled;
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: (root.toolbar-enabled && pj-ta.has-hover) ? Theme.bg-hover : transparent;
+                    pj-ta := TouchArea {
+                        mouse-cursor: root.toolbar-enabled ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Paste and go" : "粘贴并跳转", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Paste and go" : "粘贴并跳转"); }
+                        }
+                        clicked => {
+                            if (root.toolbar-enabled) {
+                                path-input.select-all();
+                                path-input.paste();
+                                root.navigate(path-input.text);
+                            }
+                        }
+                    }
+                    Text { text: "\u{E14F}"; font-family: "Material Icons";
+                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
                 }
 
                 Rectangle {
-                    visible: root.panel-mode == "files";
+                    visible: root.panel-mode == "files" && root.toolbar-enabled;
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
-                    background: ref-ta.has-hover ? Theme.bg-hover : transparent;
+                    background: (root.toolbar-enabled && ref-ta.has-hover) ? Theme.bg-hover : transparent;
                     ref-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.refresh(root.current-path); }
+                        mouse-cursor: root.toolbar-enabled ? pointer : default;
+                        changed has-hover => {
+                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Refresh" : "刷新", self.absolute-position.x, self.absolute-position.y, 24px); }
+                            else { root.hide-toolbar-tooltip(root.lang-en ? "Refresh" : "刷新"); }
+                        }
+                        clicked => {
+                            if (root.toolbar-enabled) {
+                                root.selected-row = -1;
+                                root.selection-anchor-row = -1;
+                                root.refresh(root.current-path);
+                            }
+                        }
                     }
                     Text { text: "\u{E5D5}"; font-family: "Material Icons";
-                           color: Theme.text-secondary; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
+                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
+                           horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
                 }
+                }
+
+                // Editable path bar: type or paste a path and press Enter to
+                // jump there. Toolbar buttons sit before it, so the path field
+                // absorbs the remaining width without pushing controls left.
+                path-wrap := Rectangle {
+                    visible: root.panel-mode == "files" && root.toolbar-enabled;
+                    horizontal-stretch: 1;
+                    height: 22px;
+                    changed width => {
+                        if (!root.collapsed) {
+                            root.scroll-path-to-end();
+                        }
+                    }
+                    clip: true;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-root;
+                    border-width: 1px;
+                    border-color: path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                    path-input := AutoScrollTextInput {
+                        x: 6px;
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        text: root.current-path;
+                        text-color: Theme.text-primary;
+                        // CJK-capable font so typed Chinese isn't tofu (#54).
+                        font-family: Theme.ui-font-family;
+                        font-size: Theme.fs-sm;
+                        read-only: !root.toolbar-enabled;
+                        accepted => { if (root.toolbar-enabled) { root.navigate(self.text); } }
+                    }
+                }
+
+                if root.collapsed : Rectangle { horizontal-stretch: 1; }
 
                 // Minimise / restore the SFTP panel (#41).
                 Rectangle {
@@ -407,23 +758,32 @@ export component SftpPanel inherits Rectangle {
                         mouse-cursor: pointer;
                         clicked => { root.toggle-collapsed(); }
                     }
-                    // expand_less (▲, restore) when collapsed, expand_more (▼) otherwise.
-                    Text { text: root.collapsed ? "\u{E5CE}" : "\u{E5CF}"; font-family: "Material Icons";
+                    Text {
+                           text: root.collapsed
+                               ? (root.dock-edge == "right" ? "\u{E5CB}"
+                                  : root.dock-edge == "top" ? "\u{E5CF}"
+                                  : root.dock-edge == "bottom" ? "\u{E5CE}"
+                                  : "\u{E5CC}")
+                               : (root.dock-edge == "right" ? "\u{E5CC}"
+                                  : root.dock-edge == "top" ? "\u{E5CE}"
+                                  : root.dock-edge == "bottom" ? "\u{E5CF}"
+                                  : "\u{E5CB}");
+                           font-family: "Material Icons";
                            color: Theme.text-secondary; font-size: Theme.fs-md;
-                           horizontal-alignment: center; vertical-alignment: center; }
+                           horizontal-alignment: center; vertical-alignment: center;
+                           width: parent.width; height: parent.height; }
                 }
             }
         }
 
         // --- Main area: tree (left) + file list (right) --------------------
-        HorizontalLayout {
-            visible: root.panel-mode == "files";
+        if root.panel-mode == "files" : HorizontalLayout {
             vertical-stretch: 1;
             spacing: 0;
 
-            // ── Left: directory tree (hidden when the panel is narrow) ──────
+            // 鈹€鈹€ Left: directory tree (hidden when the panel is narrow) 鈹€鈹€鈹€鈹€鈹€鈹€
             if root.show-tree : VerticalLayout {
-                width: 160px;
+                width: root.tree-width;
                 spacing: 0;
 
                 // Tree header
@@ -442,54 +802,217 @@ export component SftpPanel inherits Rectangle {
                 Rectangle { height: 1px; background: Theme.border-subtle; }
 
                 // Tree list with scrollbar
-                ScrollView {
+                tree-area := Rectangle {
                     vertical-stretch: 1;
+                    clip: true;
 
-                    tree-list := VerticalLayout {
-                        spacing: 0;
+                    tree-list := ListView {
+                        width: parent.width;
+                        height: parent.height;
+                        viewport-width: self.width;
 
                         for node[i] in root.tree-nodes : Rectangle {
                             height: 22px;
-                            background: node-ta.has-hover
-                                ? Theme.bg-hover
-                                : (node.path == root.current-path
-                                    ? #4a90e230
-                                    : (mod(i, 2) == 0 ? transparent : #ffffff08));
-
-                            node-ta := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.tree-expand(node.path); }
-                            }
+                            background: (toggle-ta.has-hover || name-ta.has-hover)
+                                ? Theme.sftp-row-hover
+                                : ((root.focused-tree-path != "" ? node.path == root.focused-tree-path : node.path == root.current-path)
+                                    ? Theme.sftp-row-focus
+                                    : (mod(i, 2) == 0 ? transparent : Theme.bg-row-alt));
 
                             HorizontalLayout {
                                 spacing: 0;
                                 padding-top: 1px;
 
                                 // Depth indent spacer
-                                Rectangle { width: node.depth * 12px; }
+                                Rectangle { width: 6px + node.depth * 12px; }
 
-                                // Expand/collapse arrow
-                                Text {
+                                // Expand/collapse arrow. This only toggles the left tree;
+                                // it intentionally does not navigate the right file list.
+                                Rectangle {
                                     width: 14px;
-                                    text: node.has-children
-                                        ? (node.expanded ? "▼" : "▶")
-                                        : " ";
-                                    color: Theme.text-muted;
-                                    font-size: 9px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                    height: parent.height;
+
+                                    toggle-ta := TouchArea {
+                                        mouse-cursor: node.is-dir ? pointer : default;
+                                        clicked => {
+                                            input-blur-scope.focus();
+                                            root.focused-tree-path = node.path;
+                                            if (node.is-dir) {
+                                                root.tree-expand(node.path, node.expanded);
+                                            }
+                                        }
+                                        pointer-event(ev) => {
+                                            if (node.name == "加载全部...") {
+                                                return;
+                                            }
+                                            if (ev.kind == PointerEventKind.down
+                                                    && ev.button == PointerEventButton.right
+                                                    && node.is-dir) {
+                                                root.tree-name-click-pending = false;
+                                                root.focused-tree-path = node.path;
+                                                root.menu-target = node.path;
+                                                root.menu-target-name = node.depth == 0 ? "/" : node.name;
+                                                root.menu-target-row = -1;
+                                                root.menu-target-is-dir = true;
+                                                root.menu-target-mode = 0;
+                                                root.tree-menu-x = self.absolute-position.x + self.mouse-x - tree-area.absolute-position.x;
+                                                root.tree-menu-y = self.absolute-position.y + self.mouse-y - tree-area.absolute-position.y;
+                                                tree-menu.show();
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        text: node.has-children
+                                            ? (node.expanded ? "\u{E5CF}" : "\u{E5CC}")
+                                            : " ";
+                                        font-family: "Material Icons";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.fs-sm;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
                                 }
 
-                                // Folder name
-                                Text {
-                                    text: node.depth == 0 ? "/" : node.name;
-                                    color: node.path == root.current-path
-                                        ? Theme.accent
-                                        : Theme.text-primary;
-                                    font-size: Theme.fs-sm;
+                                // Node name. Folder names navigate the right file list;
+                                // files open externally.
+                                Rectangle {
                                     horizontal-stretch: 1;
-                                    overflow: elide;
-                                    vertical-alignment: center;
+                                    height: parent.height;
+
+                                    name-ta := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            input-blur-scope.focus();
+                                            root.focused-tree-path = node.path;
+                                            if (node.is-dir) {
+                                                if (root.tree-name-click-pending && root.pending-tree-click-path == node.path) {
+                                                    root.tree-name-click-pending = false;
+                                                    root.tree-expand(node.path, node.expanded);
+                                                } else {
+                                                    root.pending-tree-click-path = node.path;
+                                                    root.tree-name-click-pending = true;
+                                                    root.navigate(node.path);
+                                                }
+                                            } else if (node.name == "加载全部...") {
+                                                root.tree-name-click-pending = false;
+                                                root.tree-load-more(node.path);
+                                            } else {
+                                                root.tree-name-click-pending = false;
+                                                root.open-external(node.path);
+                                            }
+                                        }
+                                        pointer-event(ev) => {
+                                            if (node.name == "加载全部...") {
+                                                return;
+                                            }
+                                            if (ev.kind == PointerEventKind.down
+                                                    && ev.button == PointerEventButton.right
+                                                    && node.is-dir) {
+                                                root.tree-name-click-pending = false;
+                                                root.focused-tree-path = node.path;
+                                                root.menu-target = node.path;
+                                                root.menu-target-name = node.depth == 0 ? "/" : node.name;
+                                                root.menu-target-row = -1;
+                                                root.menu-target-is-dir = true;
+                                                root.menu-target-mode = 0;
+                                                root.tree-menu-x = self.absolute-position.x + self.mouse-x - tree-area.absolute-position.x;
+                                                root.tree-menu-y = self.absolute-position.y + self.mouse-y - tree-area.absolute-position.y;
+                                                tree-menu.show();
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        x: 2px;
+                                        text: node.depth == 0 ? "/" : (node.name == "加载全部..." ? "... " + root.load-all-label : (node.is-dir ? (node.expanded ? "📂 " : "📁 ") + node.name : "📄 " + node.name));
+                                        color: node.path == root.current-path
+                                            ? Theme.accent
+                                            : (node.is-dir ? Theme.text-primary : Theme.text-secondary);
+                                        font-size: Theme.fs-sm;
+                                        width: parent.width - 4px;
+                                        height: parent.height;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    tree-menu := PopupWindow {
+                        x: root.tree-menu-x;
+                        y: root.tree-menu-y;
+                        width: 176px;
+                        height: 10 * 27px + 8px;
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            background: Theme.bg-panel;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000060;
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 1px;
+                                SftpMenuItem {
+                                    label: @tr("Download");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.download(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: root.lang-en ? "Archive download (.tar)" : "打包下载(.tar)";
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.archive-download(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Rename");
+                                    enabled: root.menu-target != "";
+                                    clicked => {
+                                        root.rename-request(root.menu-target, root.menu-target-name);
+                                    }
+                                }
+                                SftpMenuItem {
+                                    label: root.lang-en ? "Move..." : "移动...";
+                                    enabled: root.menu-target != "";
+                                    clicked => {
+                                        root.move-request(root.menu-target, root.menu-target-name);
+                                    }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Copy path");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.copy-path(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Delete");
+                                    tint: #d86c6c;
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.delete(root.menu-target); }
+                                }
+                                Rectangle { height: 1px; background: Theme.border-subtle; }
+                                SftpMenuItem {
+                                    label: @tr("New folder");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.new-folder(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("New file");
+                                    enabled: root.menu-target != "";
+                                    clicked => { root.new-file(root.menu-target); }
+                                }
+                                SftpMenuItem {
+                                    label: @tr("Refresh");
+                                    enabled: root.menu-target != "";
+                                    clicked => {
+                                        root.selected-row = -1;
+                                        root.selection-anchor-row = -1;
+                                        root.refresh(root.menu-target);
+                                    }
                                 }
                             }
                         }
@@ -498,199 +1021,374 @@ export component SftpPanel inherits Rectangle {
             }
 
             // Vertical separator (only when the tree is shown)
-            if root.show-tree : Rectangle { width: 1px; background: Theme.border-subtle; }
+            tree-resize-splitter := Rectangle {
+                visible: root.show-tree;
+                width: 0px;
+                property <bool> hover-lit;
+                property <bool> hover-pending;
+                property <bool> dragging;
+                background: transparent;
+                z: 20;
 
-            // ── Right: file listing ─────────────────────────────────────────
+                resize-hover-timer := Timer {
+                    interval: 180ms;
+                    running: parent.hover-pending;
+                    triggered => {
+                        parent.hover-lit = true;
+                        parent.hover-pending = false;
+                    }
+                }
+
+                Rectangle {
+                    x: -2px;
+                    width: 4px;
+                    height: parent.height;
+                    background: transparent;
+
+                    Rectangle {
+                        width: (tree-resize-splitter.hover-lit || tree-resize-splitter.dragging) ? parent.width : 1px;
+                        height: parent.height;
+                        x: (parent.width - self.width) / 2;
+                        background: Theme.border-subtle;
+                    }
+
+                    resize-ta := TouchArea {
+                        mouse-cursor: ew-resize;
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                tree-resize-splitter.hover-pending = true;
+                            } else {
+                                tree-resize-splitter.hover-pending = false;
+                                tree-resize-splitter.hover-lit = false;
+                            }
+                        }
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down) {
+                                tree-resize-splitter.dragging = true;
+                            } else if (ev.kind == PointerEventKind.up) {
+                                tree-resize-splitter.dragging = false;
+                            }
+                        }
+                        moved => {
+                            root.tree-width = max(root.tree-min-width,
+                                min(root.tree-max-width,
+                                    self.absolute-position.x + self.mouse-x - root.absolute-position.x));
+                        }
+                    }
+                }
+            }
+
+            // 鈹€鈹€ Right: file listing 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
             VerticalLayout {
                 horizontal-stretch: 1;
+                width: root.list-w;
                 spacing: 0;
 
                 // Column headers
                 Rectangle {
+                    width: root.list-w;
                     height: 20px;
                     background: Theme.bg-root;
+                    clip: true;
                     HorizontalLayout {
-                        padding-left: 8px; padding-right: 8px; spacing: 8px;
-                        // Spacer matching the rows' checkbox so the header columns
-                        // line up with the values below them (#dock).
-                        Rectangle { width: 16px; }
-                        Rectangle {
+
+                        padding-left: 0px; padding-right: 0px; spacing: 0px;
+                        SftpHeaderCell {
+                            label: @tr("Name"); column: "name";
+                            sort-column: root.sort-column; sort-asc: root.sort-asc;
+                            left-align: root.side-docked;
+                            width: root.name-col-view-w;
+                            current-width: root.name-col-w;
+                            col-min-w: 120px;
+                            resize-to(w) => { root.name-col-w = max(120px, w); }
+                            clicked(c) => {
+                                root.sort-asc = root.sort-column == c ? !root.sort-asc : true;
+                                root.sort-column = c;
+                                root.sort-request(root.sort-column, root.sort-asc);
+                            }
+                        }
+                        if root.show-size-col : SftpHeaderCell {
+                            label: @tr("Size"); column: "size"; align-right: true;
+                            sort-column: root.sort-column; sort-asc: root.sort-asc;
+                            left-align: root.side-docked;
+                            width: root.size-col-view-w;
+                            current-width: root.size-col-w;
+                            col-min-w: 64px;
+                            resize-to(w) => { root.size-col-w = w; }
+                            clicked(c) => {
+                                root.sort-asc = root.sort-column == c ? !root.sort-asc : true;
+                                root.sort-column = c;
+                                root.sort-request(root.sort-column, root.sort-asc);
+                            }
+                        }
+                        if root.show-type-col : SftpHeaderCell {
+                            label: root.lang-en ? "Type" : "类型"; column: "type";
+                            sort-column: root.sort-column; sort-asc: root.sort-asc;
+                            left-align: root.side-docked;
+                            width: root.type-col-view-w;
+                            current-width: root.type-col-w;
+                            col-min-w: 64px;
+                            resize-to(w) => { root.type-col-w = w; }
+                            clicked(c) => {
+                                root.sort-asc = root.sort-column == c ? !root.sort-asc : true;
+                                root.sort-column = c;
+                                root.sort-request(root.sort-column, root.sort-asc);
+                            }
+                        }
+                        if root.show-modified-col : SftpHeaderCell {
+                            label: @tr("Modified"); column: "modified"; align-right: true;
+                            sort-column: root.sort-column; sort-asc: root.sort-asc;
+                            left-align: root.side-docked;
+                            width: root.modified-col-view-w;
+                            current-width: root.modified-col-w;
+                            col-min-w: 80px;
+                            resize-to(w) => { root.modified-col-w = w; }
+                            clicked(c) => {
+                                root.sort-asc = root.sort-column == c ? !root.sort-asc : true;
+                                root.sort-column = c;
+                                root.sort-request(root.sort-column, root.sort-asc);
+                            }
+                        }
+                        if root.show-perm-col : SftpHeaderCell {
+                            label: root.lang-en ? "Perm" : "权限"; column: "permissions";
+                            sort-column: root.sort-column; sort-asc: root.sort-asc;
+                            left-align: root.side-docked;
+                            width: root.perm-col-view-w;
+                            current-width: root.perm-col-w;
+                            col-min-w: 64px;
+                            resize-to(w) => { root.perm-col-w = w; }
+                            clicked(c) => {
+                                root.sort-asc = root.sort-column == c ? !root.sort-asc : true;
+                                root.sort-column = c;
+                                root.sort-request(root.sort-column, root.sort-asc);
+                            }
+                        }
+                        if root.show-owner-col : SftpHeaderCell {
+                            label: root.lang-en ? "User / Group" : "用户/用户组"; column: "owner";
+                            sort-column: root.sort-column; sort-asc: root.sort-asc;
+                            left-align: root.side-docked;
                             horizontal-stretch: 1;
-                            header-name-ta := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.sort-request("name"); }
-                            }
-                            Text {
-                                text: @tr("Name") + (root.sort-key == "name" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
-                                color: root.sort-key == "name" ? Theme.accent : Theme.text-muted;
-                                font-size: Theme.fs-xs;
-                                width: parent.width;
-                                horizontal-alignment: left;
-                                vertical-alignment: center;
-                            }
-                        }
-                        if root.show-size-col : Rectangle {
-                            width: 72px;
-                            header-size-ta := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.sort-request("size"); }
-                            }
-                            Text {
-                                text: @tr("Size") + (root.sort-key == "size" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
-                                color: root.sort-key == "size" ? Theme.accent : Theme.text-muted;
-                                font-size: Theme.fs-xs;
-                                width: parent.width;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                            }
-                        }
-                        if root.show-modified-col : Rectangle {
-                            width: 116px;
-                            header-modified-ta := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.sort-request("modified"); }
-                            }
-                            Text {
-                                text: @tr("Modified") + (root.sort-key == "modified" ? (root.sort-dir > 0 ? " ↑" : " ↓") : "");
-                                color: root.sort-key == "modified" ? Theme.accent : Theme.text-muted;
-                                font-size: Theme.fs-xs;
-                                width: parent.width;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
+                            min-width: root.owner-min-w;
+                            resizable: false;
+                            clicked(c) => {
+                                root.sort-asc = root.sort-column == c ? !root.sort-asc : true;
+                                root.sort-column = c;
+                                root.sort-request(root.sort-column, root.sort-asc);
                             }
                         }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.border-subtle; }
 
-                // File list. The area fills the panel height so right-click works
-                // on the whitespace below the rows too (#84); the single menu
-                // below greys out item actions when nothing was hit.
+                // File list. Use ListView instead of ScrollView + VerticalLayout so
+                // Slint can keep only the visible file rows alive. This avoids
+                // creating thousands of row components for very large folders.
                 file-area := Rectangle {
+                    width: root.list-w;
                     vertical-stretch: 1;
                     clip: true;
-                    ScrollView {
+
+                    // Whitespace below/around the virtualized rows: right-click here
+                    // opens the menu with no target (item actions greyed out) (#84).
+                    ws-ta := TouchArea {
+                        clicked => {
+                                input-blur-scope.focus();
+                                root.selected-row = -1;
+                        }
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down
+                                    && ev.button == PointerEventButton.right) {
+                                root.selected-row = -1;
+                                root.menu-target = "";
+                                root.menu-target-row = -1;
+                                root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                file-menu.show();
+                            }
+                        }
+                    }
+
+                    file-list := ListView {
                         width: parent.width;
                         height: parent.height;
-                        viewport-width: self.visible-width;
-                        viewport-height: max(self.visible-height, file-list.preferred-height);
+                        viewport-width: self.width;
 
-                        file-list := VerticalLayout {
-                            spacing: 0;
 
-                            if root.loading : Rectangle {
-                                height: 40px;
-                                Text { text: @tr("Loading..."); color: Theme.text-muted; font-size: Theme.fs-sm;
-                                       horizontal-alignment: center; vertical-alignment: center; }
-                            }
+                        for entry[i] in root.entries : row := Rectangle {
+                            height: 24px;
+                            background: entry.selected
+                                ? Theme.sftp-row-selected
+                                : (i == root.selected-row
+                                    ? Theme.sftp-row-focus
+                                    : (row-ta.has-hover
+                                        ? Theme.sftp-row-hover
+                                        : (mod(i, 2) == 0 ? transparent : Theme.bg-row-alt)));
 
-                            if !root.loading && root.entries.length == 0 : Rectangle {
-                                height: 40px;
-                                Text { text: @tr("Empty directory"); color: Theme.text-muted; font-size: Theme.fs-sm;
-                                       horizontal-alignment: center; vertical-alignment: center; }
-                            }
-
-                            for entry[i] in root.entries : row := Rectangle {
-                                height: 24px;
-                                background: entry.selected
-                                    ? #4a90e235
-                                    : (i == root.selected-row
-                                        ? #4a90e240
-                                        : (row-ta.has-hover
-                                            ? #4a90e225
-                                            : (mod(i, 2) == 0 ? transparent : #ffffff08)));
-
-                                row-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.selected-row = i; }
-                                    double-clicked => {
-                                        if (entry.is-dir) {
-                                            root.navigate(entry.full-path);
-                                        } else {
-                                            root.download(entry.full-path);
-                                        }
+                            row-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    input-blur-scope.focus();
+                                    if (entry.full-path == "__MEATSHELL_LOAD_MORE__") {
+                                        root.load-more();
+                                        return;
                                     }
-                                    pointer-event(ev) => {
-                                        if (ev.kind == PointerEventKind.down
-                                                && ev.button == PointerEventButton.right) {
-                                            root.selected-row = i;
-                                            root.menu-target = entry.full-path;
-                                            root.menu-target-name = entry.name;
-                                            root.menu-target-is-dir = entry.is-dir;
-                                            root.menu-target-mode = entry.mode;
-                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
-                                            root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
-                                            file-menu.show();
-                                        }
+                                    if (entry.full-path == "__MEATSHELL_LOAD_ALL__") {
+                                        root.load-all();
+                                        return;
                                     }
                                 }
-
-                                HorizontalLayout {
-                                    padding-left: 8px; padding-right: 8px; spacing: 8px;
-                                    // Multi-select checkbox (#100). Its own TouchArea
-                                    // sits above the row, so toggling doesn't trigger
-                                    // navigate/select.
-                                    Rectangle {
-                                        width: 16px;
-                                        y: (parent.height - self.height) / 2;
-                                        height: 16px;
-                                        border-radius: 3px;
-                                        border-width: 1px;
-                                        border-color: entry.selected ? Theme.accent : Theme.border-strong;
-                                        background: entry.selected ? Theme.accent : transparent;
-                                        cb-ta := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.toggle-select(i); }
+                                double-clicked => {
+                                    input-blur-scope.focus();
+                                    if (entry.full-path == "__MEATSHELL_LOAD_MORE__") {
+                                        root.load-more();
+                                        return;
+                                    }
+                                    if (entry.full-path == "__MEATSHELL_LOAD_ALL__") {
+                                        root.load-all();
+                                        return;
+                                    }
+                                    if (root.suppress-double-open) {
+                                        root.suppress-double-open = false;
+                                        return;
+                                    }
+                                    root.open-entry(entry.full-path, entry.is-dir);
+                                }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down
+                                            && ev.button == PointerEventButton.left) {
+                                        input-blur-scope.focus();
+                                        if (entry.full-path == "__MEATSHELL_LOAD_MORE__" || entry.full-path == "__MEATSHELL_LOAD_ALL__") {
+                                            return;
                                         }
-                                        if entry.selected : Text {
-                                            text: "\u{E5CA}"; // check
-                                            font-family: "Material Icons";
-                                            color: #ffffff;
-                                            font-size: 13px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            width: parent.width; height: parent.height;
+                                        root.suppress-double-open = ev.modifiers.shift
+                                            || (Theme.is-mac ? ev.modifiers.meta : ev.modifiers.control);
+                                        if (ev.modifiers.shift && root.selection-anchor-row >= 0) {
+                                            root.selected-row = i;
+                                            root.select-range(root.selection-anchor-row, i,
+                                                Theme.is-mac ? ev.modifiers.meta : ev.modifiers.control);
+                                        } else if (Theme.is-mac ? ev.modifiers.meta : ev.modifiers.control) {
+                                            root.selected-row = entry.selected ? -1 : i;
+                                            root.toggle-select(i);
+                                            root.selection-anchor-row = i;
+                                        } else {
+                                            root.selected-row = i;
+                                            root.select-single(i);
+                                            root.selection-anchor-row = i;
                                         }
                                     }
-                                    Text {
-                                        text: entry.is-dir ? "📁 " + entry.name : "📄 " + entry.name;
-                                        color: entry.is-dir ? Theme.accent : Theme.text-primary;
+                                    if (ev.kind == PointerEventKind.down
+                                            && ev.button == PointerEventButton.right) {
+                                        if (entry.full-path == "__MEATSHELL_LOAD_MORE__" || entry.full-path == "__MEATSHELL_LOAD_ALL__") {
+                                            return;
+                                        }
+                                        root.selected-row = i;
+                                        if (!entry.selected) {
+                                            root.select-single(i);
+                                            root.selection-anchor-row = i;
+                                        }
+                                        root.menu-target = entry.full-path;
+                                        root.menu-target-name = entry.name;
+                                        root.menu-target-row = i;
+                                        root.menu-target-is-dir = entry.is-dir;
+                                        root.menu-target-mode = entry.mode;
+                                        root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
+                                        root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
+                                        file-menu.show();
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 0px; padding-right: 0px; spacing: 0px;
+                                Rectangle {
+                                    width: root.name-col-view-w;
+                                    if entry.full-path == "__MEATSHELL_LOAD_MORE__" || entry.full-path == "__MEATSHELL_LOAD_ALL__" : Text {
+                                        x: 6px;
+                                        width: parent.width - 12px;
+                                        text: entry.full-path == "__MEATSHELL_LOAD_MORE__" ? "... " + root.load-more-label : "... " + root.load-all-label;
+                                        color: Theme.text-primary;
                                         font-size: Theme.fs-sm;
-                                        horizontal-stretch: 1;
                                         overflow: elide;
                                         vertical-alignment: center;
                                     }
-                                    if root.show-size-col : Text {
-                                        text: entry.is-dir ? "" : entry.size;
-                                        color: Theme.text-secondary; font-size: Theme.fs-xs;
-                                        width: 72px; horizontal-alignment: right; vertical-alignment: center;
-                                    }
-                                    if root.show-modified-col : Text {
-                                        text: entry.modified;
-                                        color: Theme.text-muted; font-size: Theme.fs-xs;
-                                        width: 116px; horizontal-alignment: right; vertical-alignment: center;
-                                    }
-                                }
-                            }
-
-                            // Whitespace below the rows: right-click here opens the
-                            // menu with no target (item actions greyed out) (#84).
-                            ws := Rectangle {
-                                vertical-stretch: 1;
-                                min-height: 24px;
-                                ws-ta := TouchArea {
-                                    pointer-event(ev) => {
-                                        if (ev.kind == PointerEventKind.down
-                                                && ev.button == PointerEventButton.right) {
-                                            root.selected-row = -1;
-                                            root.menu-target = "";
-                                            root.menu-x = self.absolute-position.x + self.mouse-x - file-area.absolute-position.x;
-                                            root.menu-y = self.absolute-position.y + self.mouse-y - file-area.absolute-position.y;
-                                            file-menu.show();
+                                    if entry.full-path != "__MEATSHELL_LOAD_MORE__" && entry.full-path != "__MEATSHELL_LOAD_ALL__" : HorizontalLayout {
+                                        x: 6px;
+                                        width: parent.width - 12px;
+                                        height: parent.height;
+                                        spacing: 4px;
+                                        Text {
+                                            width: 18px;
+                                            text: entry.icon;
+                                            font-family: "Segoe UI Emoji";
+                                            font-size: Theme.fs-sm;
+                                            overflow: clip;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: entry.name;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-sm;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                            vertical-alignment: center;
                                         }
                                     }
                                 }
+                                if root.show-size-col : Rectangle {
+                                    width: root.size-col-view-w;
+                                    Text { x: 6px; width: parent.width - 12px; text: entry.is-dir ? "" : entry.size;
+                                        color: Theme.text-secondary; font-size: Theme.fs-xs; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
+                                }
+                                if root.show-type-col : Rectangle {
+                                    width: root.type-col-view-w;
+                                    Text { x: 6px; width: parent.width - 12px; text: root.lang-en ? entry.kind-en : entry.kind;
+                                        color: Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
+                                }
+                                if root.show-modified-col : Rectangle {
+                                    width: root.modified-col-view-w;
+                                    Text { x: 6px; width: parent.width - 12px; text: entry.modified;
+                                        color: Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
+                                }
+                                if root.show-perm-col : Rectangle {
+                                    width: root.perm-col-view-w;
+                                    Text { x: 6px; width: parent.width - 12px; text: entry.permissions;
+                                        color: Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
+                                }
+                                if root.show-owner-col : Rectangle {
+                                    horizontal-stretch: 1;
+                                    min-width: root.owner-min-w;
+                                    Text { x: 6px; width: parent.width - 12px; text: entry.owner + (entry.group != "" ? "/" + entry.group : "");
+                                        color: Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
+                                }
                             }
+                        }
+                    }
+
+                    // ListView supports exactly one child, and it must be the row `for` loop.
+                    // Keep transient status messages outside the ListView as overlays.
+                    if root.loading : Rectangle {
+                        width: parent.width;
+                        height: 40px;
+                        y: 0px;
+                        Text {
+                            text: @tr("Loading...");
+                            color: Theme.text-muted;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    if !root.loading && root.entries.length == 0 : Rectangle {
+                        width: parent.width;
+                        height: 40px;
+                        y: 0px;
+                        Text {
+                            text: @tr("Empty directory");
+                            color: Theme.text-muted;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
                     }
 
@@ -698,11 +1396,13 @@ export component SftpPanel inherits Rectangle {
                     // enabled only when an item was right-clicked (menu-target set);
                     // new/refresh are always available.
                     copy-target-menu := PopupWindow {
-                        x: root.menu-x + 148px;
+                        x: root.menu-x + 176px;
                         y: root.menu-y;
-                        width: 148px;
+                        width: 176px;
                         height: max(1, root.transfer-targets.length) * 27px + 8px;
                         Rectangle {
+                            width: parent.width;
+                            height: parent.height;
                             background: Theme.bg-panel;
                             border-radius: Theme.radius-sm;
                             border-width: 1px;
@@ -732,9 +1432,11 @@ export component SftpPanel inherits Rectangle {
                     file-menu := PopupWindow {
                         x: root.menu-x;
                         y: root.menu-y;
-                        width: 148px;
-                        height: 14 * 27px + 8px;
+                        width: 176px;
+                        height: 15 * 27px + 8px;
                         Rectangle {
+                            width: parent.width;
+                            height: parent.height;
                             background: Theme.bg-panel;
                             border-radius: Theme.radius-sm;
                             border-width: 1px;
@@ -746,8 +1448,25 @@ export component SftpPanel inherits Rectangle {
                                 spacing: 1px;
                                 SftpMenuItem {
                                     label: @tr("Download");
-                                    enabled: root.menu-target != "";
-                                    clicked => { root.download(root.menu-target); }
+                                    enabled: root.menu-target != "" || root.selected-count > 0;
+                                    clicked => {
+                                        if (root.selected-count > 0) {
+                                            root.download-selected();
+                                        } else {
+                                            root.download(root.menu-target);
+                                        }
+                                    }
+                                }
+                                SftpMenuItem {
+                                    label: root.lang-en ? "Archive download (.tar)" : "打包下载(.tar)";
+                                    enabled: root.menu-target != "" || root.selected-count > 0;
+                                    clicked => {
+                                        if (root.selected-count > 0) {
+                                            root.archive-download-selected();
+                                        } else {
+                                            root.archive-download(root.menu-target);
+                                        }
+                                    }
                                 }
                                 SftpMenuItem {
                                     label: @tr("View");
@@ -772,7 +1491,20 @@ export component SftpPanel inherits Rectangle {
                                 SftpMenuItem {
                                     label: @tr("Rename");
                                     enabled: root.menu-target != "";
-                                    clicked => { root.rename-request(root.menu-target, root.menu-target-name); }
+                                    clicked => {
+                                        root.rename-request(root.menu-target, root.menu-target-name);
+                                    }
+                                }
+                                SftpMenuItem {
+                                    label: root.lang-en ? "Move..." : "移动...";
+                                    enabled: root.menu-target != "" || root.selected-count > 0;
+                                    clicked => {
+                                        if (root.selected-count > 0) {
+                                            root.move-selected-request();
+                                        } else {
+                                            root.move-request(root.menu-target, root.menu-target-name);
+                                        }
+                                    }
                                 }
                                 SftpMenuItem {
                                     label: @tr("Permissions");
@@ -792,8 +1524,14 @@ export component SftpPanel inherits Rectangle {
                                 SftpMenuItem {
                                     label: @tr("Delete");
                                     tint: #d86c6c;
-                                    enabled: root.menu-target != "";
-                                    clicked => { root.delete(root.menu-target); }
+                                    enabled: root.menu-target != "" || root.selected-count > 0;
+                                    clicked => {
+                                        if (root.selected-count > 0) {
+                                            root.delete-selected();
+                                        } else {
+                                            root.delete(root.menu-target);
+                                        }
+                                    }
                                 }
                                 Rectangle { height: 1px; background: Theme.border-subtle; }
                                 SftpMenuItem {
@@ -806,12 +1544,11 @@ export component SftpPanel inherits Rectangle {
                                 }
                                 SftpMenuItem {
                                     label: @tr("Refresh");
-                                    clicked => { root.refresh(root.current-path); }
-                                }
-                                SftpMenuItem {
-                                    label: @tr("Clear sort");
-                                    enabled: root.sort-dir != 0;
-                                    clicked => { root.clear-sort(); }
+                                    clicked => {
+                                        root.selected-row = -1;
+                                        root.selection-anchor-row = -1;
+                                        root.refresh(root.current-path);
+                                    }
                                 }
                             }
                         }
@@ -820,21 +1557,16 @@ export component SftpPanel inherits Rectangle {
             }
         }
 
-        Rectangle {
-            visible: root.panel-mode == "tunnels";
+        if root.panel-mode == "tunnels" : Rectangle {
             vertical-stretch: 1;
             clip: true;
             background: transparent;
 
-            ScrollView {
+            VerticalLayout {
                 width: parent.width;
                 height: parent.height;
-                viewport-width: self.visible-width;
-                viewport-height: max(self.visible-height, tunnel-body.preferred-height);
-
-                tunnel-body := VerticalLayout {
-                    padding: 10px;
-                    spacing: 8px;
+                padding: 10px;
+                spacing: 8px;
 
                     HorizontalLayout {
                         spacing: 6px;
@@ -853,6 +1585,15 @@ export component SftpPanel inherits Rectangle {
                         Rectangle { horizontal-stretch: 1; }
                         Rectangle {
                             width: 72px; height: 24px; border-radius: Theme.radius-sm;
+                            background: clear-failed-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                            clear-failed-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.clear-failed-tunnels(); }
+                            }
+                            Text { text: root.lang-en ? "Clear failed" : "清除失败"; color: Theme.text-secondary; font-size: Theme.fs-xs; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle {
+                            width: 72px; height: 24px; border-radius: Theme.radius-sm;
                             background: add-tunnel-ta.has-hover ? Theme.accent-hover : Theme.accent;
                             add-tunnel-ta := TouchArea {
                                 mouse-cursor: pointer;
@@ -866,40 +1607,55 @@ export component SftpPanel inherits Rectangle {
                         }
                     }
 
-                    HorizontalLayout {
-                        spacing: 8px;
+                    Rectangle {
+                        height: 24px;
+                        property <length> wide-field-w: (parent.width - 16px) * 2 / 5;
                         Rectangle {
-                            horizontal-stretch: 1; height: 24px; border-radius: Theme.radius-sm;
+                            x: 0px; width: parent.wide-field-w; height: parent.height; border-radius: Theme.radius-sm;
                             background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
-                            TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-name; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            tunnel-name-input := TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-name; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            if tunnel-name-input.text == "" : Text { x: 7px; width: parent.width - 14px; height: parent.height; text: root.lang-en ? "Name (optional)" : "名称（可选）"; color: Theme.text-muted; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; vertical-alignment: center; }
                         }
                         Rectangle {
-                            width: 128px; height: 24px; border-radius: Theme.radius-sm;
+                            x: parent.wide-field-w + 8px; width: parent.wide-field-w; height: parent.height; border-radius: Theme.radius-sm;
                             background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
-                            TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-bind; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            tunnel-bind-input := TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-bind; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            if tunnel-bind-input.text == "" : Text { x: 7px; width: parent.width - 14px; height: parent.height; text: "127.0.0.1"; color: Theme.text-muted; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; vertical-alignment: center; }
                         }
                         Rectangle {
-                            width: 68px; height: 24px; border-radius: Theme.radius-sm;
+                            x: 2 * parent.wide-field-w + 16px; width: parent.width - self.x; height: parent.height; border-radius: Theme.radius-sm;
                             background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
-                            TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-bind-port; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            tunnel-bind-port-input := TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-bind-port; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            if tunnel-bind-port-input.text == "" : Text { x: 7px; width: parent.width - 14px; height: parent.height; text: root.lang-en ? "Listen port" : "监听端口"; color: Theme.text-muted; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; vertical-alignment: center; }
                         }
                     }
 
-                    if root.tunnel-kind == "local" : HorizontalLayout {
-                        spacing: 8px;
+                    if root.tunnel-kind == "local" : Rectangle {
+                        height: 24px;
+                        property <length> target-host-w: (parent.width - 16px) * 4 / 5 + 8px;
                         Rectangle {
-                            horizontal-stretch: 1; height: 24px; border-radius: Theme.radius-sm;
+                            x: 0px; width: parent.target-host-w; height: parent.height; border-radius: Theme.radius-sm;
                             background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
-                            TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-host; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            tunnel-host-input := TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-host; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            if tunnel-host-input.text == "" : Text { x: 7px; width: parent.width - 14px; height: parent.height; text: root.lang-en ? "Target host" : "目标主机"; color: Theme.text-muted; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; vertical-alignment: center; }
                         }
                         Rectangle {
-                            width: 76px; height: 24px; border-radius: Theme.radius-sm;
+                            x: parent.target-host-w + 8px; width: parent.width - self.x; height: parent.height; border-radius: Theme.radius-sm;
                             background: Theme.bg-root; border-width: 1px; border-color: Theme.border-subtle;
-                            TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-host-port; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            tunnel-host-port-input := TextInput { x: 7px; width: parent.width - 14px; height: parent.height; text <=> root.tunnel-host-port; color: Theme.text-primary; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; single-line: true; vertical-alignment: center; }
+                            if tunnel-host-port-input.text == "" : Text { x: 7px; width: parent.width - 14px; height: parent.height; text: root.lang-en ? "Target port" : "目标端口"; color: Theme.text-muted; font-family: Theme.ui-font-family; font-size: Theme.fs-sm; vertical-alignment: center; }
                         }
                     }
 
                     Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        viewport-width: self.visible-width;
+                        viewport-height: max(self.visible-height, tunnel-history.preferred-height);
+                        tunnel-history := VerticalLayout {
+                            width: parent.width;
+                            spacing: 8px;
 
                     if root.tunnels.length == 0 : Rectangle {
                         height: 36px;
@@ -918,32 +1674,49 @@ export component SftpPanel inherits Rectangle {
                             Text { text: tun.name; color: Theme.text-primary; width: 120px; font-size: Theme.fs-sm; overflow: elide; vertical-alignment: center; }
                             Text { text: tun.bind + (tun.target != "" ? " → " + tun.target : ""); color: Theme.text-secondary; horizontal-stretch: 1; font-size: Theme.fs-xs; overflow: elide; vertical-alignment: center; }
                             Text { text: tun.status; color: tun.active ? Theme.accent : Theme.text-muted; width: 62px; font-size: Theme.fs-xs; overflow: elide; vertical-alignment: center; horizontal-alignment: right; }
-                            Rectangle {
-                                width: 48px; height: 22px; border-radius: Theme.radius-sm;
-                                background: tun.active ? (stop-ta.has-hover ? Theme.danger.with-alpha(0.24) : transparent) : transparent;
-                                stop-ta := TouchArea { mouse-cursor: tun.active ? pointer : default; clicked => { if (tun.active) { root.tunnel-stop(tun.id); } } }
-                                Text { text: @tr("Stop"); color: tun.active ? Theme.danger : Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: center; vertical-alignment: center; }
+                            VerticalLayout {
+                                width: 48px;
+                                alignment: center;
+                                Rectangle {
+                                    height: 22px; border-radius: Theme.radius-sm;
+                                    background: tun.active ? (stop-ta.has-hover ? Theme.danger.with-alpha(0.24) : transparent) : transparent;
+                                    stop-ta := TouchArea { mouse-cursor: tun.active ? pointer : default; clicked => { if (tun.active) { root.tunnel-stop(tun.id); } } }
+                                    Text { text: @tr("Stop"); color: tun.active ? Theme.danger : Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: center; vertical-alignment: center; }
+                                }
                             }
+                        }
+                    }
                         }
                     }
                 }
             }
-        }
 
         // --- Status bar (full width) --------------------------------------
+        Rectangle { height: 1px; background: Theme.border-subtle; }
         Rectangle {
-            height: 18px;
-            background: Theme.bg-panel-alt;
+            height: 22px;
+            background: Theme.bg-root;
             Text {
                 x: 8px;
-                text: root.status;
+                y: -1px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: root.selected-count > 0
+                    ? root.status + (root.lang-en ? "    Selected " + root.selected-count + " item(s)" : "    已选择 " + root.selected-count + " 个项目")
+                    : root.status;
                 color: Theme.text-muted;
                 font-size: Theme.fs-xs;
                 vertical-alignment: center;
-                height: parent.height;
                 overflow: elide;
-                width: parent.width - 16px;
             }
         }
+    }
+
+    if root.toolbar-tooltip-text != "" : SftpTooltip {
+        text: root.toolbar-tooltip-text;
+        anchor-x: root.toolbar-tooltip-x;
+        anchor-y: root.toolbar-tooltip-y;
+        anchor-width: root.toolbar-tooltip-width;
+        path-left: root.toolbar-tooltip-path-left;
     }
 }

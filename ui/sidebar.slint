@@ -169,11 +169,13 @@ component NetGraph inherits VerticalLayout {
                             }
                             Text {
                                 x: 6px;
+                                width: parent.width - 12px;
                                 text: iface;
                                 color: Theme.text-primary;
                                 font-size: Theme.fs-xs;
                                 vertical-alignment: center;
                                 height: parent.height;
+                                overflow: elide;
                             }
                         }
                     }
@@ -201,6 +203,7 @@ component StatusBlock inherits Rectangle {
     in property <string> connection-state;
     in property <string> conn-host;        // clean IP/host to copy ("" = not clickable) (#192)
     in property <string> collapse-icon;   // chevron pointing toward the docked edge
+    in property <length> available-width: 180px;
     callback dock-drag-move(length, length);
     callback dock-drag-end();
     callback collapse();
@@ -217,9 +220,14 @@ component StatusBlock inherits Rectangle {
         }
     }
     VerticalLayout {
-        spacing: 4px;
+        spacing: 8px;
         HorizontalLayout {
-            spacing: 6px;
+            spacing: 0px;
+            Rectangle { width: 8px; }
+            Text { text: @tr("Status"); color: Theme.text-primary;
+                   font-size: Theme.fs-lg; font-weight: 600;
+                   vertical-alignment: center; }
+            Rectangle { width: 10px; }
             Rectangle {
                 width: 8px; height: 8px;
                 y: (parent.height - self.height) / 2;
@@ -228,19 +236,16 @@ component StatusBlock inherits Rectangle {
                           : root.conn-state == 2 ? Theme.warning
                           : Theme.text-muted;
             }
-            Text { text: @tr("Status"); color: Theme.text-primary;
-                   font-size: Theme.fs-md; font-weight: 600;
-                   vertical-alignment: center; }
             Rectangle { horizontal-stretch: 1; }
             // Collapse button — sits in front of the drag grip so it takes the click.
             Rectangle {
-                width: 18px; height: 18px;
+                width: 24px; height: 24px;
                 y: (parent.height - self.height) / 2;
                 border-radius: Theme.radius-sm;
                 background: cl-ta.has-hover ? Theme.bg-hover : transparent;
                 cl-ta := TouchArea { mouse-cursor: pointer; clicked => { root.collapse(); } }
                 Text { text: root.collapse-icon; font-family: "Material Icons";
-                       font-size: 14px; color: Theme.text-secondary;
+                       font-size: 16px; color: Theme.text-secondary;
                        horizontal-alignment: center; vertical-alignment: center; }
             }
         }
@@ -251,15 +256,20 @@ component StatusBlock inherits Rectangle {
             spacing: 6px;
             alignment: start;
             ip-wrap := Rectangle {
-                width: ip-txt.preferred-width + (root.conn-host != "" ? 10px : 0px);
+                width: min(
+                    ip-txt.preferred-width + (root.conn-host != "" ? 10px : 0px),
+                    max(0px, root.available-width - (root.copied ? 64px : 0px))
+                );
                 height: ip-txt.preferred-height + 4px;
                 border-radius: Theme.radius-sm;
                 background: (root.conn-host != "" && ip-ta.has-hover) ? Theme.bg-hover : transparent;
                 ip-txt := Text {
                     x: root.conn-host != "" ? 5px : 0px;
                     y: (parent.height - self.height) / 2;
+                    width: parent.width - (root.conn-host != "" ? 10px : 0px);
                     text: root.connection-state;
                     color: Theme.text-secondary; font-size: Theme.fs-sm;
+                    overflow: elide;
                 }
                 ip-ta := TouchArea {
                     enabled: root.conn-host != "";
@@ -463,102 +473,80 @@ export component Sidebar inherits Rectangle {
     }
 
     // --- Vertical stack (docked left/right) --------------------------------
-    if !root.lay-horizontal : Rectangle {
-        x: 10px;
-        y: 10px;
-        width: parent.width - 20px;
-        height: parent.height - 20px;
-        background: Theme.bg-panel;
-        border-radius: Theme.radius-md;
-        border-width: 1px;
-        border-color: Theme.border-subtle;
-        clip: true;
+    if !root.lay-horizontal : VerticalLayout {
+        padding: 10px;
+        padding-top: 12px;
+        spacing: 10px;
+        StatusBlock {
+            horizontal-stretch: 1;
+            available-width: max(0px, root.width - 20px);
+            conn-state: root.conn-state;
+            connection-state: root.connection-state;
+            conn-host: root.conn-host;
+            collapse-icon: root.collapse-icon;
+            dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
+            dock-drag-end() => { root.dock-drag-end(); }
+            collapse() => { root.toggle-collapse(); }
+            copy-host(h) => { root.copy-host(h); }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+        StatsBlock {
+            resource-title: root.resource-title; proc-available: root.proc-available;
+            cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
+            mem-detail: root.mem-detail; swap-detail: root.swap-detail;
+            show-processes() => { root.show-processes(); }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+        NetBlock {
+            net-top-up: root.net-top-up; net-top-down: root.net-top-down; net-top-history: root.net-top-history;
+            net-show-selector: root.net-show-selector; net-ifaces: root.net-ifaces; net-selected: root.net-selected;
+            net-bot-up: root.net-bot-up; net-bot-down: root.net-bot-down; net-bot-history: root.net-bot-history;
+            select-net-iface(i) => { root.select-net-iface(i); }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+        DiskBlock { vertical-stretch: 1; disks: root.disks; }
+    }
 
+    // --- Horizontal row (docked top/bottom) --------------------------------
+    if root.lay-horizontal : HorizontalLayout {
+        padding: 10px;
+        padding-top: 12px;
+        spacing: 10px;
+        // Status + server-resources share one container, stacked vertically:
+        // the status sits as a compact two-row header *above* the CPU/Mem/Swap,
+        // both left-aligned. `alignment: start` keeps them at the top instead of
+        // stretching to fill the panel height.
         VerticalLayout {
-            padding: 10px;
-            spacing: 10px;
+            alignment: start;
+            spacing: 8px;
+            min-width: 200px;
             StatusBlock {
+                horizontal-stretch: 1;
+                available-width: 200px;
                 conn-state: root.conn-state;
                 connection-state: root.connection-state;
-                conn-host: root.conn-host;
                 collapse-icon: root.collapse-icon;
                 dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
                 dock-drag-end() => { root.dock-drag-end(); }
                 collapse() => { root.toggle-collapse(); }
-                copy-host(h) => { root.copy-host(h); }
             }
-            Rectangle { height: 1px; background: Theme.border-subtle; }
             StatsBlock {
                 resource-title: root.resource-title; proc-available: root.proc-available;
                 cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
                 mem-detail: root.mem-detail; swap-detail: root.swap-detail;
                 show-processes() => { root.show-processes(); }
             }
-            Rectangle { height: 1px; background: Theme.border-subtle; }
-            NetBlock {
-                net-top-up: root.net-top-up; net-top-down: root.net-top-down; net-top-history: root.net-top-history;
-                net-show-selector: root.net-show-selector; net-ifaces: root.net-ifaces; net-selected: root.net-selected;
-                net-bot-up: root.net-bot-up; net-bot-down: root.net-bot-down; net-bot-history: root.net-bot-history;
-                select-net-iface(i) => { root.select-net-iface(i); }
-            }
-            Rectangle { height: 1px; background: Theme.border-subtle; }
-            DiskBlock { vertical-stretch: 1; disks: root.disks; }
-            Text {
-                text: "meatshell v" + root.app-version;
-                color: Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: center;
-            }
         }
-    }
-
-    // --- Horizontal row (docked top/bottom) --------------------------------
-    if root.lay-horizontal : Rectangle {
-        x: 10px;
-        y: 10px;
-        width: parent.width - 20px;
-        height: parent.height - 20px;
-        background: Theme.bg-panel;
-        border-radius: Theme.radius-md;
-        border-width: 1px;
-        border-color: Theme.border-subtle;
-        clip: true;
-
-        HorizontalLayout {
-            padding: 10px;
-            spacing: 10px;
-            // Status + server-resources share one container, stacked vertically:
-            // the status sits as a compact two-row header *above* the CPU/Mem/Swap,
-            // both left-aligned. `alignment: start` keeps them at the top instead of
-            // stretching to fill the panel height.
-            VerticalLayout {
-                alignment: start;
-                spacing: 8px;
-                min-width: 200px;
-                StatusBlock {
-                    conn-state: root.conn-state;
-                    connection-state: root.connection-state;
-                    collapse-icon: root.collapse-icon;
-                    dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
-                    dock-drag-end() => { root.dock-drag-end(); }
-                    collapse() => { root.toggle-collapse(); }
-                }
-                StatsBlock {
-                    resource-title: root.resource-title; proc-available: root.proc-available;
-                    cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
-                    mem-detail: root.mem-detail; swap-detail: root.swap-detail;
-                    show-processes() => { root.show-processes(); }
-                }
-            }
-            Rectangle { width: 1px; background: Theme.border-subtle; }
-            NetBlock {
-                min-width: 220px;
-                net-top-up: root.net-top-up; net-top-down: root.net-top-down; net-top-history: root.net-top-history;
-                net-show-selector: root.net-show-selector; net-ifaces: root.net-ifaces; net-selected: root.net-selected;
-                net-bot-up: root.net-bot-up; net-bot-down: root.net-bot-down; net-bot-history: root.net-bot-history;
-                select-net-iface(i) => { root.select-net-iface(i); }
-            }
-            Rectangle { width: 1px; background: Theme.border-subtle; }
-            DiskBlock { horizontal-stretch: 1; disks: root.disks; }
+        Rectangle { width: 1px; background: Theme.border-subtle; }
+        NetBlock {
+            min-width: 220px;
+            net-top-up: root.net-top-up; net-top-down: root.net-top-down; net-top-history: root.net-top-history;
+            net-show-selector: root.net-show-selector; net-ifaces: root.net-ifaces; net-selected: root.net-selected;
+            net-bot-up: root.net-bot-up; net-bot-down: root.net-bot-down; net-bot-history: root.net-bot-history;
+            select-net-iface(i) => { root.select-net-iface(i); }
         }
+        Rectangle { width: 1px; background: Theme.border-subtle; }
+        DiskBlock { horizontal-stretch: 1; disks: root.disks; }
     }
 
 }
