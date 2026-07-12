@@ -7,6 +7,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use rand::{rngs::OsRng, RngCore};
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use russh::client::{self, Handle, Handler, Msg};
@@ -20,63 +22,38 @@ use tokio::task::JoinHandle;
 use crate::config::{AuthMethod, PortForward, Secret, Session, SessionTrigger};
 use crate::i18n::t;
 
-use super::structs::*;
-
-struct RuntimeTrigger {
-    rule: SessionTrigger,
-    buffer: String,
-    active: bool,
-}
-
-struct TriggerEngine(Vec<RuntimeTrigger>);
-
-impl TriggerEngine {
-    fn new(rules: &[SessionTrigger]) -> Self {
-        Self(
-            rules
-                .iter()
-                .filter(|rule| !rule.expect.is_empty() && !rule.response.is_empty())
-                .cloned()
-                .map(|rule| RuntimeTrigger {
-                    rule,
-                    buffer: String::new(),
-                    active: true,
-                })
-                .collect(),
-        )
-    }
-
-    fn feed(&mut self, text: &str) -> Vec<(Secret, bool)> {
-        let mut replies = Vec::new();
-        for trigger in &mut self.0 {
-            if !trigger.active {
-                continue;
-            }
-            trigger.buffer.push_str(text);
-            if let Some(end) = trigger
-                .buffer
-                .find(&trigger.rule.expect)
-                .map(|start| start + trigger.rule.expect.len())
-            {
-                replies.push((trigger.rule.response.clone(), trigger.rule.append_enter));
-                trigger.buffer.drain(..end);
-                trigger.active = trigger.rule.repeat;
-            }
-            // Preserve enough trailing text for a match split across chunks.
-            let keep = trigger.rule.expect.len().saturating_sub(1).max(256);
-            if trigger.buffer.len() > keep {
-                let split = trigger.buffer.len() - keep;
-                let split = trigger.buffer.ceil_char_boundary(split);
-                trigger.buffer.drain(..split);
-            }
-        }
-        replies
-    }
-}
-
 // ---------------------------------------------------------------------------
 // SFTP-related shared types
 // ---------------------------------------------------------------------------
+
+/// Metadata for a single remote filesystem entry returned by SFTP listing.
+#[derive(Debug, Clone)]
+pub struct RemoteEntry {
+    pub name: String,
+    pub full_path: String,
+    pub is_dir: bool,
+    /// Raw size in bytes (0 for directories or unknown).
+    pub size: u64,
+    /// Modification time as Unix timestamp (seconds, u32 = SFTP wire format).
+    pub modified: u32,
+    /// POSIX permission bits (the low 12, i.e. rwx + setuid/setgid/sticky).
+    /// 0 when the server didn't report permissions. Used to prefill the chmod
+    /// dialog (#84).
+    pub mode: u32,
+    pub owner: String,
+    pub group: String,
+}
+
+/// One node in the remote directory tree panel.
+#[derive(Debug, Clone)]
+pub struct RemoteTreeNode {
+    pub path: String,
+    pub name: String,
+    pub depth: u32,
+    pub expanded: bool,
+    pub has_children: bool,
+    pub is_dir: bool,
+}
 
 pub(crate) fn load_session_private_key(session: &Session, pass: &str) -> Result<PrivateKey> {
     let pass = if pass.is_empty() { None } else { Some(pass) };
@@ -205,8 +182,7 @@ const ZMODEM_CANCEL: [u8; 16] = [
 const PROMPT_SETUP_PREFIX: &str = "test -z \"$FISH_VERSION\"";
 const PROMPT_SETUP_SUFFIX: &str = "__ms7'";
 const PROMPT_SETUP_HISTORY_MARKER: &str = "__MEATSHELL_INTERNAL_SETUP_1";
-const PROMPT_SETUP_DONE: &str = "\u{1b}]699;ready\u{07}";
-const PROMPT_BODY: &str = "test -z \"$FISH_VERSION\" && eval '__msc(){ __c=\"$(fc -ln -1 2>/dev/null)\"; [ -n \"$__c\" ] && [ \"$__c\" != \"$__cl\" ] && { __cl=\"$__c\"; printf \"\\033]697;%s\\007\" \"$__c\"; }; }; __ms7(){ printf \"\\033]7;file://%s%s\\007\" \"$HOSTNAME\" \"$PWD\"; __msc; }; if [ -n \"$ZSH_VERSION\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __ms7; else PROMPT_COMMAND=\"__ms7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; : __MEATSHELL_INTERNAL_SETUP_1; if [ -n \"$BASH_VERSION\" ]; then __md=\"$(history 2>/dev/null | { __md=\"\"; while read -r __mn __mr; do case \"$__mr\" in *\"__ms7()\"*\"PROMPT_COMMAND=\"*) __mn=\"${__mn%\\*}\"; __md=\"$__mn $__md\";; esac; done; printf \"%s\" \"$__md\"; })\"; for __mn in $__md; do history -d \"$__mn\" 2>/dev/null; done; unset __md __mn __mr; fi; __cl=\"$(fc -ln -1 2>/dev/null)\"; printf \"\\033]699;ready\\007\"; __ms7'";
+const PROMPT_BODY: &str = "test -z \"$FISH_VERSION\" && eval '__msc(){ __c=\"$(fc -ln -1 2>/dev/null)\"; [ -n \"$__c\" ] && [ \"$__c\" != \"$__cl\" ] && { __cl=\"$__c\"; printf \"\\033]697;%s\\007\" \"$__c\"; }; }; __ms7(){ printf \"\\033]7;file://%s%s\\007\" \"$HOSTNAME\" \"$PWD\"; __msc; }; if [ -n \"$ZSH_VERSION\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __ms7; else PROMPT_COMMAND=\"__ms7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; : __MEATSHELL_INTERNAL_SETUP_1; if [ -n \"$BASH_VERSION\" ]; then __md=\"$(history 2>/dev/null | { __md=\"\"; while read -r __mn __mr; do case \"$__mr\" in *\"__ms7()\"*\"PROMPT_COMMAND=\"*) __mn=\"${__mn%\\*}\"; __md=\"$__mn $__md\";; esac; done; printf \"%s\" \"$__md\"; })\"; for __mn in $__md; do history -d \"$__mn\" 2>/dev/null; done; unset __md __mn __mr; fi; __cl=\"$(fc -ln -1 2>/dev/null)\"; __ms7'";
 const PROMPT_SHELL_PROBE: &[u8] = b"if [ -n \"$BASH_VERSION\" ]; then printf '__MEATSHELL_SHELL__:bash\\n'; elif [ -n \"$ZSH_VERSION\" ]; then printf '__MEATSHELL_SHELL__:zsh\\n'; else printf '__MEATSHELL_SHELL__:other\\n'; fi";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,7 +407,6 @@ fn include_following_line_break(text: &str, mut pos: usize) -> usize {
     pos
 }
 
-#[cfg(test)]
 fn prompt_setup_echo_end(text: &str, prefix_pos: usize) -> usize {
     if let Some(rel) = text[prefix_pos..].find(PROMPT_SETUP_SUFFIX) {
         return include_following_line_break(text, prefix_pos + rel + PROMPT_SETUP_SUFFIX.len());
@@ -476,30 +451,6 @@ fn strip_pending_prompt_setup_echo(text: &mut String, pending: &mut bool) -> boo
     }
     *pending = false;
     true
-}
-
-/// Consume all buffered setup echo through the private completion marker.
-/// The marker is emitted by the executed command, unlike its printable escaped
-/// representation in the echoed input, so it remains reliable across zsh/ZLE
-/// redraws, wrapping, and arbitrary chunk boundaries (#344).
-fn take_after_prompt_setup_done(text: &mut String) -> Option<String> {
-    let marker = text.find(PROMPT_SETUP_DONE)?;
-    let tail = text.split_off(marker + PROMPT_SETUP_DONE.len());
-    text.clear();
-    Some(tail)
-}
-
-fn bound_prompt_setup_echo(text: &mut String) {
-    const KEEP_CHARS: usize = 64;
-    const MAX_BUFFER: usize = 64 * 1024;
-    if text.len() <= MAX_BUFFER {
-        return;
-    }
-    // Everything before the completion marker is private setup echo. Retain a
-    // short suffix only so a marker split across channel chunks still matches.
-    let mut tail: String = text.chars().rev().take(KEEP_CHARS).collect();
-    tail = tail.chars().rev().collect();
-    *text = tail;
 }
 
 /// Extract the remote path from an OSC 7 sequence embedded in `text`.
@@ -629,6 +580,344 @@ fn url_decode(s: &str) -> String {
         }
     }
     result
+}
+
+/// Commands posted to the worker task by the UI.
+#[derive(Debug)]
+pub enum SessionCommand {
+    /// Send raw bytes directly to the PTY (individual keystrokes, no modification).
+    RawInput(Vec<u8>),
+    /// Notify the remote PTY of a terminal resize.
+    Resize(u32, u32),
+    /// Start a runtime-only SSH tunnel for this connected session (#206).
+    AddTunnel {
+        id: String,
+        forward: crate::config::PortForward,
+    },
+    /// Stop a runtime tunnel created for this connected session (#206).
+    StopTunnel(String),
+    /// Terminate one remote process on a short-lived exec channel. Supplying a
+    /// password selects the privileged `sudo -S` path; the secret is never
+    /// written to the interactive PTY or shell history.
+    KillProcess {
+        pid: u32,
+        root_password: Option<crate::config::Secret>,
+        reply: tokio::sync::oneshot::Sender<ProcessKillResult>,
+    },
+    /// Remove inactive runtime tunnels that failed to start.
+    ClearFailedTunnels,
+    /// A local or dynamic listener bound its local port successfully.
+    TunnelStarted(String),
+    /// A local or dynamic listener could not bind its requested local port.
+    TunnelFailed(String),
+    /// Gracefully disconnect and drop the session.
+    Close,
+}
+
+#[derive(Debug)]
+pub struct ProcessKillResult {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Carries the user's answer to a host-key confirmation prompt back to the
+/// blocked `check_server_key` handler. Wrapped in `Arc<Mutex<Option<…>>>` so the
+/// enclosing [`SessionEvent`] stays `Clone` (a bare `oneshot::Sender` is not);
+/// the first `respond` consumes the sender, later calls are no-ops.
+#[derive(Clone)]
+pub struct HostKeyResponder(Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>);
+
+impl HostKeyResponder {
+    pub fn new(tx: tokio::sync::oneshot::Sender<bool>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(tx))))
+    }
+
+    /// Deliver the user's decision (`true` = trust). Idempotent.
+    pub fn respond(&self, accept: bool) {
+        if let Ok(mut guard) = self.0.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(accept);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for HostKeyResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostKeyResponder")
+    }
+}
+
+/// The user's answer to a connect-time credential prompt: `(username, password,
+/// remember)`, or `None` if they cancelled.
+pub type CredentialReply = (String, String, bool);
+
+/// Carries the credential prompt's answer back to the blocked auth flow (#110).
+/// `Arc<Mutex<Option<…>>>` so the enclosing [`SessionEvent`] stays `Clone`.
+#[derive(Clone)]
+pub struct CredentialResponder(
+    Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Option<CredentialReply>>>>>,
+);
+
+impl CredentialResponder {
+    pub fn new(tx: tokio::sync::oneshot::Sender<Option<CredentialReply>>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(tx))))
+    }
+
+    /// Deliver the user's answer (`None` = cancelled). Idempotent.
+    pub fn respond(&self, reply: Option<CredentialReply>) {
+        if let Ok(mut guard) = self.0.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(reply);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for CredentialResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredentialResponder")
+    }
+}
+
+/// Carries the answer to a keyboard-interactive (MFA / verification-code) prompt
+/// back to the blocked auth flow (#86-MFA). `None` = the user cancelled.
+/// `Arc<Mutex<Option<…>>>` so the enclosing [`SessionEvent`] stays `Clone`.
+#[derive(Clone)]
+pub struct MfaResponder(
+    Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Option<String>>>>>,
+);
+
+impl MfaResponder {
+    pub fn new(tx: tokio::sync::oneshot::Sender<Option<String>>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(tx))))
+    }
+
+    /// Deliver the user's answer (`None` = cancelled). Idempotent.
+    pub fn respond(&self, reply: Option<String>) {
+        if let Ok(mut guard) = self.0.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(reply);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for MfaResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MfaResponder")
+    }
+}
+
+/// One process row sampled from the remote `ps` (#23). CPU/mem are percentages
+/// as reported by `ps` (pcpu/pmem); `command` is the (width-truncated) args.
+#[derive(Debug, Clone)]
+pub struct ProcInfo {
+    pub pid: u32,
+    pub user: String,
+    pub cpu: f32,
+    pub mem: f32,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SystemDetails {
+    pub overview: Vec<(String, String)>,
+    pub cpu_info: Vec<(String, String)>,
+    pub gpu_info: Vec<(String, String)>,
+    pub cpu_usage: Vec<(String, String)>,
+    pub memory: Vec<(String, String)>,
+    pub swap: Vec<(String, String)>,
+    pub networks: Vec<(String, String, String, String, String)>,
+    pub filesystems: Vec<(String, String, String, String, String)>,
+}
+
+/// One SSH tunnel row shown in the runtime tunnel panel (#206).
+#[derive(Debug, Clone)]
+pub struct RuntimeTunnelInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub bind_addr: String,
+    pub bind_port: u16,
+    pub host: String,
+    pub host_port: u16,
+    pub active: bool,
+    pub status: String,
+}
+
+/// Events emitted back to the UI thread.
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    /// Free-form status text for the tab header / status line.
+    Status(String),
+    /// A chunk of stdout/stderr output from the remote shell.
+    Output(String),
+    /// Connection is up.
+    Connected,
+    /// Connection closed (either cleanly or after an error).
+    Closed(String),
+    /// The server presented a host key that is unknown or has changed; the UI
+    /// must show a confirmation dialog and answer via `responder` (#109-5). The
+    /// handler is blocked awaiting that answer.
+    HostKeyPrompt {
+        host: String,
+        port: u16,
+        key_type: String,
+        fingerprint: String,
+        /// True when a *different* key was previously stored (possible MITM).
+        changed: bool,
+        responder: HostKeyResponder,
+    },
+    /// The session is missing a username and/or password; the UI must prompt for
+    /// them and answer via `responder`. The auth flow is blocked meanwhile (#110).
+    CredentialPrompt {
+        session_id: String,
+        host: String,
+        user: String,
+        need_user: bool,
+        need_password: bool,
+        responder: CredentialResponder,
+    },
+    /// A keyboard-interactive challenge that isn't the account password —
+    /// typically an MFA / OTP / verification-code prompt from a bastion such as
+    /// JumpServer. The UI shows `prompt` and answers via `responder`; the auth
+    /// flow is blocked meanwhile (#86-MFA).
+    MfaPrompt {
+        session_id: String,
+        host: String,
+        /// The server's prompt text, e.g. "MFA code: " / "Verification code:".
+        prompt: String,
+        /// Whether typed input should be visible (false = hide, like a password).
+        echo: bool,
+        responder: MfaResponder,
+    },
+    /// Remote machine resource sample (from the monitor channel).
+    /// Memory/swap are in KiB (as reported by /proc/meminfo).
+    ResourceStats {
+        cpu_percent: f32,
+        mem_used_kib: u64,
+        mem_total_kib: u64,
+        swap_used_kib: u64,
+        swap_total_kib: u64,
+        /// Per-interface (name, rx_bytes_per_sec, tx_bytes_per_sec).
+        net: Vec<(String, u64, u64)>,
+        /// Per-filesystem (mount_point, available_bytes, total_bytes).
+        disks: Vec<(String, u64, u64)>,
+        /// Effective login name reported by the remote host (`id -un`).
+        current_user: String,
+        /// Top processes by CPU (#23). Empty if the host's `ps` is unusable.
+        procs: Vec<ProcInfo>,
+        /// Detailed system information for the detached system-info window.
+        /// Detailed data is present only for the separately delayed one-shot
+        /// system-information probe; lightweight resource samples leave it None.
+        sys: Option<SystemDetails>,
+    },
+
+    /// Effective user and top-process snapshot from the dedicated lightweight
+    /// process channel. Keeping this separate prevents a slow `df`, `lspci`, or
+    /// other system-information probe from freezing the process window.
+    ProcessStats {
+        current_user: String,
+        procs: Vec<ProcInfo>,
+    },
+
+    /// A command the user ran in the terminal, captured via the shell hook
+    /// (OSC 697) so it can join the command-box history (#113).
+    CommandRan(String),
+
+    /// Runtime tunnel state changed (#206).
+    TunnelUpdate(Vec<RuntimeTunnelInfo>),
+
+    // --- SFTP events -------------------------------------------------------
+    /// The shell's current working directory changed (parsed from OSC 7).
+    CwdChanged(String),
+    /// SFTP directory listing arrived.
+    SftpEntries {
+        path: String,
+        entries: Vec<RemoteEntry>,
+    },
+    /// Free-form SFTP status message (progress, errors, etc.).
+    SftpStatus(String),
+    /// A directory listing failed (e.g. permission denied): show the message and
+    /// stop the panel's loading spinner without disturbing the current view (#112).
+    SftpError(String),
+    /// Directory tree structure changed (full rebuild pushed on every toggle).
+    SftpTreeUpdate(Vec<RemoteTreeNode>),
+    /// Move-target dialog directory tree changed. It has independent expanded
+    /// state so browsing targets does not alter the main SFTP tree.
+    SftpMoveTreeUpdate(Vec<RemoteTreeNode>),
+    /// File-transfer progress / completion (download or upload).
+    SftpTransfer {
+        id: String,
+        name: String,
+        is_upload: bool,
+        transferred: u64,
+        total: u64,
+        state: u8, // 0 = active, 1 = done, 2 = error
+        msg: String,
+    },
+    /// A remote text file loaded for the built-in viewer/editor (#70). On
+    /// failure (too large, binary, non-UTF-8, I/O error) `error` is non-empty
+    /// and `content` is empty.
+    SftpFileText {
+        path: String,
+        name: String,
+        content: String,
+        edit: bool,
+        error: String,
+    },
+}
+
+/// Handle retained by the UI layer to talk to a running session.
+pub struct SessionHandle {
+    #[allow(dead_code)] // used by future resize / reconnect flows
+    pub tab_id: String,
+    pub commands: UnboundedSender<SessionCommand>,
+    #[allow(dead_code)] // keep alive; detach on Drop is fine for v0.1
+    pub join: JoinHandle<()>,
+}
+
+impl SessionHandle {
+    pub fn send_raw(&self, bytes: Vec<u8>) {
+        let _ = self.commands.send(SessionCommand::RawInput(bytes));
+    }
+
+    pub fn resize(&self, cols: u32, rows: u32) {
+        let _ = self.commands.send(SessionCommand::Resize(cols, rows));
+    }
+
+    pub fn add_tunnel(&self, id: String, forward: PortForward) {
+        let _ = self
+            .commands
+            .send(SessionCommand::AddTunnel { id, forward });
+    }
+
+    pub fn stop_tunnel(&self, id: String) {
+        let _ = self.commands.send(SessionCommand::StopTunnel(id));
+    }
+
+    pub fn kill_process(
+        &self,
+        pid: u32,
+        root_password: Option<crate::config::Secret>,
+    ) -> tokio::sync::oneshot::Receiver<ProcessKillResult> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let _ = self.commands.send(SessionCommand::KillProcess {
+            pid,
+            root_password,
+            reply,
+        });
+        rx
+    }
+
+    pub fn clear_failed_tunnels(&self) {
+        let _ = self.commands.send(SessionCommand::ClearFailedTunnels);
+    }
+
+    pub fn close(&self) {
+        let _ = self.commands.send(SessionCommand::Close);
+    }
 }
 
 async fn kill_remote_process(
@@ -902,12 +1191,14 @@ pub fn spawn_session(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<SessionEvent>();
 
+    let cmd_tx_for_task = cmd_tx.clone();
     let evt_tx_for_task = evt_tx.clone();
     let join = runtime.spawn(async move {
         if let Err(err) = run_session(
             session,
             jump,
             cmd_rx,
+            cmd_tx_for_task,
             evt_tx_for_task.clone(),
             initial_cols,
             initial_rows,
@@ -932,6 +1223,7 @@ pub fn spawn_session(
 struct RuntimeForward {
     info: RuntimeTunnelInfo,
     task: Option<JoinHandle<()>>,
+    order: u64,
 }
 
 fn normalized_bind_addr(f: &PortForward) -> String {
@@ -973,8 +1265,9 @@ fn emit_tunnel_update(
     forwards: &std::collections::HashMap<String, RuntimeForward>,
     events: &UnboundedSender<SessionEvent>,
 ) {
-    let mut rows: Vec<RuntimeTunnelInfo> = forwards.values().map(|f| f.info.clone()).collect();
-    rows.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    let mut rows: Vec<&RuntimeForward> = forwards.values().collect();
+    rows.sort_by(|a, b| b.order.cmp(&a.order));
+    let rows = rows.into_iter().map(|f| f.info.clone()).collect();
     let _ = events.send(SessionEvent::TunnelUpdate(rows));
 }
 
@@ -983,8 +1276,10 @@ fn start_runtime_forward(
     id: String,
     forward: PortForward,
     events: &UnboundedSender<SessionEvent>,
+    command_tx: UnboundedSender<SessionCommand>,
+    order: u64,
 ) -> RuntimeForward {
-    let info = tunnel_info(id, &forward, true, t("运行中", "running"));
+    let info = tunnel_info(id.clone(), &forward, false, t("启动中", "starting"));
     let task = match forward.kind.as_str() {
         "local" => Some(crate::tunnel::spawn_local(
             handle,
@@ -993,16 +1288,20 @@ fn start_runtime_forward(
             info.host.clone(),
             info.host_port,
             events.clone(),
+            id.clone(),
+            command_tx,
         )),
         "dynamic" => Some(crate::tunnel::spawn_dynamic(
             handle,
             info.bind_addr.clone(),
             info.bind_port,
             events.clone(),
+            id.clone(),
+            command_tx,
         )),
         _ => None,
     };
-    RuntimeForward { info, task }
+    RuntimeForward { info, task, order }
 }
 
 /// Open an SSH transport to the session's host (directly or via a SOCKS5 / HTTP
@@ -1025,10 +1324,14 @@ async fn connect_ssh(
         .filter(|f| f.kind == "remote")
         .map(|f| (f.bind_port as u32, (f.host.clone(), f.host_port)))
         .collect();
+    let x11_target = session
+        .x11_forwarding
+        .then(|| parse_x11_display(&session.x11_display));
     let handler = ClientHandler {
         host: session.host.clone(),
         port: session.port,
         remote_forwards,
+        x11_target,
         events: events.clone(),
     };
     let addr = format!("{}:{}", session.host, session.port);
@@ -1429,6 +1732,7 @@ async fn run_session(
     session: Session,
     jump: Option<Session>,
     mut commands: UnboundedReceiver<SessionCommand>,
+    command_tx: UnboundedSender<SessionCommand>,
     events: UnboundedSender<SessionEvent>,
     initial_cols: u32,
     initial_rows: u32,
@@ -1513,6 +1817,32 @@ async fn run_session(
         .await
         .context("open session channel")?;
 
+    if session.x11_forwarding {
+        let cookie = make_fake_x11_cookie();
+        match channel
+            .request_x11(
+                true,
+                false, // allow multiple X11 connections for this session
+                "MIT-MAGIC-COOKIE-1",
+                cookie,
+                x11_screen_number(&session.x11_display),
+            )
+            .await
+        {
+            Ok(()) => {
+                let _ = events.send(SessionEvent::Output(format!(
+                    "\r\n[meatshell] X11 forwarding enabled → {}\r\n",
+                    session.x11_display
+                )));
+            }
+            Err(e) => {
+                let _ = events.send(SessionEvent::Output(format!(
+                    "\r\n[meatshell] X11 forwarding request failed: {e}\r\n"
+                )));
+            }
+        }
+    }
+
     channel
         .request_pty(
             true,
@@ -1548,6 +1878,12 @@ async fn run_session(
     // True from injecting PROMPT_SETUP until the echoed setup line has been
     // received and stripped; output is buffered (not shown) during that window.
     let mut suppress_echo = false;
+    // Hard deadline for the suppression window. A non-POSIX shell (Windows
+    // pwsh/cmd) never runs our hook and so never echoes the OSC 7 we wait for —
+    // without this, output stayed hidden until a 16 KiB cap, leaving the terminal
+    // blank/"unusable" on Windows servers (#140-1). When the deadline passes we
+    // stop suppressing and show whatever arrived.
+    let mut suppress_deadline: Option<tokio::time::Instant> = None;
     // Buffers output while `suppress_echo` so the (long) echoed setup line can be
     // stripped even when it splits across reads (#98).
     let mut echo_buf = String::new();
@@ -1589,9 +1925,10 @@ async fn run_session(
     // command so a redrawn prompt (e.g. Enter on an empty line) doesn't re-emit
     // it, and is primed once up front so the pre-session history isn't replayed.
     //
-    // The echoed setup line is discarded through the private OSC 699 completion
-    // marker emitted after installation (see the suppress block below), so zsh
-    // redraws and soft wrapping cannot make the internal command visible.
+    // The echoed setup line is discarded by anchoring on the OSC 7 it produces
+    // (see the suppress block below), so it doesn't matter that the long line
+    // wraps — we never substring-match it.
+    const PROMPT_BODY: &str = "test -z \"$FISH_VERSION\" && eval '__msc(){ __c=\"$(fc -ln -1 2>/dev/null)\"; [ -n \"$__c\" ] && [ \"$__c\" != \"$__cl\" ] && { __cl=\"$__c\"; printf \"\\033]697;%s\\007\" \"$__c\"; }; }; __ms7(){ if [ -n \"$TMUX\" ]; then printf \"\\033Ptmux;\\033\\033]7;file://%s%s\\007\\033\\134\" \"$HOSTNAME\" \"$PWD\"; else printf \"\\033]7;file://%s%s\\007\" \"$HOSTNAME\" \"$PWD\"; fi; __msc; }; __ms_tmux_env(){ command -v tmux >/dev/null 2>&1 || return; tmux set-option -g allow-passthrough on 2>/dev/null || true; tmux set-environment -g PROMPT_COMMAND \"printf \\\"\\\\033Ptmux;\\\\033\\\\033]7;file://%s%s\\\\007\\\\033\\\\134\\\" \\\"\\$HOSTNAME\\\" \\\"\\$PWD\\\"\" 2>/dev/null || true; }; __cl=\"$(fc -ln -1 2>/dev/null)\"; __ms_tmux_env; if [ -n \"$ZSH_VERSION\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __ms7; else PROMPT_COMMAND=\"__ms7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; __ms7'";
     let prompt_setup = format!(" {}\r", PROMPT_BODY);
     // --- Remote resource monitor (separate exec channel) ----------------
     // A tiny remote loop streams /proc/stat + /proc/meminfo every 2s; we parse
@@ -1663,6 +2000,7 @@ async fn run_session(
                     RuntimeForward {
                         info: tunnel_info(id, f, true, t("运行中", "running")),
                         task: None,
+                        order: idx as u64,
                     },
                 );
             }
@@ -1676,6 +2014,7 @@ async fn run_session(
                     RuntimeForward {
                         info: tunnel_info(id, f, false, t("启动失败", "failed")),
                         task: None,
+                        order: idx as u64,
                     },
                 );
             }
@@ -1702,18 +2041,21 @@ async fn run_session(
                 let id = format!("config-{idx}");
                 runtime_forwards.insert(
                     id.clone(),
-                    start_runtime_forward(handle.clone(), id, f.clone(), &events),
+                    start_runtime_forward(
+                        handle.clone(),
+                        id,
+                        f.clone(),
+                        &events,
+                        command_tx.clone(),
+                        idx as u64,
+                    ),
                 );
             }
             _ => {}
         }
     }
+    let mut next_tunnel_order = session.forwards.len() as u64;
     emit_tunnel_update(&runtime_forwards, &events);
-
-    let mut terminal_decoder = crate::terminal::TerminalEncoding::new(&session.encoding);
-    let mut extended_decoder = crate::terminal::TerminalEncoding::new(&session.encoding);
-    let terminal_encoder = crate::terminal::TerminalEncoding::new(&session.encoding);
-    let mut trigger_engine = TriggerEngine::new(&session.triggers);
 
     // --- Main pump ------------------------------------------------------
     loop {
@@ -1764,7 +2106,6 @@ async fn run_session(
                         // Only log the byte count — never the bytes themselves,
                         // which are raw keystrokes and may contain passwords (#15).
                         tracing::debug!("ssh channel.data len={} bytes", bytes.len());
-                        let bytes = terminal_encoder.encode(&bytes);
                         if let Err(err) = channel.data(&bytes[..]).await {
                             let _ = events.send(SessionEvent::Closed(format!("{}: {err}", t("写入失败", "write failed"))));
                             break;
@@ -1811,9 +2152,18 @@ async fn run_session(
                     }
                     Some(SessionCommand::AddTunnel { id, forward }) => {
                         if forward.kind == "local" || forward.kind == "dynamic" {
+                            let order = next_tunnel_order;
+                            next_tunnel_order += 1;
                             runtime_forwards.insert(
                                 id.clone(),
-                                start_runtime_forward(handle.clone(), id, forward, &events),
+                                start_runtime_forward(
+                                    handle.clone(),
+                                    id,
+                                    forward,
+                                    &events,
+                                    command_tx.clone(),
+                                    order,
+                                ),
                             );
                             emit_tunnel_update(&runtime_forwards, &events);
                         } else {
@@ -1821,6 +2171,20 @@ async fn run_session(
                                 "\r\n[meatshell] {}\r\n",
                                 t("运行时暂不支持新增远程转发 -R", "runtime remote forwarding (-R) is not supported yet")
                             )));
+                        }
+                    }
+                    Some(SessionCommand::TunnelStarted(id)) => {
+                        if let Some(f) = runtime_forwards.get_mut(&id) {
+                            f.info.active = true;
+                            f.info.status = t("运行中", "running").to_string();
+                            emit_tunnel_update(&runtime_forwards, &events);
+                        }
+                    }
+                    Some(SessionCommand::TunnelFailed(id)) => {
+                        if let Some(f) = runtime_forwards.get_mut(&id) {
+                            f.info.active = false;
+                            f.info.status = t("启动失败", "failed").to_string();
+                            emit_tunnel_update(&runtime_forwards, &events);
                         }
                     }
                     Some(SessionCommand::StopTunnel(id)) => {
@@ -1840,10 +2204,43 @@ async fn run_session(
                             let _ = reply.send(result);
                         });
                     }
+                    Some(SessionCommand::ClearFailedTunnels) => {
+                        runtime_forwards.retain(|_, f| {
+                            f.info.active || f.info.status != t("启动失败", "failed")
+                        });
+                        emit_tunnel_update(&runtime_forwards, &events);
+                    }
                     Some(SessionCommand::Close) | None => {
                         let _ = channel.eof().await;
                         break;
                     }
+                }
+            }
+            // Suppression safety net: if the injected hook hasn't echoed its OSC 7
+            // by the deadline, the remote shell isn't the POSIX one we injected for
+            // (e.g. Windows pwsh/cmd). Stop hiding output so the terminal is usable
+            // again; best-effort drop just the echoed setup line (#140-1).
+            _ = async {
+                match suppress_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if suppress_echo => {
+                suppress_echo = false;
+                suppress_deadline = None;
+                let mut buf = std::mem::take(&mut echo_buf);
+                if let Some(p) = buf.find(PROMPT_SETUP_PREFIX) {
+                    let end = prompt_setup_echo_end(&buf, p);
+                    strip_prompt_setup_echo(&mut buf, p, end);
+                    late_prompt_echo_pending = false;
+                } else {
+                    // Nothing identifiable arrived before the deadline. Allow
+                    // one later setup echo to be removed, then permanently
+                    // disable the special-case stripping for this session.
+                    late_prompt_echo_pending = true;
+                }
+                if !buf.is_empty() {
+                    let _ = events.send(SessionEvent::Output(buf));
                 }
             }
             msg = channel.wait() => {
@@ -1910,7 +2307,8 @@ async fn run_session(
                                     // run them through the normal output path so
                                     // the prompt shows and the cwd updates.
                                     if !leftover.is_empty() {
-                                        let text = terminal_decoder.decode(&leftover);
+                                        let text =
+                                            String::from_utf8_lossy(&leftover).into_owned();
                                         if let Some(cwd) = extract_osc7_path(&text) {
                                             let _ =
                                                 events.send(SessionEvent::CwdChanged(cwd));
@@ -1939,7 +2337,7 @@ async fn run_session(
                             continue;
                         }
 
-                        let chunk = terminal_decoder.decode(&data);
+                        let chunk = String::from_utf8_lossy(&data).into_owned();
 
                         if first_terminal_output {
                             first_terminal_output = false;
@@ -1959,58 +2357,68 @@ async fn run_session(
                         {
                             prompt_injected = true;
                             suppress_echo = true;
-                            // A separate exec probe already confirmed bash or zsh.
-                            // Keep buffering until the hook's OSC 7 arrives: slow
-                            // Linux/macOS PTYs may echo this command after several
-                            // seconds, while unsupported Windows shells never enter
-                            // this branch.
-                            // Paint the banner/prompt immediately so the first
-                            // usable terminal frame no longer waits for shell
-                            // integration (later output carrying the injected
-                            // setup command is still buffered and stripped).
-                            // On hosts without a login banner this frame IS the
-                            // shell prompt, and the shell prints an identical one
-                            // after the setup command returns — rendering it
-                            // twice. Drop the trailing prompt line here so only
-                            // the post-setup prompt (sent via the normal path
-                            // below) is shown; any banner text above it is
-                            // preserved.
-                            let mut painted = chunk.clone();
-                            if let Some(prompt_line) = painted.rsplit('\n').next() {
-                                if prompt_line
-                                    .trim_end()
-                                    .ends_with(['#', '$', '%', '>'])
-                                {
-                                    if let Some(pos) = painted.rfind(prompt_line) {
-                                        painted.truncate(pos);
-                                    }
-                                }
-                            }
-                            let _ = events.send(SessionEvent::Output(painted));
+                            // Give the hook ~2 s to echo its OSC 7; past that we
+                            // assume a non-POSIX shell and stop hiding output (#140-1).
+                            // 1.2 s was too tight for slow PTY/SSH servers — the echo
+                            // + OSC 7 landed after the deadline, so the injected setup
+                            // line leaked through (#176). The cost of the larger window
+                            // is only a slightly longer blank on a non-POSIX shell that
+                            // wasn't already flagged disable_shell_integration.
+                            suppress_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(2000),
+                            );
+                            // Paint the banner/prompt immediately. Only later
+                            // output containing our injected setup command is
+                            // buffered and stripped; the first usable terminal
+                            // frame no longer waits for shell integration.
+                            let _ = events.send(SessionEvent::Output(chunk));
                             let _ = channel.data(prompt_setup.as_bytes()).await;
                             continue;
                         }
 
-                        // While suppressing, wait for the private OSC 699 completion
-                        // marker emitted by the executed setup command. Do not infer
-                        // completion from echoed text size: zsh/ZLE may redraw the
-                        // long input line often enough to exceed 16 KiB before it
-                        // executes, which previously released the internal command
-                        // onto the terminal (#344). Output before the marker is
-                        // private setup echo and is safely discarded; the rolling
-                        // buffer remains bounded while preserving split markers.
+                        // While suppressing, buffer output until our echoed setup
+                        // command AND the OSC 7 that the injected __ms7 prints right
+                        // after it have both arrived. Then delete just that span —
+                        // from the start of the command's line through the OSC 7 —
+                        // which removes the echoed command (even if it WRAPPED across
+                        // the terminal width, since we cut by byte range) and the
+                        // now-redundant first prompt, while PRESERVING any MOTD/banner
+                        // printed before it (#98). The command line is located by a
+                        // short, un-wrappable prefix of the injected command. A size
+                        // cap is the safety valve for a shell that never reports back
+                        // (e.g. dash without PROMPT_COMMAND).
                         let mut text = if suppress_echo {
                             echo_buf.push_str(&chunk);
-                        if let Some(tail) = take_after_prompt_setup_done(&mut echo_buf) {
-                            suppress_echo = false;
-                            late_prompt_echo_pending = false;
-                            if let Some(cwd) = extract_osc7_path(&tail) {
+                            const ECHO_BUF_CAP: usize = 1 << 14; // 16 KiB
+                            // The command echo + its trailing OSC 7 (the one after
+                            // our command, not any earlier prompt OSC 7).
+                            let landed = echo_buf.find(PROMPT_SETUP_PREFIX).and_then(|p| {
+                                extract_osc7_end(&echo_buf[p..])
+                                    .map(|(cwd, rel)| (p, p + rel, cwd))
+                            });
+                            if let Some((cmd_pos, osc_end, cwd)) = landed {
+                                suppress_echo = false;
+                                suppress_deadline = None;
+                                late_prompt_echo_pending = false;
                                 tracing::debug!("OSC7 cwd={:?}", cwd);
                                 let _ = events.send(SessionEvent::CwdChanged(cwd));
-                            }
-                            tail
-                        } else {
-                                bound_prompt_setup_echo(&mut echo_buf);
+                                let mut buf = std::mem::take(&mut echo_buf);
+                                strip_prompt_setup_echo(&mut buf, cmd_pos, osc_end);
+                                buf
+                            } else if echo_buf.len() >= ECHO_BUF_CAP {
+                                suppress_echo = false;
+                                suppress_deadline = None;
+                                let mut buf = std::mem::take(&mut echo_buf);
+                                if let Some(p) = buf.find(PROMPT_SETUP_PREFIX) {
+                                    let end = prompt_setup_echo_end(&buf, p);
+                                    strip_prompt_setup_echo(&mut buf, p, end);
+                                    late_prompt_echo_pending = false;
+                                } else {
+                                    late_prompt_echo_pending = true;
+                                }
+                                buf
+                            } else {
                                 continue; // keep buffering; show nothing yet
                             }
                         } else {
@@ -2052,17 +2460,7 @@ async fn run_session(
                         let _ = events.send(SessionEvent::Output(text));
                     }
                     Some(ChannelMsg::ExtendedData { data, ext: _ }) => {
-                        let text = extended_decoder.decode(&data);
-                        for (response, append_enter) in trigger_engine.feed(&text) {
-                            let mut bytes = response.as_str().as_bytes().to_vec();
-                            if append_enter {
-                                bytes.push(b'\r');
-                            }
-                            let encoded = terminal_encoder.encode(&bytes);
-                            if let Err(error) = channel.data(&encoded[..]).await {
-                                tracing::warn!("session trigger response failed: {error}");
-                            }
-                        }
+                        let text = String::from_utf8_lossy(&data).into_owned();
                         let _ = events.send(SessionEvent::Output(text));
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
@@ -2801,7 +3199,57 @@ pub(crate) struct ClientHandler {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) remote_forwards: std::collections::HashMap<u32, (String, u16)>,
+    pub(crate) x11_target: Option<(String, u16)>,
     pub(crate) events: UnboundedSender<SessionEvent>,
+}
+
+/// Generate the fake MIT-MAGIC-COOKIE-1 value advertised to sshd for X11 forwarding.
+///
+/// A production-grade client would also read the user's real local Xauthority
+/// cookie and rewrite the first X11 handshake packet before connecting to the
+/// local X server. This first-stage implementation targets the common Windows
+/// setup where VcXsrv/Xming/X410 is started with access control disabled.
+fn make_fake_x11_cookie() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Parse a local X display string into a TCP endpoint. Examples:
+/// `:0`, `localhost:0`, `127.0.0.1:0.0` → port 6000; `host:6001` → port 6001.
+fn parse_x11_display(display: &str) -> (String, u16) {
+    let trimmed = display.trim();
+    if trimmed.is_empty() {
+        return ("127.0.0.1".to_string(), 6000);
+    }
+
+    let (host, rest) = if let Some(rest) = trimmed.strip_prefix(':') {
+        ("127.0.0.1", rest)
+    } else if let Some((h, r)) = trimmed.rsplit_once(':') {
+        (if h.is_empty() { "127.0.0.1" } else { h }, r)
+    } else {
+        return (trimmed.to_string(), 6000);
+    };
+
+    let display_num = rest
+        .split('.')
+        .next()
+        .and_then(|n| n.parse::<u16>().ok())
+        .unwrap_or(0);
+    let port = if display_num >= 6000 {
+        display_num
+    } else {
+        6000 + display_num
+    };
+    (host.to_string(), port)
+}
+
+fn x11_screen_number(display: &str) -> u32 {
+    display
+        .trim()
+        .rsplit_once('.')
+        .and_then(|(_, s)| s.parse::<u32>().ok())
+        .unwrap_or(0)
 }
 
 /// Shared host-key check used by both the shell and SFTP connections: trust a
@@ -2814,7 +3262,7 @@ pub(crate) async fn verify_host_key(
     key: &PublicKey,
     events: &UnboundedSender<SessionEvent>,
 ) -> bool {
-    use crate::ssh::HostKeyStatus;
+    use crate::ssh::known_hosts::HostKeyStatus;
     match crate::ssh::known_hosts::verify(host, port, key) {
         HostKeyStatus::Match => true,
         status => {
@@ -2936,6 +3384,39 @@ impl Handler for ClientHandler {
         Ok(())
     }
 
+    /// X11 forwarding: the remote sshd opens one of these channels when a remote
+    /// GUI application connects to the DISPLAY that sshd created for us. Splice it
+    /// to the user's local X server, usually VcXsrv/Xming/X410 on 127.0.0.1:6000.
+    async fn server_channel_open_x11(
+        &mut self,
+        channel: Channel<Msg>,
+        originator_address: &str,
+        originator_port: u32,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let target = self
+            .x11_target
+            .clone()
+            .unwrap_or_else(|| ("127.0.0.1".to_string(), 6000));
+        let events = self.events.clone();
+        let origin = format!("{originator_address}:{originator_port}");
+        tokio::spawn(async move {
+            match tokio::net::TcpStream::connect((target.0.as_str(), target.1)).await {
+                Ok(mut tcp) => {
+                    let mut stream = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
+                }
+                Err(e) => {
+                    let _ = events.send(SessionEvent::Output(format!(
+                        "\r\n[meatshell] X11 {origin} → {}:{} failed: {e}\r\n",
+                        target.0, target.1
+                    )));
+                }
+            }
+        });
+        Ok(())
+    }
+
     /// Remote forward (-R): the server opened a channel for a connection that
     /// arrived on a port we asked it to listen on. Connect to the configured
     /// local target and splice the two together (#56).
@@ -2982,10 +3463,9 @@ fn _assert_handle_send() {
 #[cfg(test)]
 mod prompt_setup_echo_tests {
     use super::{
-        bound_prompt_setup_echo, prompt_setup_echo_end, prompt_setup_supported,
-        strip_late_prompt_setup_echo, strip_pending_prompt_setup_echo, strip_prompt_setup_echo,
-        take_after_prompt_setup_done, PROMPT_BODY, PROMPT_SETUP_DONE, PROMPT_SETUP_HISTORY_MARKER,
-        PROMPT_SETUP_PREFIX,
+        prompt_setup_echo_end, prompt_setup_supported, strip_late_prompt_setup_echo,
+        strip_pending_prompt_setup_echo, strip_prompt_setup_echo, PROMPT_BODY,
+        PROMPT_SETUP_HISTORY_MARKER, PROMPT_SETUP_PREFIX,
     };
 
     #[test]
@@ -3014,35 +3494,6 @@ mod prompt_setup_echo_tests {
         // Re-prime command capture only after deleting the setup entry, so the
         // previous real user command does not get reported as newly executed.
         assert!(PROMPT_BODY.find("history -d").unwrap() < PROMPT_BODY.rfind("__cl=").unwrap());
-        assert!(PROMPT_BODY.contains("699;ready"));
-    }
-
-    #[test]
-    fn completion_marker_hides_corrupted_large_zsh_redraws() {
-        let mut buffered = "cst test -z redraw\r".repeat(5000);
-        buffered.push_str(PROMPT_SETUP_DONE);
-        buffered.push_str("\u{1b}]7;file://host/home/user\u{07}prompt");
-
-        let tail = take_after_prompt_setup_done(&mut buffered).expect("completion marker");
-        assert!(buffered.is_empty());
-        assert_eq!(tail, "\u{1b}]7;file://host/home/user\u{07}prompt");
-        assert!(!tail.contains("test -z"));
-    }
-
-    #[test]
-    fn rolling_setup_buffer_preserves_a_split_completion_marker() {
-        let split = 6;
-        let mut buffered = "redraw".repeat(20_000);
-        buffered.push_str(&PROMPT_SETUP_DONE[..split]);
-        bound_prompt_setup_echo(&mut buffered);
-        assert!(buffered.len() < 1024);
-
-        buffered.push_str(&PROMPT_SETUP_DONE[split..]);
-        buffered.push_str("prompt");
-        assert_eq!(
-            take_after_prompt_setup_done(&mut buffered).as_deref(),
-            Some("prompt")
-        );
     }
 
     #[test]

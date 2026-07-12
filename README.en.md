@@ -1,4 +1,4 @@
-# meatshell
+# meatshell-custom
 
 [简体中文](./README.md) | **English**
 
@@ -8,9 +8,58 @@ FinalShell's core experience (resource-monitor sidebar, session management,
 tabbed terminals) while cutting memory use from the 400 MB+ of a JVM app down to
 the tens-of-MB range of a native binary.
 
+## Custom Version Notes
+
+This branch is based on the original meatshell project with a few custom changes, including feature enhancements, interaction improvements, and bug fixes. The rest of this README is kept as close to the upstream version as possible.
+
+### Changes and Improvements
+
+- SSH connections support X11 forwarding.
+- Added a terminal `Ctrl+C` copy preference, allowing users to choose between copy and interrupt behavior.
+- Session entries can be reordered by drag and drop within the same group.
+- The Quick Connect and Resource Status panels can dock to the left, right, top, or bottom; when both panels are expanded on the same edge, their edge icons are shown side by side so either panel can be switched to or collapsed at any time.
+- SFTP supports moving files / folders from the context menu or toolbar, with a visual target-directory picker; multiple selected files / folders can be moved in one batch.
+- The SFTP directory tree supports context menus, resizable width, and `Load all` for large directories; the move dialog can automatically locate the current path.
+- The SFTP file list supports Windows-style multi-selection with `Ctrl`, `Shift`, and `Ctrl+A`, and shows the selected item count in the status bar.
+- The SFTP context menu separates `Download` and `Archive download`, and supports batch download / move / delete for multiple selected files or folders.
+- Large SFTP directories use paged initial display plus `Load all`; the file list, directory tree, and move-dialog tree all use virtualized lists to reduce the cost of opening and scrolling huge folders.
+- Expanding or collapsing directories in the SFTP move dialog is independent from the main directory tree, so choosing a target directory does not change the main panel's tree state.
+- SFTP directory listings are cached within the session, keeping up to 64 recently visited directories; refreshes and file operations update the cache.
+- Temporary downloads for SFTP preview / external editing can be cancelled; successful transfers automatically close the download window and clear completed records.
+- New / edit session dialogs and SFTP dialogs can be closed quickly with `Esc`; move, rename, permission, and related dialogs can be repositioned by dragging.
+- Improved the default focus and cursor position in the SFTP rename dialog.
+- Improved cursor-follow behavior for path, rename, move, new-session, and related text fields; when content exceeds the input width, the visible range scrolls to the cursor, and long paths show their ending by default.
+- Fixed the startup behavior of the default-collapse setting to avoid conflicts with the saved panel state.
+- Improved SFTP file-list refresh behavior to reduce unexpected scroll-position changes.
+- Improved SFTP path synchronization when following `cd` inside tmux, with a quick toggle in the top toolbar.
+- SFTP toolbar buttons now show hover tooltips for clearer button meaning.
+- Added English / Chinese switching for custom SFTP UI text.
+- The SFTP file list now has sortable column headers for name, size, type, modified time, permissions, and user/group, while keeping folders and files grouped separately.
+- SFTP file types now use a file-manager-style display, recognizing common source, config, log, image, audio, video, archive, executable, and dotfiles, with English / Chinese switching.
+- SFTP file-list columns can be resized by dragging their headers; when the panel is docked left or right, header labels align left and overflowing headers, rows, and toolbar controls are clipped to the panel boundary.
+- Improved SFTP header dragging so columns that reached their minimum width follow the mouse immediately when dragged back, without accumulating out-of-bounds distance.
+- When the SFTP panel is collapsed, unavailable path fields and file-operation buttons are hidden while expand / collapse controls remain available.
+- SFTP panel drag-to-dock is limited to the drag handle left of the path bar, avoiding accidental drags from file-list or directory-tree whitespace.
+
 ## Screenshots
 
 <p align="center">
+  <img src="docs/screenshots/1.png" alt="Theme 1" width="800"><br>
+  <em>Theme 1</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/2.png" alt="Theme 2" width="800"><br>
+  <em>Theme 2</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/3.png" alt="Theme 3" width="800"><br>
+  <em>Theme 3</em>
+</p>
+
+
+<!-- <p align="center">
   <img src="docs/screenshots/01-welcome-en.png" alt="Welcome / session management" width="800"><br>
   <em>Welcome page: session management + local resource monitor sidebar</em>
 </p>
@@ -18,7 +67,7 @@ the tens-of-MB range of a native binary.
 <p align="center">
   <img src="docs/screenshots/02-terminal-htop.png" alt="Terminal + SFTP" width="800"><br>
   <em>Tabbed terminal (full-screen btop) + SFTP file browser + remote resource monitoring</em>
-</p>
+</p> -->
 
 ## Download & install
 
@@ -302,6 +351,13 @@ so the tag points at a commit that already contains the matching Cargo version:
 .\scripts\release.ps1 v0.6.0 -Push
 ```
 
+You can also use a custom tag / release name. If the tag cannot be used to
+derive the Cargo version, pass `-Version` explicitly:
+
+```powershell
+.\scripts\release.ps1 my-build "v0.5.7 custom" -Version 0.5.7-custom.1 -Push
+```
+
 The script updates `Cargo.toml` / `Cargo.lock`, runs `cargo check --locked`,
 verifies `meatshell --version`, commits `Release v0.6.0`, creates an annotated
 tag, and pushes the current branch plus the tag. See
@@ -317,3 +373,7 @@ tag, and pushes the current branch plus the tag. See
 ## License
 
 Dual-licensed under MIT OR Apache-2.0.
+
+## License
+
+MIT OR Apache-2.0 dual license.

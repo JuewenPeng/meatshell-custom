@@ -83,6 +83,28 @@ export component ConfirmDialog inherits Rectangle {
         height: 100%;
         clicked => { if (root.dismiss-on-backdrop) { root.cancel(); } }
     }
+    property <bool> esc-focus-pending: false;
+    changed is-open => { root.esc-focus-pending = root.is-open; }
+
+    esc-focus-timer := Timer {
+        interval: 0ms;
+        running: root.esc-focus-pending;
+        triggered => {
+            if (root.is-open) { esc-scope.focus(); }
+            root.esc-focus-pending = false;
+        }
+    }
+
+    esc-scope := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.cancel();
+                accept
+            } else {
+                reject
+            }
+        }
+    }
 
     Rectangle {
         width: root.large-detail ? min(parent.width - 40px, 1160px) : 380px;
