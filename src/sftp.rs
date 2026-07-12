@@ -34,11 +34,11 @@ use crate::config::{AuthMethod, Session};
 use crate::i18n::t;
 use crate::ssh::{format_mtime, format_size, RemoteEntry, RemoteTreeNode, SessionEvent};
 
-const SFTP_UI_PAGE_SIZE: usize = 500;
-const SFTP_TREE_CHILD_LIMIT: usize = 50;
-const SFTP_LOAD_ALL_PATH: &str = "__MEATSHELL_LOAD_ALL__";
+const SFTP_TREE_CHILD_LIMIT: usize = 30;
 const SFTP_TREE_LOAD_MORE_NAME: &str = "加载全部...";
 const SFTP_TREE_LOAD_MORE_MARKER: &str = "__MEATSHELL_TREE_LOAD_MORE__";
+const SFTP_TREE_COLLAPSE_NAME: &str = "⏫收起";
+const SFTP_TREE_COLLAPSE_MARKER: &str = "__MEATSHELL_TREE_COLLAPSE__";
 const SFTP_DIR_LIST_CACHE_CAP: usize = 64;
 
 #[derive(Default)]
@@ -119,22 +119,21 @@ fn is_tree_load_more_path(path: &str) -> bool {
     path.ends_with(SFTP_TREE_LOAD_MORE_MARKER)
 }
 
-fn paged_entries(entries: &[RemoteEntry], visible: usize) -> Vec<RemoteEntry> {
-    let shown = visible.min(entries.len());
-    let mut out: Vec<RemoteEntry> = entries.iter().take(shown).cloned().collect();
-    if shown < entries.len() {
-        out.push(RemoteEntry {
-            name: "加载全部...".to_string(),
-            full_path: SFTP_LOAD_ALL_PATH.to_string(),
-            is_dir: false,
-            size: 0,
-            modified: 0,
-            mode: 0,
-            owner: String::new(),
-            group: String::new(),
-        });
+fn tree_collapse_path(parent: &str) -> String {
+    if parent == "/" {
+        format!("/{SFTP_TREE_COLLAPSE_MARKER}")
+    } else {
+        format!("{}/{}", parent.trim_end_matches('/'), SFTP_TREE_COLLAPSE_MARKER)
     }
-    out
+}
+
+fn is_tree_collapse_path(path: &str) -> bool {
+    path.ends_with(SFTP_TREE_COLLAPSE_MARKER)
+}
+
+fn paged_entries(entries: &[RemoteEntry], visible: usize) -> Vec<RemoteEntry> {
+    let _ = visible;
+    entries.to_vec()
 }
 
 fn emit_paged_entries(
@@ -143,19 +142,11 @@ fn emit_paged_entries(
     entries: &[RemoteEntry],
     visible: usize,
 ) {
-    let shown = visible.min(entries.len());
     let _ = events.send(SessionEvent::SftpEntries {
         path: path.to_string(),
         entries: paged_entries(entries, visible),
     });
-    if shown < entries.len() {
-        let _ = events.send(SessionEvent::SftpStatus(format!(
-            "{}    已显示 {} / {}",
-            path, shown, entries.len()
-        )));
-    } else {
-        let _ = events.send(SessionEvent::SftpStatus(path.to_string()));
-    }
+    let _ = events.send(SessionEvent::SftpStatus(path.to_string()));
 }
 
 fn with_tree_load_more(
@@ -173,18 +164,46 @@ fn with_tree_load_more(
     children
 }
 
-fn tree_children_from_entries(parent: &str, entries: &[RemoteEntry]) -> Vec<TreeChild> {
+fn tree_children_from_entries(
+    parent: &str,
+    entries: &[RemoteEntry],
+    expanded: &std::collections::HashSet<String>,
+    visible: usize,
+) -> Vec<TreeChild> {
     let total_dirs = entries.iter().filter(|e| e.is_dir).count();
-    let dirs: Vec<TreeChild> = entries
+    let shown_dirs = visible.min(total_dirs);
+    let mut dirs: Vec<TreeChild> = entries
         .iter()
         .filter(|e| e.is_dir)
-        .take(SFTP_TREE_CHILD_LIMIT)
+        .take(shown_dirs)
         .map(|e| TreeChild {
             path: e.full_path.clone(),
             is_dir: true,
         })
         .collect();
-    with_tree_load_more(parent, dirs, total_dirs, SFTP_TREE_CHILD_LIMIT)
+    // The tree normally caps a directory to keep huge folders responsive. Do
+    // not let that cap hide a child the user already expanded, otherwise a
+    // refresh or return-from-child makes its visible subtree disappear.
+    for entry in entries
+        .iter()
+        .filter(|e| e.is_dir)
+        .skip(shown_dirs)
+        .filter(|e| expanded.contains(&e.full_path))
+    {
+        dirs.push(TreeChild {
+            path: entry.full_path.clone(),
+            is_dir: true,
+        });
+    }
+    if visible == usize::MAX && total_dirs > SFTP_TREE_CHILD_LIMIT {
+        dirs.push(TreeChild {
+            path: tree_collapse_path(parent),
+            is_dir: false,
+        });
+        dirs
+    } else {
+        with_tree_load_more(parent, dirs, total_dirs, shown_dirs)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,10 +215,8 @@ fn tree_children_from_entries(parent: &str, entries: &[RemoteEntry]) -> Vec<Tree
 pub enum SftpCommand {
     /// List the contents of a remote directory.
     ListDir(String),
-    /// Refresh button: re-list the directory *and* re-sync the whole expanded
-    /// left tree, so external/own changes (deleted/created dirs) show up without
-    /// a reconnect (#189). Plain navigation uses `ListDir` to avoid the extra
-    /// per-click tree round-trips.
+    /// Refresh the right-side directory listing and the current tree node without
+    /// rebuilding unrelated expanded branches.
     RefreshDir(String),
     /// Show the next page of the current large directory in the UI.
     LoadMore,
@@ -307,9 +324,9 @@ impl SftpHandle {
         let _ = self.commands.send(SftpCommand::ListDir(path));
     }
 
-    pub fn navigate_back(&self) {
+    pub fn navigate_back(&self) -> Option<String> {
         let mut history = self.path_history.lock().unwrap();
-        let Some(path) = history.back.pop() else { return };
+        let path = history.back.pop()?;
         if let Some(current) = history.current.replace(path.clone()) {
             history.forward.push(current);
             if history.forward.len() > SFTP_PATH_HISTORY_LIMIT {
@@ -317,12 +334,13 @@ impl SftpHandle {
             }
         }
         drop(history);
-        let _ = self.commands.send(SftpCommand::ListDir(path));
+        let _ = self.commands.send(SftpCommand::ListDir(path.clone()));
+        Some(path)
     }
 
-    pub fn navigate_forward(&self) {
+    pub fn navigate_forward(&self) -> Option<String> {
         let mut history = self.path_history.lock().unwrap();
-        let Some(path) = history.forward.pop() else { return };
+        let path = history.forward.pop()?;
         if let Some(current) = history.current.replace(path.clone()) {
             history.back.push(current);
             if history.back.len() > SFTP_PATH_HISTORY_LIMIT {
@@ -330,7 +348,8 @@ impl SftpHandle {
             }
         }
         drop(history);
-        let _ = self.commands.send(SftpCommand::ListDir(path));
+        let _ = self.commands.send(SftpCommand::ListDir(path.clone()));
+        Some(path)
     }
     pub fn refresh_dir(&self, path: String) {
         let _ = self.commands.send(SftpCommand::RefreshDir(path));
@@ -516,6 +535,8 @@ fn build_tree_nodes(
 ) {
     let name = if is_tree_load_more_path(path) {
         SFTP_TREE_LOAD_MORE_NAME.to_string()
+    } else if is_tree_collapse_path(path) {
+        SFTP_TREE_COLLAPSE_NAME.to_string()
     } else if path == "/" {
         "/".to_string()
     } else {
@@ -525,9 +546,9 @@ fn build_tree_nodes(
     // Unknown folders stay arrowless until the user visits/loads them. Once a
     // folder has been loaded into the tree cache, show the arrow when it has
     // any visible child entry (file or folder).
-    let is_load_more = is_tree_load_more_path(path);
-    let has_children = is_dir && !is_load_more && children.map(|c| !c.is_empty()).unwrap_or(false);
-    let is_expanded = is_dir && !is_load_more && expanded.contains(path);
+    let is_control = is_tree_load_more_path(path) || is_tree_collapse_path(path);
+    let has_children = is_dir && !is_control && children.map(|c| !c.is_empty()).unwrap_or(false);
+    let is_expanded = is_dir && !is_control && expanded.contains(path);
     nodes.push(RemoteTreeNode {
         path: path.to_string(),
         name,
@@ -858,7 +879,6 @@ async fn run_sftp(
 
     let mut current_list_path = String::new();
     let mut current_list_entries: Vec<RemoteEntry> = Vec::new();
-    let mut current_list_visible = SFTP_UI_PAGE_SIZE;
     let list_cache = Arc::new(Mutex::new(DirListCache::default()));
 
     // Resolve the home directory and do an initial listing.
@@ -877,12 +897,11 @@ async fn run_sftp(
             store_dir_cache(&list_cache, home.clone(), &entries);
             current_list_path = home.clone();
             current_list_entries = entries;
-            current_list_visible = SFTP_UI_PAGE_SIZE;
             emit_paged_entries(
                 &events,
                 &current_list_path,
                 &current_list_entries,
-                current_list_visible,
+                usize::MAX,
             );
         }
         Err(e) => {
@@ -896,6 +915,8 @@ async fn run_sftp(
     let mut tree_dirs: std::collections::HashMap<String, Vec<TreeChild>> =
         std::collections::HashMap::new();
     let mut tree_expanded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut tree_visible_by_path: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut move_tree_expanded: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
@@ -990,12 +1011,11 @@ async fn run_sftp(
                     Ok(entries) => {
                         current_list_path = path.clone();
                         current_list_entries = entries;
-                        current_list_visible = SFTP_UI_PAGE_SIZE;
                         emit_paged_entries(
                             &events,
                             &current_list_path,
                             &current_list_entries,
-                            current_list_visible,
+                            usize::MAX,
                         );
                         // The user has now visited this directory, so make its
                         // children known to the left tree as well. This keeps
@@ -1004,7 +1024,15 @@ async fn run_sftp(
                         // directory actually contains visible files/folders.
                         tree_dirs.insert(
                             current_list_path.clone(),
-                            tree_children_from_entries(&current_list_path, &current_list_entries),
+                            tree_children_from_entries(
+                                &current_list_path,
+                                &current_list_entries,
+                                &tree_expanded,
+                                tree_visible_by_path
+                                    .get(&current_list_path)
+                                    .copied()
+                                    .unwrap_or(SFTP_TREE_CHILD_LIMIT),
+                            ),
                         );
                         reveal_tree_path(&sftp, &path, &mut tree_dirs, &mut tree_expanded)
                             .await;
@@ -1018,7 +1046,9 @@ async fn run_sftp(
             }
 
             SftpCommand::RefreshDir(path) => {
-                // File panel — same as ListDir.
+                // Refresh the current tree node only. Rebuilding every expanded
+                // branch can make unrelated nodes disappear while capped children
+                // are being re-fetched.
                 let _ = events.send(SessionEvent::SftpStatus(format!(
                     "{} {}...",
                     t("加载", "Loading"),
@@ -1030,22 +1060,24 @@ async fn run_sftp(
                         store_dir_cache(&list_cache, path.clone(), &entries);
                         current_list_path = path.clone();
                         current_list_entries = entries;
-                        current_list_visible = SFTP_UI_PAGE_SIZE;
                         emit_paged_entries(
                             &events,
                             &current_list_path,
                             &current_list_entries,
-                            current_list_visible,
+                            usize::MAX,
                         );
                         tree_dirs.insert(
                             current_list_path.clone(),
-                            tree_children_from_entries(&current_list_path, &current_list_entries),
+                            tree_children_from_entries(
+                                &current_list_path,
+                                &current_list_entries,
+                                &tree_expanded,
+                                tree_visible_by_path
+                                    .get(&current_list_path)
+                                    .copied()
+                                    .unwrap_or(SFTP_TREE_CHILD_LIMIT),
+                            ),
                         );
-                        let expanded: Vec<String> = tree_expanded.iter().cloned().collect();
-                        for dir in expanded {
-                            let dirs = list_tree_children_impl(&sftp, &dir).await.unwrap_or_default();
-                            tree_dirs.insert(dir, dirs);
-                        }
                         emit_tree(&tree_dirs, &tree_expanded, &events);
                         emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
                     }
@@ -1057,34 +1089,44 @@ async fn run_sftp(
 
             SftpCommand::LoadMore => {
                 if !current_list_path.is_empty() {
-                    current_list_visible = (current_list_visible + SFTP_UI_PAGE_SIZE)
-                        .min(current_list_entries.len());
                     emit_paged_entries(
                         &events,
                         &current_list_path,
                         &current_list_entries,
-                        current_list_visible,
+                        usize::MAX,
                     );
                 }
             }
 
             SftpCommand::LoadAll => {
                 if !current_list_path.is_empty() {
-                    current_list_visible = current_list_entries.len();
                     emit_paged_entries(
                         &events,
                         &current_list_path,
                         &current_list_entries,
-                        current_list_visible,
+                        usize::MAX,
                     );
                 }
             }
 
             SftpCommand::LoadMoreTree(path) => {
-                let parent = tree_load_more_parent(&path).unwrap_or(path);
-                let dirs = list_tree_children_page_impl(&sftp, &parent, usize::MAX)
+                let collapse = is_tree_collapse_path(&path);
+                let parent = if collapse {
+                    parent_dir(&path)
+                } else {
+                    tree_load_more_parent(&path).unwrap_or(path)
+                };
+                let visible = if collapse { SFTP_TREE_CHILD_LIMIT } else { usize::MAX };
+                let mut dirs = list_tree_children_page_impl(&sftp, &parent, visible)
                     .await
                     .unwrap_or_default();
+                if !collapse {
+                    dirs.push(TreeChild {
+                        path: tree_collapse_path(&parent),
+                        is_dir: false,
+                    });
+                }
+                tree_visible_by_path.insert(parent.clone(), visible);
                 tree_dirs.insert(parent, dirs);
                 emit_tree(&tree_dirs, &tree_expanded, &events);
                 emit_move_tree(&tree_dirs, &move_tree_expanded, &events);
@@ -3054,7 +3096,8 @@ mod sanitize_tests {
 
 #[cfg(test)]
 mod dir_list_cache_tests {
-    use super::{DirListCache, RemoteEntry};
+    use super::{tree_children_from_entries, DirListCache, RemoteEntry, SFTP_TREE_COLLAPSE_MARKER};
+    use std::collections::HashSet;
 
     fn entry(name: &str) -> RemoteEntry {
         RemoteEntry {
@@ -3067,6 +3110,26 @@ mod dir_list_cache_tests {
             owner: String::new(),
             group: String::new(),
         }
+    }
+
+    #[test]
+    fn tree_refresh_preserves_loaded_child_count() {
+        let entries: Vec<RemoteEntry> = (0..75)
+            .map(|index| RemoteEntry {
+                name: format!("dir-{index:02}"),
+                full_path: format!("/dir-{index:02}"),
+                is_dir: true,
+                size: 0,
+                modified: 0,
+                mode: 0,
+                owner: String::new(),
+                group: String::new(),
+            })
+            .collect();
+
+        let children = tree_children_from_entries("/", &entries, &HashSet::new(), usize::MAX);
+        assert_eq!(children.iter().filter(|child| child.is_dir).count(), 75);
+        assert!(children.iter().any(|child| child.path.ends_with(SFTP_TREE_COLLAPSE_MARKER)));
     }
 
     #[test]
