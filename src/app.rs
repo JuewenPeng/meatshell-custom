@@ -111,6 +111,49 @@ fn tab_title_len(title: &str) -> i32 {
         .min(i32::MAX as usize) as i32
 }
 
+type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
+/// Per-tab flag: once the user explicitly navigates via the SFTP tree or
+/// toolbar, stop auto-syncing to the terminal's `cd` path.
+/// Per-tab last cwd the SFTP panel followed (from OSC 7). Used to ignore the
+/// OSC 7 every prompt re-emits at an unchanged directory; manual SFTP
+/// navigation REMOVES the entry so the very next OSC 7 — same directory or
+/// not — snaps the panel back to the shell's cwd (cd-follow never goes stale).
+type SftpLastCwd = Arc<Mutex<HashMap<String, String>>>;
+/// Per-session, per-directory file-list scroll offsets. A single saved offset
+/// is insufficient when navigating through several nested directories.
+type SftpViewportPositions = Arc<Mutex<HashMap<String, HashMap<String, f32>>>>;
+type SftpSelectionPaths = Arc<Mutex<HashMap<String, HashMap<String, String>>>>;
+
+/// Per-tab connection status + latest remote resource sample, used to drive the
+/// sidebar for whichever tab is active.  `Arc<Mutex>` because the SSH event-pump
+/// threads update it before bouncing to the UI thread.
+#[derive(Clone, Default)]
+struct TabStatus {
+    host: String,       // "root@192.168.100.2"
+    user: String,       // effective SSH login user, for process ownership checks
+    session_id: String, // saved-session id, used to reconnect in place (#79)
+    state: u8,          // 0 = connecting, 1 = connected, 2 = disconnected
+    cpu: f32,           // 0.0..1.0
+    mem_used_kib: u64,
+    mem_total_kib: u64,
+    swap_used_kib: u64,
+    swap_total_kib: u64,
+    /// Latest per-interface rates: (name, rx_bps, tx_bps), busiest first.
+    net: Vec<(String, u64, u64)>,
+    /// Which interface drives the top sparkline (empty = auto = busiest).
+    selected_iface: String,
+    /// Ring buffer of the selected interface's total (rx+tx) bytes/sec.
+    net_hist: Vec<f32>,
+    /// Per-filesystem (mount, available_bytes, total_bytes).
+    disks: Vec<(String, u64, u64)>,
+    /// Top remote processes by CPU, for the process monitor popup (#23).
+    procs: Vec<ProcInfo>,
+    /// Detailed resource rows for the detached system-information window.
+    sys: SystemDetails,
+}
+type TabStatuses = Arc<Mutex<HashMap<String, TabStatus>>>;
+/// Last local-machine sample (shown on the welcome tab).
+type LocalSnap = Arc<Mutex<SystemSnapshot>>;
 
 fn should_block_close(exit_confirmed: bool, has_live_sessions: bool) -> bool {
     !exit_confirmed && has_live_sessions
@@ -625,6 +668,8 @@ pub fn run() -> Result<()> {
     let sftp_handles: SftpHandles = Arc::new(Mutex::new(HashMap::new()));
     // Per-tab cwd the SFTP panel last followed (see SftpLastCwd).
     let sftp_last_cwd: SftpLastCwd = Arc::new(Mutex::new(HashMap::new()));
+    let sftp_viewport_positions: SftpViewportPositions = Arc::new(Mutex::new(HashMap::new()));
+    let sftp_selection_paths: SftpSelectionPaths = Arc::new(Mutex::new(HashMap::new()));
 
     // Per-tab vt100 parsers + history logs (Arc<Mutex> so they can be cloned
     // into the thread that pumps session events into invoke_from_event_loop).
@@ -1726,6 +1771,7 @@ pub fn run() -> Result<()> {
         last_term_size.clone(),
         sftp_handles.clone(),
         sftp_last_cwd.clone(),
+        sftp_viewport_positions.clone(),
         tab_statuses.clone(),
         local_snap.clone(),
         local_net_hist.clone(),
@@ -2087,7 +2133,13 @@ pub fn run() -> Result<()> {
         sftp_handles.clone(),
         sftp_last_cwd.clone(),
     );
-    wire_sftp_callbacks(&window, sftp_handles.clone(), sftp_last_cwd.clone());
+    wire_sftp_callbacks(
+        &window,
+        sftp_handles.clone(),
+        sftp_last_cwd.clone(),
+        sftp_viewport_positions.clone(),
+        sftp_selection_paths.clone(),
+    );
     wire_key_input(
         &window,
         handles.clone(),
@@ -2100,6 +2152,7 @@ pub fn run() -> Result<()> {
             handles: handles.clone(),
             sftp_handles: sftp_handles.clone(),
             sftp_last_cwd: sftp_last_cwd.clone(),
+            sftp_viewport_positions: sftp_viewport_positions.clone(),
             bufs: bufs.clone(),
             render_gates: render_gates.clone(),
             tab_statuses: tab_statuses.clone(),
@@ -3431,6 +3484,7 @@ fn wire_session_callbacks(
     last_term_size: Arc<Mutex<(u32, u32)>>,
     sftp_handles: SftpHandles,
     sftp_last_cwd: SftpLastCwd,
+    sftp_viewport_positions: SftpViewportPositions,
     tab_statuses: TabStatuses,
     local_snap: LocalSnap,
     local_net_hist: NetHist,
@@ -4300,6 +4354,7 @@ fn wire_session_callbacks(
         let last_term_size = last_term_size.clone();
         let sftp_handles = sftp_handles.clone();
         let sftp_last_cwd = sftp_last_cwd.clone();
+        let sftp_viewport_positions = sftp_viewport_positions.clone();
         let tab_statuses = tab_statuses.clone();
         let local_snap = local_snap.clone();
         let local_net_hist = local_net_hist.clone();
@@ -4395,6 +4450,14 @@ fn wire_session_callbacks(
                 sftp_tree_focus_index: -1,
                 sftp_move_tree_focus_index: -1,
                 sftp_selected_count: 0,
+                sftp_restore_selected_path: "".into(),
+                sftp_restore_selected_row: -1,
+                sftp_restore_viewport_y: 0.0,
+                sftp_has_restore_viewport: false,
+                sftp_list_scroll_token: 0,
+                sftp_list_scroll_mode: 0,
+                sftp_navigation_pending: false,
+                sftp_navigation_target: "".into(),
                 sftp_sort_key: "".into(),
                 sftp_sort_dir: 0,
                 sftp_available: has_sftp,
@@ -4468,6 +4531,7 @@ fn wire_session_callbacks(
                 handles: handles.clone(),
                 sftp_handles: sftp_handles.clone(),
                 sftp_last_cwd: sftp_last_cwd.clone(),
+                sftp_viewport_positions: sftp_viewport_positions.clone(),
                 bufs: bufs.clone(),
                 render_gates: render_gates.clone(),
                 tab_statuses: tab_statuses.clone(),
@@ -4512,6 +4576,30 @@ fn wire_session_callbacks(
     }
 }
 
+type NetHist = Arc<Mutex<Vec<f32>>>;
+
+/// Shared connection dependencies for `start_session_in_tab`. All fields are
+/// cheap clones (Arc / Weak / Rc), so connect and in-place reconnect can both
+/// build one and spawn workers for a tab (#79).
+struct ConnectCtx {
+    weak: slint::Weak<AppWindow>,
+    runtime: Arc<Runtime>,
+    handles: Rc<RefCell<HashMap<String, SessionHandle>>>,
+    sftp_handles: SftpHandles,
+    sftp_last_cwd: SftpLastCwd,
+    sftp_viewport_positions: SftpViewportPositions,
+    bufs: TermBuffers,
+    render_gates: RenderGates,
+    tab_statuses: TabStatuses,
+    local_snap: LocalSnap,
+    local_net_hist: NetHist,
+    last_term_size: Arc<Mutex<(u32, u32)>>,
+    /// Interface setting: SFTP panel follows the terminal's cd (OSC 7).
+    sftp_follow_cd: Arc<std::sync::atomic::AtomicBool>,
+    /// Config store, so a session's jump host (#211) can be resolved by id at
+    /// connect time on the UI thread.
+    store: Rc<RefCell<ConfigStore>>,
+}
 /// Resolve a session's configured SSH jump host to the saved session it points
 /// at, ignoring a missing / dangling / self reference (#211).
 fn resolve_jump(store: &Rc<RefCell<ConfigStore>>, session: &Session) -> Option<Session> {
@@ -4596,6 +4684,7 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
         let bufs_thread = ctx.bufs.clone();
         let sftp_handles_pump = ctx.sftp_handles.clone();
         let sftp_last_cwd_pump = ctx.sftp_last_cwd.clone();
+        let sftp_viewports_pump = ctx.sftp_viewport_positions.clone();
         let rt_pump = ctx.runtime.clone();
         let tab_id_pump = tab_id.to_string();
         let statuses_pump = ctx.tab_statuses.clone();
@@ -4736,11 +4825,12 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
                 let lc_evt = local_pump.clone();
                 let nh_evt = net_pump.clone();
                 let gates_evt = render_gates_pump.clone();
+                let viewports_evt = sftp_viewports_pump.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = weak_evt.upgrade() {
                         for evt in ui_only {
                             apply_session_event_to_window(
-                                &win, &tid, evt, &bufs_evt, &gates_evt, &st_evt, &lc_evt, &nh_evt,
+                                &win, &tid, evt, &bufs_evt, &gates_evt, &st_evt, &lc_evt, &nh_evt, &viewports_evt,
                             );
                         }
                     }
@@ -4758,6 +4848,7 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
         let local_sftp = ctx.local_snap.clone();
         let net_sftp = ctx.local_net_hist.clone();
         let gates_sftp = ctx.render_gates.clone();
+        let viewports_sftp = ctx.sftp_viewport_positions.clone();
         std::thread::spawn(move || {
             let mut sftp_rx = sftp_evt_tx;
             let mut drained: Vec<SessionEvent> = Vec::new();
@@ -4784,11 +4875,12 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
                 let lc_s = local_sftp.clone();
                 let nh_s = net_sftp.clone();
                 let gates_s = gates_sftp.clone();
+                let viewports_s = viewports_sftp.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = weak_s.upgrade() {
                         for sftp_evt in ui_batch {
                             apply_session_event_to_window(
-                                &win, &tid, sftp_evt, &bufs_s, &gates_s, &st_s, &lc_s, &nh_s,
+                                &win, &tid, sftp_evt, &bufs_s, &gates_s, &st_s, &lc_s, &nh_s, &viewports_s,
                             );
                         }
                     }
@@ -4883,58 +4975,26 @@ fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
 }
 
 fn natural_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    natural_ascii_cmp(&a.to_lowercase(), &b.to_lowercase()).then_with(|| a.cmp(b))
+    a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b))
 }
 
-fn natural_ascii_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-
-    let ab = a.as_bytes();
-    let bb = b.as_bytes();
-    let mut ai = 0;
-    let mut bi = 0;
-    while ai < ab.len() && bi < bb.len() {
-        let ad = ab[ai].is_ascii_digit();
-        let bd = bb[bi].is_ascii_digit();
-        if ad && bd {
-            let a_start = ai;
-            let b_start = bi;
-            while ai < ab.len() && ab[ai].is_ascii_digit() {
-                ai += 1;
-            }
-            while bi < bb.len() && bb[bi].is_ascii_digit() {
-                bi += 1;
-            }
-
-            let mut a_sig = a_start;
-            let mut b_sig = b_start;
-            while a_sig < ai && ab[a_sig] == b'0' {
-                a_sig += 1;
-            }
-            while b_sig < bi && bb[b_sig] == b'0' {
-                b_sig += 1;
-            }
-
-            let a_len = ai - a_sig;
-            let b_len = bi - b_sig;
-            let ord = a_len
-                .cmp(&b_len)
-                .then_with(|| ab[a_sig..ai].cmp(&bb[b_sig..bi]))
-                .then_with(|| (ai - a_start).cmp(&(bi - b_start)));
-            if ord != Ordering::Equal {
-                return ord;
-            }
+fn terminal_sftp_selected_path(w: &AppWindow, tab_id: &str) -> Option<String> {
+    let terminals = w.get_terminals();
+    let terminals = terminals.as_any().downcast_ref::<VecModel<TerminalState>>()?;
+    for index in 0..terminals.row_count() {
+        let row = terminals.row_data(index)?;
+        if row.id.as_str() != tab_id {
             continue;
         }
-
-        let ord = ab[ai].cmp(&bb[bi]);
-        if ord != Ordering::Equal {
-            return ord;
+        let entries = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>()?;
+        for entry_index in 0..entries.row_count() {
+            let entry = entries.row_data(entry_index)?;
+            if entry.selected {
+                return Some(entry.full_path.to_string());
+            }
         }
-        ai += 1;
-        bi += 1;
     }
-    ab.len().cmp(&bb.len())
+    None
 }
 
 /// Push a value into a fixed-length ring buffer (newest at the end).
@@ -6729,6 +6789,7 @@ fn apply_session_event_to_window(
     statuses: &TabStatuses,
     local: &LocalSnap,
     local_net_hist: &NetHist,
+    sftp_viewport_positions: &SftpViewportPositions,
 ) {
     let tabs_rc = win.get_tabs();
     let terminals_rc = win.get_terminals();
@@ -6827,6 +6888,7 @@ fn apply_session_event_to_window(
                 statuses,
                 local,
                 local_net_hist,
+                sftp_viewport_positions,
             );
             update_tab(&|t| t.connected = false);
             update_terminal(&|t| {
@@ -6919,9 +6981,14 @@ fn apply_session_event_to_window(
             // Changing directories invalidates checked rows from the previous
             // listing, so clear the batch-selection counter immediately (#100).
             update_terminal(&|t| {
+                let changed_directory = t.sftp_path.as_str() != path;
                 t.sftp_path = path.clone().into();
                 t.sftp_loading = true;
                 t.sftp_selected_count = 0;
+                if changed_directory {
+                    t.sftp_navigation_pending = true;
+                    t.sftp_navigation_target = path.clone().into();
+                }
             });
         }
         SessionEvent::SftpEntries { path, entries } => {
@@ -6995,6 +7062,35 @@ fn apply_session_event_to_window(
                 })
                 .collect();
             update_terminal(&|t| {
+                let mut displayed_entries = slint_entries.clone();
+                let restore_selection = if t.sftp_restore_selected_path.is_empty()
+                    || parent_path(t.sftp_restore_selected_path.as_str()) != path
+                {
+                    None
+                } else {
+                    let selected_path = t.sftp_restore_selected_path.to_string();
+                    t.sftp_restore_selected_path = "".into();
+                    Some(selected_path)
+                };
+                let restored_viewport_y = restore_selection.as_ref().and_then(|_| {
+                    sftp_viewport_positions
+                        .lock()
+                        .ok()
+                        .and_then(|positions| positions.get(tab_id)?.get(&path).copied())
+                });
+                let is_parent_restore = restore_selection.is_some();
+                let mut selected_count = 0;
+                let mut selected_row = -1;
+                if let Some(selected_path) = restore_selection {
+                    for (index, entry) in displayed_entries.iter_mut().enumerate() {
+                        if entry.full_path.as_str() == selected_path {
+                            entry.selected = true;
+                            selected_count = 1;
+                            selected_row = index as i32;
+                            break;
+                        }
+                    }
+                }
                 t.sftp_path = path.clone().into();
                 // Keep the same VecModel instance when refreshing a directory.
                 // Replacing the model makes Slint's ListView recreate its viewport,
@@ -7004,12 +7100,32 @@ fn apply_session_event_to_window(
                     .as_any()
                     .downcast_ref::<VecModel<SftpEntry>>()
                 {
-                    existing.set_vec(slint_entries.clone());
+                    existing.set_vec(displayed_entries.clone());
                 } else {
-                    t.sftp_entries = ModelRc::from(Rc::new(VecModel::from(slint_entries.clone())));
+                    t.sftp_entries = ModelRc::from(Rc::new(VecModel::from(displayed_entries.clone())));
                 }
                 t.sftp_loading = false;
-                t.sftp_selected_count = 0;
+                t.sftp_selected_count = selected_count;
+                t.sftp_restore_selected_row = selected_row;
+                t.sftp_restore_viewport_y = restored_viewport_y.unwrap_or(0.0);
+                t.sftp_has_restore_viewport = restored_viewport_y.is_some();
+                let is_pending_navigation = t.sftp_navigation_pending
+                    && t.sftp_navigation_target.as_str() == path;
+                let scroll_mode = if is_parent_restore {
+                    if restored_viewport_y.is_some() { 2 } else { 3 }
+                } else if is_pending_navigation {
+                    1
+                } else {
+                    0
+                };
+                if is_pending_navigation {
+                    t.sftp_navigation_pending = false;
+                    t.sftp_navigation_target = "".into();
+                }
+                if scroll_mode != 0 {
+                    t.sftp_list_scroll_mode = scroll_mode;
+                    t.sftp_list_scroll_token += 1;
+                }
             });
         }
         SessionEvent::SftpStatus(msg) => {
@@ -7021,6 +7137,9 @@ fn apply_session_event_to_window(
             update_terminal(&|t| {
                 t.sftp_status = msg.clone().into();
                 t.sftp_loading = false;
+                t.sftp_restore_selected_path = "".into();
+                t.sftp_restore_selected_row = -1;
+                t.sftp_has_restore_viewport = false;
             });
         }
         SessionEvent::SftpFileText {
@@ -7057,6 +7176,7 @@ fn apply_session_event_to_window(
                     statuses,
                     local,
                     local_net_hist,
+                    sftp_viewport_positions,
                 );
                 update_terminal(&|t| t.sftp_status = error.clone().into());
             }
@@ -8242,11 +8362,18 @@ fn wire_tab_callbacks(
 // SFTP callbacks
 // ---------------------------------------------------------------------------
 
-fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_cwd: SftpLastCwd) {
+fn wire_sftp_callbacks(
+    window: &AppWindow,
+    sftp_handles: SftpHandles,
+    sftp_last_cwd: SftpLastCwd,
+    sftp_viewport_positions: SftpViewportPositions,
+    sftp_selection_paths: SftpSelectionPaths,
+) {
     // Navigate to a remote path (or ".." to go up one level).
     {
         let sftp_handles = sftp_handles.clone();
         let sftp_last_cwd = sftp_last_cwd.clone();
+        let sftp_selection_paths = sftp_selection_paths.clone();
         let weak = window.as_weak();
         window.on_sftp_navigate(move |tab_id: SharedString, path: SharedString| {
             let tab_id = tab_id.to_string();
@@ -8272,6 +8399,35 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
             } else {
                 path.to_string()
             };
+            if let Some(w) = weak.upgrade() {
+                if let Some(selected) = terminal_sftp_selected_path(&w, &tab_id) {
+                    if let Ok(mut paths) = sftp_selection_paths.lock() {
+                        paths.entry(tab_id.clone()).or_default().insert(current.clone(), selected);
+                    }
+                }
+                let terminals_rc = w.get_terminals();
+                if let Some(terminals) = terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>() {
+                    for i in 0..terminals.row_count() {
+                        let Some(mut row) = terminals.row_data(i) else { continue };
+                        if row.id.as_str() == tab_id {
+                            row.sftp_restore_selected_path = if path == ".." && current != "/" {
+                                sftp_selection_paths.lock().ok()
+                                    .and_then(|paths| paths.get(&tab_id)?.get(&resolved).cloned())
+                                    .unwrap_or(current.clone()).into()
+                            } else { "".into() };
+                            // Force the restored row to transition on the way
+                            // back, even when it is the same row as last time.
+                            row.sftp_restore_selected_row = -1;
+                            row.sftp_has_restore_viewport = false;
+                            row.sftp_navigation_pending = true;
+                            row.sftp_navigation_target = resolved.clone().into();
+                            row.sftp_loading = true;
+                            terminals.set_row_data(i, row);
+                            break;
+                        }
+                    }
+                }
+            }
             // Forget the followed cwd so the next OSC 7 — even at an unchanged
             // directory — snaps the panel back to the shell's cwd; manual
             // navigation never permanently disables cd-follow.
@@ -8284,21 +8440,94 @@ fn wire_sftp_callbacks(window: &AppWindow, sftp_handles: SftpHandles, sftp_last_
         });
     }
     {
+        let sftp_viewport_positions = sftp_viewport_positions.clone();
+        window.on_sftp_remember_list_position(
+            move |tab_id: SharedString, path: SharedString, viewport_y: f32| {
+                if let Ok(mut positions) = sftp_viewport_positions.lock() {
+                    positions
+                        .entry(tab_id.to_string())
+                        .or_default()
+                        .insert(path.to_string(), viewport_y);
+                }
+            },
+        );
+    }
+    {
         let sftp_handles = sftp_handles.clone();
+        let sftp_selection_paths = sftp_selection_paths.clone();
+        let weak = window.as_weak();
         window.on_sftp_navigate_back(move |tab_id: SharedString| {
-            if let Ok(handles) = sftp_handles.lock() {
-                if let Some(h) = handles.get(tab_id.as_str()) {
-                    h.navigate_back();
+            let tab_id = tab_id.to_string();
+            let target = if let Ok(handles) = sftp_handles.lock() {
+                handles.get(&tab_id).and_then(|h| h.navigate_back())
+            } else { None };
+            let Some(target) = target else { return };
+            let Some(w) = weak.upgrade() else { return };
+            let current_paths = terminal_sftp_paths(&w);
+            if let Some(current) = current_paths.get(&tab_id) {
+                if let Some(selected) = terminal_sftp_selected_path(&w, &tab_id) {
+                    if let Ok(mut paths) = sftp_selection_paths.lock() {
+                        paths.entry(tab_id.clone()).or_default().insert(current.clone(), selected);
+                    }
+                }
+            }
+            let restore = sftp_selection_paths.lock().ok()
+                .and_then(|paths| paths.get(&tab_id)?.get(&target).cloned())
+                .unwrap_or_default();
+            let terminals = w.get_terminals();
+            if let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() {
+                for index in 0..model.row_count() {
+                    let Some(mut row) = model.row_data(index) else { continue };
+                    if row.id.as_str() == tab_id {
+                        row.sftp_restore_selected_path = restore.into();
+                        row.sftp_restore_selected_row = -1;
+                        row.sftp_has_restore_viewport = false;
+                        row.sftp_navigation_pending = true;
+                        row.sftp_navigation_target = target.into();
+                        row.sftp_loading = true;
+                        model.set_row_data(index, row);
+                        break;
+                    }
                 }
             }
         });
     }
     {
         let sftp_handles = sftp_handles.clone();
+        let sftp_selection_paths = sftp_selection_paths.clone();
+        let weak = window.as_weak();
         window.on_sftp_navigate_forward(move |tab_id: SharedString| {
-            if let Ok(handles) = sftp_handles.lock() {
-                if let Some(h) = handles.get(tab_id.as_str()) {
-                    h.navigate_forward();
+            let tab_id = tab_id.to_string();
+            let target = if let Ok(handles) = sftp_handles.lock() {
+                handles.get(&tab_id).and_then(|h| h.navigate_forward())
+            } else { None };
+            let Some(target) = target else { return };
+            let Some(w) = weak.upgrade() else { return };
+            let current_paths = terminal_sftp_paths(&w);
+            if let Some(current) = current_paths.get(&tab_id) {
+                if let Some(selected) = terminal_sftp_selected_path(&w, &tab_id) {
+                    if let Ok(mut paths) = sftp_selection_paths.lock() {
+                        paths.entry(tab_id.clone()).or_default().insert(current.clone(), selected);
+                    }
+                }
+            }
+            let restore = sftp_selection_paths.lock().ok()
+                .and_then(|paths| paths.get(&tab_id)?.get(&target).cloned())
+                .unwrap_or_default();
+            let terminals = w.get_terminals();
+            if let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() {
+                for index in 0..model.row_count() {
+                    let Some(mut row) = model.row_data(index) else { continue };
+                    if row.id.as_str() == tab_id {
+                        row.sftp_restore_selected_path = restore.into();
+                        row.sftp_restore_selected_row = -1;
+                        row.sftp_has_restore_viewport = false;
+                        row.sftp_navigation_pending = true;
+                        row.sftp_navigation_target = target.into();
+                        row.sftp_loading = true;
+                        model.set_row_data(index, row);
+                        break;
+                    }
                 }
             }
         });
@@ -12499,24 +12728,23 @@ mod selection_tests {
     }
 
     #[test]
-    fn sftp_name_sort_uses_natural_numeric_order() {
+    fn sftp_name_sort_uses_lexicographic_order() {
         let mut entries = vec![
-            sftp_entry("file100", false),
-            sftp_entry("file10", false),
-            sftp_entry("file2", false),
-            sftp_entry("file11", false),
-            sftp_entry("file1", false),
+            sftp_entry("2K", false),
+            sftp_entry("1K", false),
+            sftp_entry("11K", false),
+            sftp_entry("10K", false),
         ];
         sort_sftp_entries(&mut entries, "name", 1);
         assert_eq!(
             sftp_names(&entries),
-            vec!["file1", "file2", "file10", "file11", "file100"]
+            vec!["10K", "11K", "1K", "2K"]
         );
 
         sort_sftp_entries(&mut entries, "name", -1);
         assert_eq!(
             sftp_names(&entries),
-            vec!["file100", "file11", "file10", "file2", "file1"]
+            vec!["2K", "1K", "11K", "10K"]
         );
     }
 
