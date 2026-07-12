@@ -189,6 +189,8 @@ export component TerminalView inherits Rectangle {
     callback cycle-tab(bool /* reverse */);
     callback terminal-resize(float, float);
     callback sftp-navigate(string);
+    callback sftp-navigate-back();
+    callback sftp-navigate-forward();
     callback sftp-download(string);
     callback sftp-archive-download(string);
     callback sftp-upload-clicked(string, bool);
@@ -1671,6 +1673,8 @@ export component TerminalView inherits Rectangle {
                 }
             }
             navigate(path)      => { root.sftp-navigate(path); }
+            navigate-back()     => { root.sftp-navigate-back(); }
+            navigate-forward()  => { root.sftp-navigate-forward(); }
             download(path)      => { root.sftp-download(path); }
             archive-download(path) => { root.sftp-archive-download(path); }
             upload-clicked(dir, folder) => { root.sftp-upload-clicked(dir, folder); }

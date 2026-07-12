@@ -270,12 +270,66 @@ pub enum SftpCommand {
 /// Handle retained by the UI to drive a running SFTP worker.
 pub struct SftpHandle {
     pub commands: UnboundedSender<SftpCommand>,
+    path_history: Mutex<PathHistory>,
     #[allow(dead_code)]
     pub join: JoinHandle<()>,
 }
 
+#[derive(Default)]
+struct PathHistory {
+    current: Option<String>,
+    back: Vec<String>,
+    forward: Vec<String>,
+}
+
+const SFTP_PATH_HISTORY_LIMIT: usize = 20;
+
 impl SftpHandle {
     pub fn list_dir(&self, path: String) {
+        let _ = self.commands.send(SftpCommand::ListDir(path));
+    }
+
+    pub fn navigate_to(&self, current: String, path: String) {
+        let mut history = self.path_history.lock().unwrap();
+        if history.current.is_none() {
+            history.current = Some(current);
+        }
+        if history.current.as_deref() != Some(path.as_str()) {
+            if let Some(current) = history.current.replace(path.clone()) {
+                history.back.push(current);
+                if history.back.len() > SFTP_PATH_HISTORY_LIMIT {
+                    history.back.remove(0);
+                }
+            }
+            history.forward.clear();
+        }
+        drop(history);
+        let _ = self.commands.send(SftpCommand::ListDir(path));
+    }
+
+    pub fn navigate_back(&self) {
+        let mut history = self.path_history.lock().unwrap();
+        let Some(path) = history.back.pop() else { return };
+        if let Some(current) = history.current.replace(path.clone()) {
+            history.forward.push(current);
+            if history.forward.len() > SFTP_PATH_HISTORY_LIMIT {
+                history.forward.remove(0);
+            }
+        }
+        drop(history);
+        let _ = self.commands.send(SftpCommand::ListDir(path));
+    }
+
+    pub fn navigate_forward(&self) {
+        let mut history = self.path_history.lock().unwrap();
+        let Some(path) = history.forward.pop() else { return };
+        if let Some(current) = history.current.replace(path.clone()) {
+            history.back.push(current);
+            if history.back.len() > SFTP_PATH_HISTORY_LIMIT {
+                history.back.remove(0);
+            }
+        }
+        drop(history);
         let _ = self.commands.send(SftpCommand::ListDir(path));
     }
     pub fn refresh_dir(&self, path: String) {
@@ -438,6 +492,7 @@ pub fn spawn_sftp(
     });
     SftpHandle {
         commands: cmd_tx,
+        path_history: Mutex::new(PathHistory::default()),
         join,
     }
 }
@@ -881,7 +936,32 @@ async fn run_sftp(
     }
 
     // --- Command loop -------------------------------------------------------
-    while let Some(cmd) = commands.recv().await {
+    // A slow directory listing blocks this worker. Coalesce consecutive view
+    // requests that accumulated while it ran so only the latest destination is
+    // opened; mutations and transfers retain their original ordering.
+    let mut deferred_commands = std::collections::VecDeque::new();
+    loop {
+        let cmd = if let Some(cmd) = deferred_commands.pop_front() {
+            cmd
+        } else if let Some(cmd) = commands.recv().await {
+            cmd
+        } else {
+            break;
+        };
+        let cmd = if matches!(&cmd, SftpCommand::ListDir(_) | SftpCommand::RefreshDir(_)) {
+            let mut latest = cmd;
+            while let Ok(next) = commands.try_recv() {
+                if matches!(&next, SftpCommand::ListDir(_) | SftpCommand::RefreshDir(_)) {
+                    latest = next;
+                } else {
+                    deferred_commands.push_back(next);
+                    break;
+                }
+            }
+            latest
+        } else {
+            cmd
+        };
         match cmd {
             SftpCommand::Close => break,
 
