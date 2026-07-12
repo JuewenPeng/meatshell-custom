@@ -179,7 +179,11 @@ async fn run_telnet(
                         let _ = wr.write_all(&naws_subneg(cols, rows)).await;
                         let _ = wr.flush().await;
                     }
-                    Some(SessionCommand::AddTunnel { .. }) | Some(SessionCommand::StopTunnel(_)) => {}
+                    Some(SessionCommand::AddTunnel { .. })
+                    | Some(SessionCommand::StopTunnel(_))
+                    | Some(SessionCommand::ClearFailedTunnels)
+                    | Some(SessionCommand::TunnelStarted(_))
+                    | Some(SessionCommand::TunnelFailed(_)) => {}
                     Some(SessionCommand::KillProcess { reply, .. }) => {
                         let _ = reply.send(crate::ssh::ProcessKillResult {
                             success: false,

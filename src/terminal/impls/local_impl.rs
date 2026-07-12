@@ -152,7 +152,11 @@ async fn run_local(
                     pixel_height: 0,
                 });
             }
-            SessionCommand::AddTunnel { .. } | SessionCommand::StopTunnel(_) => {}
+            SessionCommand::AddTunnel { .. }
+            | SessionCommand::StopTunnel(_)
+            | SessionCommand::ClearFailedTunnels
+            | SessionCommand::TunnelStarted(_)
+            | SessionCommand::TunnelFailed(_) => {}
             SessionCommand::KillProcess { reply, .. } => {
                 let _ = reply.send(crate::ssh::ProcessKillResult {
                     success: false,
