@@ -71,6 +71,14 @@ export struct TerminalState {
     sftp-tree-focus-index: int, // visible index of current SFTP path in the flat tree
     sftp-move-tree-focus-index: int, // visible index of current SFTP path in the move dialog tree
     sftp-selected-count: int,   // checked entries in the SFTP panel (#100)
+    sftp-restore-selected-path: string, // directory to reselect after navigating to its parent
+    sftp-restore-selected-row: int, // row to reveal after restoring that selection
+    sftp-restore-viewport-y: length,
+    sftp-has-restore-viewport: bool,
+    sftp-list-scroll-token: int,
+    sftp-list-scroll-mode: int,
+    sftp-navigation-pending: bool,
+    sftp-navigation-target: string,
     sftp-sort-key: string,      // ""|"name"|"size"|"modified" (#248)
     sftp-sort-dir: int,         // 0 default / 1 asc / -1 desc (#248)
     sftp-available: bool,       // false for local/serial/telnet sessions
@@ -164,7 +172,7 @@ component IconBtn inherits Rectangle {
     border-radius: Theme.radius-sm;
     background: ta.has-hover || root.active ? Theme.topbar-hover : transparent;
     tooltip-delay := Timer {
-        interval: 250ms;
+        interval: 500ms;
         running: ta.has-hover && root.tooltip != "" && !root.tooltip-visible;
         triggered => { root.tooltip-visible = true; }
     }
@@ -871,6 +879,7 @@ export component AppWindow inherits Window {
     // --- SFTP callbacks ---------------------------------------------------
     // Navigate to a new remote directory (or ".." to go up).
     callback sftp-navigate(string /* tab-id */, string /* path */);
+    callback sftp-remember-list-position(string /* tab-id */, string /* path */, length /* viewport-y */);
     callback sftp-navigate-back(string /* tab-id */);
     callback sftp-navigate-forward(string /* tab-id */);
     // Trigger a download: Rust opens a save-folder dialog then transfers.
@@ -1726,6 +1735,11 @@ export component AppWindow inherits Window {
                     sftp-move-tree-focus-index: term.sftp-move-tree-focus-index;
                     sftp-transfer-targets: root.tabs;
                     sftp-selected-count: term.sftp-selected-count;
+                    sftp-restore-selected-row: term.sftp-restore-selected-row;
+                    sftp-restore-viewport-y: term.sftp-restore-viewport-y;
+                    sftp-has-restore-viewport: term.sftp-has-restore-viewport;
+                    sftp-list-scroll-token: term.sftp-list-scroll-token;
+                    sftp-list-scroll-mode: term.sftp-list-scroll-mode;
                     sftp-sort-key: term.sftp-sort-key;
                     sftp-sort-dir: term.sftp-sort-dir;
                     sftp-available: term.sftp-available;
@@ -1757,6 +1771,7 @@ export component AppWindow inherits Window {
                     cycle-tab(reverse) => { root.cycle-tab(reverse); }
                     terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
                     sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
+                    sftp-remember-list-position(path, viewport-y) => { root.sftp-remember-list-position(term.id, path, viewport-y); }
                     sftp-navigate-back() => { root.sftp-navigate-back(term.id); }
                     sftp-navigate-forward() => { root.sftp-navigate-forward(term.id); }
                     sftp-download(path) => { root.sftp-download(term.id, path); }
