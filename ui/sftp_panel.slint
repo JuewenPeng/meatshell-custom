@@ -251,6 +251,14 @@ export component SftpPanel inherits Rectangle {
     property <int> selection-anchor-row: -1;
     property <bool> suppress-double-open: false;
     in property <int> selected-count;      // number of checked entries (#100)
+    in property <int> restore-selected-row: -1;
+    in property <length> restore-viewport-y;
+    in property <bool> has-restore-viewport: false;
+    in property <int> list-scroll-token: 0;
+    in property <int> list-scroll-mode: 0;
+    property <int> file-scroll-attempts: 0;
+    property <int> file-scroll-mode: 0;
+    property <length> file-viewport-y;
     // Panel-level right-click context menu (#84). One menu for the whole list:
     // an empty `menu-target` means the click landed on whitespace, which greys
     // out the item-specific actions (download/rename/etc.) but keeps new/refresh.
@@ -281,11 +289,12 @@ export component SftpPanel inherits Rectangle {
     property <length> toolbar-tooltip-width: 24px;
     property <length> toolbar-tooltip-path-left: 120px;
     property <string> load-more-label: root.lang-en ? "Load more..." : "加载更多...";
-    property <string> load-all-label: root.lang-en ? "Load all..." : "加载全部...";
+    property <string> load-all-label: root.lang-en ? "Load all" : "加载全部";
 
     // --- Callbacks ---------------------------------------------------------
     callback toggle-collapsed();    // minimise / restore the panel
     callback navigate(string);
+    callback remember-list-position(string, length);
     callback navigate-back();
     callback navigate-forward();
     callback download(string);
@@ -354,6 +363,20 @@ export component SftpPanel inherits Rectangle {
         root.focused-tree-path = root.current-path;
     }
 
+    // Rust increments this only after the new directory rows have been set.
+    // 1 = start at top, 2 = restore exact parent position, 3 = reveal selection.
+    changed list-scroll-token => {
+        if (root.list-scroll-mode != 0) {
+            root.file-scroll-mode = root.list-scroll-mode;
+            if (root.file-scroll-mode == 1) {
+                root.file-viewport-y = 0px;
+            } else if (root.file-scroll-mode == 2) {
+                root.file-viewport-y = root.restore-viewport-y;
+            }
+            root.file-scroll-attempts = 2;
+        }
+    }
+
     changed collapsed => {
         if (!root.collapsed) {
             root.scroll-path-to-end();
@@ -383,7 +406,7 @@ export component SftpPanel inherits Rectangle {
     }
 
     toolbar-tooltip-delay := Timer {
-        interval: 250ms;
+        interval: 500ms;
         running: root.toolbar-tooltip-pending-text != "";
         triggered => {
             root.toolbar-tooltip-text = root.toolbar-tooltip-pending-text;
@@ -397,6 +420,7 @@ export component SftpPanel inherits Rectangle {
 
     public function open-entry(path: string, is-dir: bool) {
         if (is-dir) {
+            root.remember-list-position(root.current-path, root.file-viewport-y);
             root.navigate(path);
         } else {
             root.open-external(path);
@@ -866,7 +890,7 @@ export component SftpPanel inherits Rectangle {
                                                 root.navigate-forward();
                                                 return;
                                             }
-                                            if (node.name == "加载全部...") {
+                                            if (node.name == "加载全部..." || node.name == "⏫收起") {
                                                 return;
                                             }
                                             if (ev.kind == PointerEventKind.down
@@ -920,7 +944,7 @@ export component SftpPanel inherits Rectangle {
                                                     root.tree-name-click-pending = true;
                                                     root.navigate(node.path);
                                                 }
-                                            } else if (node.name == "加载全部...") {
+                                            } else if (node.name == "加载全部..." || node.name == "⏫收起") {
                                                 root.tree-name-click-pending = false;
                                                 root.tree-load-more(node.path);
                                             } else {
@@ -936,7 +960,7 @@ export component SftpPanel inherits Rectangle {
                                                 root.navigate-forward();
                                                 return;
                                             }
-                                            if (node.name == "加载全部...") {
+                                            if (node.name == "加载全部..." || node.name == "⏫收起") {
                                                 return;
                                             }
                                             if (ev.kind == PointerEventKind.down
@@ -958,7 +982,7 @@ export component SftpPanel inherits Rectangle {
 
                                     Text {
                                         x: 2px;
-                                        text: node.depth == 0 ? "/" : (node.name == "加载全部..." ? "...    " + root.load-all-label : (node.is-dir ? (node.expanded ? "📂 " : "📁 ") + node.name : "📄 " + node.name));
+                                        text: node.depth == 0 ? "/" : (node.name == "加载全部..." ? "⏬ " + root.load-all-label : (node.name == "⏫收起" ? node.name : (node.is-dir ? (node.expanded ? "📂 " : "📁 ") + node.name : "📄 " + node.name)));
                                         color: node.path == root.current-path
                                             ? Theme.accent
                                             : (node.is-dir ? Theme.text-primary : Theme.text-secondary);
@@ -1265,6 +1289,7 @@ export component SftpPanel inherits Rectangle {
                         width: parent.width;
                         height: parent.height;
                         viewport-width: self.width;
+                        viewport-y <=> root.file-viewport-y;
                         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
 
@@ -1366,7 +1391,7 @@ export component SftpPanel inherits Rectangle {
                                     if entry.full-path == "__MEATSHELL_LOAD_MORE__" || entry.full-path == "__MEATSHELL_LOAD_ALL__" : Text {
                                         x: 6px;
                                         width: parent.width - 12px;
-                                        text: entry.full-path == "__MEATSHELL_LOAD_MORE__" ? "... " + root.load-more-label : "...    " + root.load-all-label;
+                                        text: entry.full-path == "__MEATSHELL_LOAD_MORE__" ? "... " + root.load-more-label : "⏬ " + root.load-all-label;
                                         color: Theme.text-primary;
                                         font-size: Theme.fs-sm;
                                         overflow: elide;
@@ -1422,6 +1447,28 @@ export component SftpPanel inherits Rectangle {
                                         color: Theme.text-muted; font-size: Theme.fs-xs; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
                                 }
                             }
+                        }
+                    }
+
+                    file-scroll-timer := Timer {
+                        interval: 16ms;
+                        running: root.file-scroll-attempts > 0;
+                        triggered => {
+                            if (root.file-scroll-mode == 1) {
+                                file-list.viewport-y = 0px;
+                            } else if (root.file-scroll-mode == 2) {
+                                let bottom-y = min(0px,
+                                    file-list.height - root.entries.length * 24px);
+                                file-list.viewport-y = max(bottom-y,
+                                    min(0px, root.restore-viewport-y));
+                            } else if (root.file-scroll-mode == 3 && root.restore-selected-row >= 0) {
+                                let row-top = root.restore-selected-row * 24px;
+                                let desired-y = file-list.height / 4 - row-top - 12px;
+                                let bottom-y = min(0px,
+                                    file-list.height - root.entries.length * 24px);
+                                file-list.viewport-y = max(bottom-y, min(0px, desired-y));
+                            }
+                            root.file-scroll-attempts -= 1;
                         }
                     }
 
