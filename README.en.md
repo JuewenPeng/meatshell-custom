@@ -10,7 +10,7 @@ the tens-of-MB range of a native binary.
 
 ## Custom Version Notes
 
-This branch is based on the original meatshell project with a few custom changes, including feature enhancements, interaction improvements, and bug fixes. The rest of this README is kept as close to the upstream version as possible.
+This branch is based on the original meatshell project with several custom changes, including feature enhancements, interaction improvements, and bug fixes. The rest of this README is kept as close to the upstream version as possible.
 
 ### Changes and Improvements
 
