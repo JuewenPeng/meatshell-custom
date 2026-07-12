@@ -402,7 +402,7 @@ fn migrate_defaults(cfg: &mut ConfigFile) -> bool {
     true
 }
 fn default_sidebar_width() -> f32 {
-    220.0
+    240.0
 }
 fn default_sidebar_height() -> f32 {
     240.0
