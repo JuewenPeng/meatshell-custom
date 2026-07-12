@@ -497,3 +497,9 @@ msgstr "Copied"
 
 msgid "Clear sort"
 msgstr "Clear sort"
+
+msgid "Files"
+msgstr "Files"
+
+msgid "Tunnels"
+msgstr "Tunnels"
