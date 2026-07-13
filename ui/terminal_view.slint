@@ -2014,7 +2014,7 @@ export component TerminalView inherits Rectangle {
                 }
             }
         }
-        if root.sftp-collapsed && !root.sftp-horizontal : DockExpandButton {
+        if root.sftp-available && root.sftp-collapsed && !root.sftp-horizontal : DockExpandButton {
             x: root.sftp-dock == "bottom" ? 0px : 0px;
             y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
             width: parent.width;

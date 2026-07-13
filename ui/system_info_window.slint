@@ -61,6 +61,41 @@ component CellBox inherits Rectangle {
     }
 }
 
+// Explicit column geometry keeps headers and data aligned regardless of each
+// cell's text length. HorizontalLayout otherwise includes a cell's preferred
+// text width before distributing stretch, making rows drift apart.
+component TableCells inherits Rectangle {
+    in property <string> c1;
+    in property <string> c2;
+    in property <string> c3;
+    in property <string> c4;
+    in property <string> c5;
+    in property <bool> muted: false;
+    in property <float> c1w: 0.2;
+    in property <float> c2w: 0.2;
+    in property <float> c3w: 0.2;
+    in property <float> c4w: 0.2;
+    in property <float> c5w: 0.2;
+
+    CellBox { x: 0px; width: parent.width * root.c1w; height: parent.height; text: root.c1; muted: root.muted; }
+    CellBox { x: parent.width * root.c1w; width: parent.width * root.c2w; height: parent.height; text: root.c2; muted: root.muted; }
+    CellBox { x: parent.width * (root.c1w + root.c2w); width: parent.width * root.c3w; height: parent.height; text: root.c3; muted: root.muted; }
+    CellBox { x: parent.width * (root.c1w + root.c2w + root.c3w); width: parent.width * root.c4w; height: parent.height; text: root.c4; muted: root.muted; }
+    CellBox { x: parent.width * (root.c1w + root.c2w + root.c3w + root.c4w); width: parent.width * root.c5w; height: parent.height; text: root.c5; muted: root.muted; }
+}
+
+component PairCells inherits Rectangle {
+    in property <string> c1;
+    in property <string> c2;
+    in property <string> c3;
+    in property <string> c4;
+
+    CellBox { x: 0px; width: parent.width * 0.16; height: parent.height; text: root.c1; muted: true; }
+    CellBox { x: parent.width * 0.16; width: parent.width * 0.34; height: parent.height; text: root.c2; }
+    CellBox { x: parent.width * 0.50; width: parent.width * 0.16; height: parent.height; text: root.c3; muted: true; }
+    CellBox { x: parent.width * 0.66; width: parent.width * 0.34; height: parent.height; text: root.c4; }
+}
+
 component PairGrid inherits InfoCard {
     in property <[SysInfoRow]> rows;
     min-height: 188px;
@@ -70,6 +105,7 @@ component PairGrid inherits InfoCard {
         Rectangle {
             height: 42px;
             background: Theme.bg-elevated.with-alpha(0.48);
+            Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: Theme.border-strong; }
             Text {
                 text: root.title;
                 color: Theme.text-primary;
@@ -100,12 +136,10 @@ component PairGrid inherits InfoCard {
                     height: 1px;
                     background: Theme.border-subtle.with-alpha(0.65);
                 }
-                HorizontalLayout {
-                    spacing: 12px;
-                        CellBox { text: r.c1; muted: true; weight: 0.12; }
-                        CellBox { text: r.c2; weight: 0.38; }
-                        CellBox { text: r.c3; muted: true; weight: 0.12; }
-                        CellBox { text: r.c4; weight: 0.38; }
+                PairCells {
+                    width: parent.width;
+                    height: parent.height;
+                    c1: r.c1; c2: r.c2; c3: r.c3; c4: r.c4;
                 }
             }
         }
@@ -131,6 +165,7 @@ component TableCard inherits InfoCard {
         Rectangle {
             height: 42px;
             background: Theme.bg-elevated.with-alpha(0.48);
+            Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: Theme.border-strong; }
             Text {
                 text: root.title;
                 color: Theme.text-primary;
@@ -143,15 +178,17 @@ component TableCard inherits InfoCard {
         Rectangle {
             height: 30px;
             background: Theme.bg-root.with-alpha(0.28);
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 12px;
-                CellBox { text: root.h1; muted: true; weight: root.c1w; }
-                CellBox { text: root.h2; muted: true; weight: root.c2w; }
-                CellBox { text: root.h3; muted: true; weight: root.c3w; }
-                CellBox { text: root.h4; muted: true; weight: root.c4w; }
-                if root.c5w > 0.0 : CellBox { text: root.h5; muted: true; weight: root.c5w; }
+            Rectangle {
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: Theme.border-subtle;
+            }
+            TableCells {
+                x: 14px; width: parent.width - 28px; height: parent.height;
+                c1: root.h1; c2: root.h2; c3: root.h3; c4: root.h4; c5: root.h5;
+                muted: true;
+                c1w: root.c1w; c2w: root.c2w; c3w: root.c3w; c4w: root.c4w; c5w: root.c5w;
             }
         }
         if root.rows.length == 0 : Rectangle {
@@ -170,18 +207,14 @@ component TableCard inherits InfoCard {
             Rectangle {
                 width: parent.width;
                 height: 1px;
+                y: parent.height - self.height;
                 background: Theme.border-subtle.with-alpha(0.48);
             }
             row-ta := TouchArea {}
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 12px;
-                CellBox { text: r.c1; weight: root.c1w; }
-                CellBox { text: r.c2; weight: root.c2w; }
-                CellBox { text: r.c3; weight: root.c3w; }
-                CellBox { text: r.c4; weight: root.c4w; }
-                if root.c5w > 0.0 : CellBox { text: r.c5; weight: root.c5w; }
+            TableCells {
+                x: 14px; width: parent.width - 28px; height: parent.height;
+                c1: r.c1; c2: r.c2; c3: r.c3; c4: r.c4; c5: r.c5;
+                c1w: root.c1w; c2w: root.c2w; c3w: root.c3w; c4w: root.c4w; c5w: root.c5w;
             }
         }
     }
@@ -191,6 +224,7 @@ export component SystemInfoWindow inherits Window {
     title: "meatshell - " + @tr("System information");
     icon: @image-url("../assets/icon.png");
     in-out property <bool> dark-mode <=> Theme.dark;
+    in-out property <string> theme-variant <=> Theme.variant;
     in-out property <float> ui-scale <=> Theme.ui-scale;
     in-out property <string> ui-font-family <=> Theme.ui-font-family;
     in-out property <image> wallpaper-img <=> Theme.wallpaper;
@@ -250,7 +284,14 @@ export component SystemInfoWindow inherits Window {
             HorizontalLayout {
                 padding-left: 12px;
                 spacing: 8px;
-                Image { source: @image-url("../assets/icon.png"); width: 16px; height: 16px; vertical-alignment: center; }
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("../assets/icon.png");
+                        width: 16px;
+                        height: 16px;
+                    }
+                }
                 Text {
                     text: @tr("System information") + (root.host != "" ? "  -  " + root.host : "");
                     color: Theme.text-secondary;
@@ -289,14 +330,14 @@ export component SystemInfoWindow inherits Window {
                 }
 
                 TableCard {
-                    title: "CPU";
+                    title: @tr("CPU");
                     rows: root.cpu-info-rows;
-                    h1: @tr("Name"); h2: @tr("Cores"); h3: @tr("Frequency"); h4: @tr("Cache"); h5: @tr("Vendor") + " / BogoMips";
-                    c1w: 0.48; c2w: 0.10; c3w: 0.15; c4w: 0.16; c5w: 0.11;
+                    h1: @tr("Name"); h2: @tr("Cores"); h3: @tr("Frequency"); h4: @tr("Cache"); h5: @tr("Vendor / BogoMips");
+                    c1w: 0.34; c2w: 0.12; c3w: 0.16; c4w: 0.16; c5w: 0.22;
                 }
 
                 TableCard {
-                    title: "GPU";
+                    title: @tr("GPU");
                     rows: root.gpu-info-rows;
                     h1: @tr("Name"); h2: @tr("Vendor"); h3: @tr("Driver"); h4: @tr("Memory"); h5: "";
                     c1w: 0.32; c2w: 0.30; c3w: 0.20; c4w: 0.18; c5w: 0.0;
@@ -305,7 +346,7 @@ export component SystemInfoWindow inherits Window {
                 TableCard {
                     title: @tr("CPU usage");
                     rows: root.cpu-usage-rows;
-                    h1: @tr("User"); h2: @tr("System"); h3: "Nice"; h4: @tr("Idle"); h5: "IO / IRQ / SoftIRQ / Steal";
+                    h1: @tr("User"); h2: @tr("System"); h3: @tr("Nice"); h4: @tr("Idle"); h5: @tr("IO / IRQ / SoftIRQ / Steal");
                     c1w: 0.14; c2w: 0.14; c3w: 0.14; c4w: 0.14; c5w: 0.44;
                 }
 
@@ -342,6 +383,19 @@ export component SystemInfoWindow inherits Window {
                 }
             }
         }
+    }
+
+    // Keep the detached window visually contained against both light and dark
+    // desktops without changing the card styling inside it.
+    Rectangle {
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        x: 1px;
+        y: 1px;
+        background: transparent;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        z: 1000;
     }
 
     if root.custom-titlebar : Rectangle {
