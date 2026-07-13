@@ -536,3 +536,90 @@ msgstr "Files"
 
 msgid "Tunnels"
 msgstr "Tunnels"
+
+msgid "System information"
+msgstr "System information"
+
+msgid "Overview"
+msgstr "Overview"
+
+msgid "No data"
+msgstr "No data"
+
+msgid "CPU"
+msgstr "CPU"
+
+msgid "GPU"
+msgstr "GPU"
+
+msgid "Cores"
+msgstr "Cores"
+
+msgid "Frequency"
+msgstr "Frequency"
+
+msgid "Cache"
+msgstr "Cache"
+
+msgid "Vendor"
+msgstr "Vendor"
+
+msgid "Vendor / BogoMips"
+msgstr "Vendor / BogoMips"
+
+msgid "Driver"
+msgstr "Driver"
+
+msgid "CPU usage"
+msgstr "CPU usage"
+
+msgid "System"
+msgstr "System"
+
+msgid "Nice"
+msgstr "Nice"
+
+msgid "Idle"
+msgstr "Idle"
+
+msgid "IO / IRQ / SoftIRQ / Steal"
+msgstr "IO / IRQ / SoftIRQ / Steal"
+
+msgid "Swap"
+msgstr "Swap"
+
+msgid "Total"
+msgstr "Total"
+
+msgid "Used"
+msgstr "Used"
+
+msgid "Free"
+msgstr "Free"
+
+msgid "Usage"
+msgstr "Usage"
+
+msgid "Network interfaces"
+msgstr "Network interfaces"
+
+msgid "Sent"
+msgstr "Sent"
+
+msgid "Received"
+msgstr "Received"
+
+msgid "Send speed"
+msgstr "Send speed"
+
+msgid "Receive speed"
+msgstr "Receive speed"
+
+msgid "Filesystems"
+msgstr "Filesystems"
+
+msgid "Available"
+msgstr "Available"
+
+msgid "Mount point"
+msgstr "Mount point"

@@ -8,6 +8,12 @@ export struct DiskInfo {
     percent: float,   // used fraction 0.0..1.0
 }
 
+export struct GpuUsage {
+    label: string,
+    percent: float,
+    detail: string,
+}
+
 component StatusSwitch inherits Rectangle {
     in property <bool> on;
     callback toggled(bool);
@@ -329,6 +335,7 @@ component StatsBlock inherits VerticalLayout {
     in property <float> swap-percent;
     in property <string> mem-detail;
     in property <string> swap-detail;
+    in property <[GpuUsage]> gpus;
     callback show-system-info();
     callback show-processes();
     spacing: 6px;
@@ -380,6 +387,7 @@ component StatsBlock inherits VerticalLayout {
     StatRow { label: "CPU"; percent: root.cpu-percent; detail: ""; bar-color: Theme.accent; }
     StatRow { label: @tr("Memory"); percent: root.mem-percent; detail: root.mem-detail; bar-color: Theme.success; }
     StatRow { label: @tr("Swap"); percent: root.swap-percent; detail: root.swap-detail; bar-color: Theme.warning; }
+    for gpu in root.gpus : StatRow { label: gpu.label; percent: gpu.percent; detail: gpu.detail; bar-color: Theme.accent; }
 }
 
 // Dual network graph (active tab on top, local below).
@@ -478,6 +486,7 @@ export component Sidebar inherits Rectangle {
     in property <float> swap-percent;
     in property <string> mem-detail;
     in property <string> swap-detail;
+    in property <[GpuUsage]> gpus;
     in property <string> net-top-up;
     in property <string> net-top-down;
     in property <[float]> net-top-history;
@@ -572,6 +581,8 @@ export component Sidebar inherits Rectangle {
             resource-title: root.resource-title; proc-available: root.proc-available;
             cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
             mem-detail: root.mem-detail; swap-detail: root.swap-detail;
+            gpus: root.gpus;
+            show-system-info() => { root.show-system-info(); }
             show-processes() => { root.show-processes(); }
         }
         Rectangle { height: 1px; background: Theme.border-subtle; }
@@ -631,6 +642,7 @@ export component Sidebar inherits Rectangle {
                 proc-available: root.proc-available;
                 cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
                 mem-detail: root.mem-detail; swap-detail: root.swap-detail;
+                gpus: root.gpus;
                 show-system-info() => { root.show-system-info(); }
                 show-processes() => { root.show-processes(); }
             }
@@ -674,6 +686,7 @@ export component Sidebar inherits Rectangle {
                     proc-available: root.proc-available;
                     cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
                     mem-detail: root.mem-detail; swap-detail: root.swap-detail;
+                    gpus: root.gpus;
                     show-system-info() => { root.show-system-info(); }
                     show-processes() => { root.show-processes(); }
                 }
