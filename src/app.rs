@@ -104,13 +104,6 @@ use crate::resource::system::{format_bytes_per_sec, format_mem, SystemSampler, S
 use crate::ui::*;
 use crate::webdav::WebDavAcceptAnyCertVerifier;
 
-fn tab_title_len(title: &str) -> i32 {
-    title
-        .chars()
-        .map(|ch| if ch.is_ascii() { 1usize } else { 2usize })
-        .sum::<usize>()
-        .min(i32::MAX as usize) as i32
-}
 type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
 /// Per-tab flag: once the user explicitly navigates via the SFTP tree or
 /// toolbar, stop auto-syncing to the terminal's `cd` path.
