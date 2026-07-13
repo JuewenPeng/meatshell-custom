@@ -126,6 +126,7 @@ export struct TunnelInfo {
 
 component SftpTooltip inherits Rectangle {
     in property <string> text;
+    in property <bool> danger: false;
     in property <length> anchor-x;
     in property <length> anchor-y;
     in property <length> anchor-width: 24px;
@@ -138,7 +139,7 @@ component SftpTooltip inherits Rectangle {
         : root.anchor-x;
     width: tip-txt.preferred-width + 16px;
     height: 22px;
-    background: Theme.bg-hover;
+    background: root.danger ? Theme.danger-hover-solid : Theme.bg-hover;
     border-radius: Theme.radius-sm;
     border-width: 0px;
     border-color: Theme.border-strong;
@@ -647,7 +648,9 @@ export component SftpPanel inherits Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     opacity: root.toolbar-enabled && root.selected-count > 0 ? 1 : 0.4;
-                    background: (root.toolbar-enabled && root.selected-count > 0 && dels-ta.has-hover) ? Theme.danger.with-alpha(0.18) : transparent;
+                    background: (root.toolbar-enabled && root.selected-count > 0 && dels-ta.has-hover)
+                        ? Theme.danger-hover-solid
+                        : transparent;
                     dels-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
                         changed has-hover => {
@@ -1810,6 +1813,7 @@ export component SftpPanel inherits Rectangle {
 
     if root.toolbar-tooltip-text != "" : SftpTooltip {
         text: root.toolbar-tooltip-text;
+        danger: root.toolbar-tooltip-text == (root.lang-en ? "Delete" : "删除");
         anchor-x: root.toolbar-tooltip-x;
         anchor-y: root.toolbar-tooltip-y;
         anchor-width: root.toolbar-tooltip-width;
