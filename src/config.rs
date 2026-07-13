@@ -685,6 +685,9 @@ pub struct ConfigFile {
     /// Collapse the bottom SFTP panel on startup (#78).
     #[serde(default)]
     pub collapse_sftp_default: bool,
+    /// Whether terminal tabs show their connection-status row.
+    #[serde(default = "default_true")]
+    pub show_terminal_status_bar: bool,
     /// When session-sync is on, also mirror SFTP uploads to the other online
     /// sessions (same path, falling back to each panel's current dir).
     #[serde(default)]
@@ -1370,6 +1373,14 @@ impl ConfigStore {
 
     pub fn set_collapse_sftp_default(&mut self, v: bool) {
         self.cache.collapse_sftp_default = v;
+    }
+
+    pub fn show_terminal_status_bar(&self) -> bool {
+        self.cache.show_terminal_status_bar
+    }
+
+    pub fn set_show_terminal_status_bar(&mut self, v: bool) {
+        self.cache.show_terminal_status_bar = v;
     }
 
     /// Mirror SFTP uploads to other sessions while session-sync is on (default

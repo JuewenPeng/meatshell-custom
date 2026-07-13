@@ -92,6 +92,7 @@ component MenuItem inherits Rectangle {
 export component TerminalView inherits Rectangle {
     in property <string> tab-id;
     in property <string> status-line: @tr("Not connected");
+    in property <bool> show-status-bar: true;
     in property <[TermSpan]> spans;     // coloured runs of the visible screen
     in property <int> cursor-row;       // cursor cell (grid coords)
     in property <int> cursor-col;
@@ -413,12 +414,12 @@ export component TerminalView inherits Rectangle {
     VerticalLayout {
         spacing: 0;
 
-        // --- Status strip ---------------------------------------------------
-        Rectangle {
+        if root.show-status-bar : Rectangle {
             height: 24px;
             background: Theme.bg-panel-alt;
             HorizontalLayout {
-                padding-left: 10px; padding-right: 10px;
+                padding-left: 10px;
+                padding-right: 10px;
                 Text {
                     text: root.status-line;
                     color: Theme.text-secondary;
