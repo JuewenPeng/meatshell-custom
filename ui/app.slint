@@ -498,6 +498,8 @@ export component AppWindow inherits Window {
     // SFTP follows the terminal's cd; opt out in Interface settings.
     in-out property <bool> sftp-follow-cd: true;
     callback set-sftp-follow-cd(bool);             // apply + persist
+    in-out property <bool> show-terminal-status-bar: true;
+    callback set-show-terminal-status-bar(bool);   // apply + persist
     // Always ask where to save on each download (#87); default off.
     in-out property <bool> download-always-ask: false;
     callback set-download-always-ask(bool);        // apply + persist
@@ -1304,10 +1306,12 @@ export component AppWindow inherits Window {
             system-info-available: root.system-info-available;
             proc-available: root.proc-available;
             app-version: root.app-version;
+            show-terminal-status-bar: root.show-terminal-status-bar;
             select-net-iface(i) => { root.select-net-iface(i); }
             show-system-info() => { root.open-system-info(); }
             show-processes() => { root.open-processes(); }
             copy-host(h) => { root.copy-text(h); }   // reuse the clipboard helper (#192)
+            set-show-terminal-status-bar(v) => { root.show-terminal-status-bar = v; root.set-show-terminal-status-bar(v); }
             // Drag the sidebar header to dock it to another edge. Coordinates
             // arrive in window space; convert to dock-area-relative fractions.
             dock-drag-move(ax, ay) => {
@@ -1576,6 +1580,7 @@ export component AppWindow inherits Window {
                     height: term.id == pane.active-id ? parent.height : 0px;
                     tab-id: term.id;
                     status-line: term.status;
+                    show-status-bar: root.show-terminal-status-bar;
                     spans: term.spans;
                     cursor-row: term.cursor-row;
                     cursor-col: term.cursor-col;
@@ -1752,6 +1757,7 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     background: Theme.term-bg;
                 }
+
             }
             }
             }

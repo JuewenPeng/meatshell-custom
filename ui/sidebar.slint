@@ -8,6 +8,29 @@ export struct DiskInfo {
     percent: float,   // used fraction 0.0..1.0
 }
 
+component StatusSwitch inherits Rectangle {
+    in property <bool> on;
+    callback toggled(bool);
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.on ? Theme.accent : Theme.bg-active;
+    animate background { duration: 120ms; }
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        y: 3px;
+        x: root.on ? parent.width - self.width - 3px : 3px;
+        background: white;
+        animate x { duration: 120ms; easing: ease-out; }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.on); }
+    }
+}
+
 // --- StatRow ---------------------------------------------------------------
 // A single label / percentage / progress-bar row used for CPU / memory / swap.
 component StatRow inherits HorizontalLayout {
@@ -469,10 +492,12 @@ export component Sidebar inherits Rectangle {
     // App version string, injected from Rust (env!("CARGO_PKG_VERSION")) so it
     // always matches Cargo.toml without hand-editing this file.
     in property <string> app-version;
+    in property <bool> show-terminal-status-bar: true;
     callback select-net-iface(string);
     callback show-system-info();         // open the system-information window
     callback show-processes();           // open the process monitor popup (#23)
     callback copy-host(string);          // copy the connection IP/host to clipboard (#192)
+    callback set-show-terminal-status-bar(bool);
     // Drag-to-dock: the header strip is a grab handle; coordinates are reported
     // in window space so the AppWindow can compute the target edge (#dock).
     callback dock-drag-move(length /* abs-x */, length /* abs-y */);
@@ -525,6 +550,23 @@ export component Sidebar inherits Rectangle {
             collapse() => { root.toggle-collapse(); }
             copy-host(h) => { root.copy-host(h); }
         }
+        HorizontalLayout {
+            height: 24px;
+            padding-left: 8px;
+            padding-right: 8px;
+            Text {
+                text: @tr("Show terminal status bar");
+                color: Theme.text-secondary;
+                font-size: Theme.fs-xs;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            StatusSwitch {
+                on: root.show-terminal-status-bar;
+                toggled(v) => { root.set-show-terminal-status-bar(v); }
+            }
+        }
         Rectangle { height: 1px; background: Theme.border-subtle; }
         StatsBlock {
             resource-title: root.resource-title; proc-available: root.proc-available;
@@ -565,6 +607,23 @@ export component Sidebar inherits Rectangle {
                 dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
                 dock-drag-end() => { root.dock-drag-end(); }
                 collapse() => { root.toggle-collapse(); }
+            }
+            HorizontalLayout {
+                height: 24px;
+                padding-left: 8px;
+                padding-right: 8px;
+                Text {
+                    text: @tr("Show terminal status bar");
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                StatusSwitch {
+                    on: root.show-terminal-status-bar;
+                    toggled(v) => { root.set-show-terminal-status-bar(v); }
+                }
             }
             StatsBlock {
                 resource-title: root.resource-title;
