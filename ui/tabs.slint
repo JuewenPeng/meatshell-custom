@@ -1,10 +1,10 @@
 import { Theme } from "theme.slint";
 import { IconButton } from "widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 
 export struct TabInfo {
     id: string,
     title: string,
-    title_len: int,
     kind: string,   // "welcome" | "terminal"
     connected: bool,
 }
@@ -15,6 +15,7 @@ component SingleTab inherits Rectangle {
     in property <bool> active;
     callback selected();
     callback closed();
+    callback scrolled(int /* direction: +1 = wheel up */);
     // Drag-to-reorder (v0.5): emitted while dragging when the tab should hop one
     // slot left (-1) or right (+1). The model reorders and the tab follows.
     callback reorder(int /* dir */);
@@ -29,10 +30,13 @@ component SingleTab inherits Rectangle {
     // progress. `dragging` suppresses the select-on-release.
     property <length> grab-offset;
     property <bool> pressing;
+    property <int> pending-reorder;
     out property <bool> dragging;
 
     height: 30px;
-    width: clamp(100px, 64px + info.title_len * 7px * Theme.ui-scale, 320px);
+    min-width: 100px;
+    preferred-width: clamp(100px, title-text.preferred-width + 66px, 250px);
+    max-width: 250px;
     horizontal-stretch: 0;
     border-radius: Theme.radius-sm;
     border-width: active ? 2px : 0px;
@@ -95,8 +99,8 @@ component SingleTab inherits Rectangle {
     }
 
     HorizontalLayout {
-        width: parent.width - (info.kind != "welcome" ? 28px : 0px);
-        padding-left: 10px;
+        width: parent.width - 36px;
+        padding-left: 0px;
         padding-right: 4px;
         spacing: 8px;
         alignment: start;
@@ -113,8 +117,8 @@ component SingleTab inherits Rectangle {
         title-text := Text {
             text: info.title;
             color: active ? Theme.text-primary : Theme.text-secondary;
-            font-size: info.title_len > 24 ? 9px * Theme.ui-scale
-                : (info.title_len > 12 ? 10px * Theme.ui-scale : Theme.fs-sm);
+            font-size: Theme.fs-sm;
+            horizontal-alignment: left;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
@@ -122,9 +126,64 @@ component SingleTab inherits Rectangle {
 
     }
 
+    // Keep the tab hit area above title text so it owns the cursor and drag.
+    // The close button is declared after this area and therefore stays clickable.
+    touch := TouchArea {
+        mouse-cursor: root.pressing ? grabbing : grab;
+        scroll-event(ev) => {
+            root.scrolled(ev.delta-y > 0 ? 1 : -1);
+            accept
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.grab-offset = self.mouse-x;
+                root.pressing = true;
+                root.dragging = false;
+                root.pending-reorder = 0;
+            } else if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                root.context-requested(
+                    self.absolute-position.x + self.mouse-x,
+                    self.absolute-position.y + self.mouse-y);
+            } else if (e.kind == PointerEventKind.up) {
+                if (root.pressing && !root.dragging) {
+                    root.selected();
+                } else if (root.pressing && root.dragging) {
+                    // Do not rebuild the tab model while it owns the pointer.
+                    // Reordering on release keeps the drag capture and cursor stable.
+                    if (root.pending-reorder != 0) {
+                        root.reorder(root.pending-reorder);
+                    }
+                    root.drag-dropped(self.absolute-position.x + self.mouse-x,
+                                      self.absolute-position.y + self.mouse-y);
+                }
+                root.pressing = false;
+                root.dragging = false;
+                root.pending-reorder = 0;
+            }
+        }
+        moved => {
+            if (root.pressing) {
+                if (abs(self.mouse-x - root.grab-offset) > 5px
+                        || self.mouse-y < -6px || self.mouse-y > root.height + 6px) {
+                    root.dragging = true;
+                }
+                root.drag-moved(self.absolute-position.x + self.mouse-x,
+                                self.absolute-position.y + self.mouse-y);
+                if (self.mouse-y > -10px && self.mouse-y < root.height + 10px) {
+                    // Derive the destination from the total drag distance. The
+                    // previous incremental approach relied on a model rebuild
+                    // after each hop and otherwise kept accumulating at an edge.
+                    root.pending-reorder = round(
+                        (self.mouse-x - root.grab-offset) / (root.width + 2px));
+                }
+            }
+        }
+    }
+
     // Keep close pinned to the far right even when the title is very short.
-    if info.kind != "welcome" : IconButton {
-        glyph: "×";
+    IconButton {
+        glyph: "\u{E5CD}";
+        glyph-font-family: "Material Icons";
         size: 20px;
         x: parent.width - self.width - 6px;
         y: (parent.height - self.height) / 2;
@@ -188,27 +247,25 @@ export component TabBar inherits Rectangle {
     property <length> menu-y;
     property <string> menu-target;
 
-    height: 36px;
+    height: 42px;
     background: Theme.bg-panel-alt;
-
-    // True only when the tabs are wider than the available strip width (#122).
-    // Computed from the TabBar's own width (set by the parent), not flick.width,
-    // so showing the arrows (which shrink the flickable) can't feed back into this
-    // condition and form a binding loop. The 64px allows for the two arrows.
-    property <bool> tab-overflow:
-        strip.preferred-width > root.width - root.reserve-right - 12px;
 
     HorizontalLayout {
         padding: 3px;
         spacing: 2px;
 
         // Horizontally-scrollable strip: when the tabs overflow the available
-        // width they stay reachable by the arrows or by dragging / trackpad (#122).
-        flick := Flickable {
+        // width they stay reachable by dragging, trackpad, or the mouse wheel.
+        flick := ScrollView {
+            min-width: 0px;
+            min-height: 0px;
             horizontal-stretch: 1;
-            viewport-height: self.height;
-            viewport-width: max(self.width, strip.preferred-width);
+            viewport-height: 30px;
+            viewport-width: max(self.visible-width, strip.preferred-width);
+            horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
             strip := HorizontalLayout {
+                height: 30px;
                 spacing: 2px;
                 alignment: start;
                 for tab[i] in tabs : SingleTab {
@@ -216,6 +273,11 @@ export component TabBar inherits Rectangle {
                     active: tab.id == root.active-id;
                     selected => { root.tab-selected(tab.id); }
                     closed => { root.tab-closed(tab.id); }
+                    scrolled(direction) => {
+                        flick.viewport-x = min(0px, max(
+                            flick.visible-width - flick.viewport-width,
+                            flick.viewport-x + (direction > 0 ? 120px : -120px)));
+                    }
                     reorder(dir) => { root.tab-reorder(i, dir); }
                     context-requested(ax, ay) => {
                         root.menu-target = tab.id;
@@ -227,42 +289,18 @@ export component TabBar inherits Rectangle {
                     drag-dropped(ax, ay) => { root.tab-drag-drop(tab.id, ax, ay); }
                 }
                 if root.show-new-tab : IconButton {
-                    glyph: "+";
-                    size: 28px;
-                    y: (parent.height - self.height) / 2;
+                    glyph: "\u{E145}";
+                    glyph-font-family: "Material Icons";
+                    size: 30px;
+                    y: 0px;
                     clicked => { root.new-tab(); }
                 }
             }
         }
-
+        // Keep the trailing tab and new-tab button clear of quick connect.
+        Rectangle { width: 29px; }
         // Reserved gap for the external top-right toolbar icons (#122).
         Rectangle { width: root.reserve-right; }
-    }
-
-    // Scroll arrows are absolute overlays so toggling them can't
-    // change the layout that `tab-overflow` reads (avoids a binding loop). Shown
-    // only on overflow, masking the edge tab beneath them (#122).
-    if root.tab-overflow : Rectangle {
-        x: 3px;
-        y: (parent.height - self.height) / 2;
-        width: 26px; height: 26px;
-        background: Theme.bg-panel-alt;
-        IconButton {
-            glyph: "<"; size: 24px;
-            clicked => { flick.viewport-x = min(0px, flick.viewport-x + 120px); }
-        }
-    }
-    if root.tab-overflow : Rectangle {
-        x: root.width - root.reserve-right - 29px;
-        y: (parent.height - self.height) / 2;
-        width: 26px; height: 26px;
-        background: Theme.bg-panel-alt;
-        IconButton {
-            glyph: ">"; size: 24px;
-            clicked => {
-                flick.viewport-x = max(flick.width - flick.viewport-width, flick.viewport-x - 120px);
-            }
-        }
     }
 
     // Right-click context menu (v0.5): split this pane by peeling the clicked tab

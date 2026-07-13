@@ -276,6 +276,9 @@ msgstr "移动到"
 msgid "Status"
 msgstr "运行状态"
 
+msgid "Show terminal status bar"
+msgstr "显示终端状态栏"
+
 msgid "Memory"
 msgstr "内存"
 
