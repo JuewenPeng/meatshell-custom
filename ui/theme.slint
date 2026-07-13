@@ -106,7 +106,10 @@ export global Theme {
 
     out property <brush> success: dark ? #89d185 : #34c759;
     out property <brush> warning: dark ? #cca700 : #ff9f0a;
-    out property <brush> danger:  dark ? #f14c4c : #ff3b30;
+    property <color> base-danger: dark ? #f14c4c : #ff3b30;
+    out property <brush> danger: base-danger;
+    // Opaque equivalent of danger at 18% over the SFTP toolbar surface.
+    out property <brush> danger-hover-solid: base-bg-panel-alt.mix(base-danger, 0.82);
 
     // Terminal uses its own background so it stays readable regardless of
     // what the shell / remote app outputs via ANSI colour codes. With a
