@@ -160,7 +160,8 @@ async fn run_local(
             | SessionCommand::StopTunnel(_)
             | SessionCommand::ClearFailedTunnels
             | SessionCommand::TunnelStarted(_)
-            | SessionCommand::TunnelFailed(_) => {}
+            | SessionCommand::TunnelFailed(_)
+            | SessionCommand::SetResourceMonitor(_) => {}
             SessionCommand::Close => {
                 let _ = child.lock().unwrap().kill();
                 break;

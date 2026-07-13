@@ -183,7 +183,8 @@ async fn run_telnet(
                     | Some(SessionCommand::StopTunnel(_))
                     | Some(SessionCommand::ClearFailedTunnels)
                     | Some(SessionCommand::TunnelStarted(_))
-                    | Some(SessionCommand::TunnelFailed(_)) => {}
+                    | Some(SessionCommand::TunnelFailed(_))
+                    | Some(SessionCommand::SetResourceMonitor(_)) => {}
                     Some(SessionCommand::Close) | None => break,
                 }
             }

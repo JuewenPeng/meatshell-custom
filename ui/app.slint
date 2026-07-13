@@ -15,7 +15,7 @@ import "fonts/MeatshellMono-Bold.ttf";
 import "fonts/MaterialIcons-Regular.ttf";
 
 import { Theme } from "theme.slint";
-import { Sidebar, DiskInfo } from "sidebar.slint";
+import { Sidebar, DiskInfo, GpuUsage } from "sidebar.slint";
 import { TabBar, TabInfo } from "tabs.slint";
 import { Welcome, SessionInfo } from "welcome.slint";
 import { SessionDialog, SessionDraft, PortFwd } from "session_dialog.slint";
@@ -30,7 +30,7 @@ import { InterfacePanel } from "interface_panel.slint";
 export { ProcWindow, SystemInfoWindow }
 import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox, Palette } from "std-widgets.slint";
 
-export { SessionInfo, SessionDraft, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd }
+export { SessionInfo, SessionDraft, TabInfo, SftpEntry, SftpTreeNode, TunnelInfo, QuickCmd, PortFwd, GpuUsage }
 
 // --- TerminalState ---------------------------------------------------------
 // Per-terminal view-model exposed to Rust. A TabInfo has the metadata; the
@@ -269,6 +269,7 @@ export component AppWindow inherits Window {
     in property <float> swap-percent;
     in property <string> mem-detail;
     in property <string> swap-detail;
+    in property <[GpuUsage]> gpu-usages;
     // Dual network panel.  "top" follows the active tab (remote NIC on a
     // session tab, local on the welcome tab); "bot" is always the local machine.
     in property <string> net-top-up;        // ↑ tx rate text
@@ -1264,6 +1265,7 @@ export component AppWindow inherits Window {
             swap-percent: root.swap-percent;
             mem-detail: root.mem-detail;
             swap-detail: root.swap-detail;
+            gpus: root.gpu-usages;
             net-top-up: root.net-top-up;
             net-top-down: root.net-top-down;
             net-top-history: root.net-top-history;

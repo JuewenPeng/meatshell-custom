@@ -198,7 +198,8 @@ async fn run_serial(
             | SessionCommand::StopTunnel(_)
             | SessionCommand::ClearFailedTunnels
             | SessionCommand::TunnelStarted(_)
-            | SessionCommand::TunnelFailed(_) => {}
+            | SessionCommand::TunnelFailed(_)
+            | SessionCommand::SetResourceMonitor(_) => {}
             SessionCommand::Close => break,
         }
     }
