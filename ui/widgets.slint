@@ -5,6 +5,7 @@ import { Theme } from "theme.slint";
 // Keeps visual language consistent across the app.
 export component IconButton inherits Rectangle {
     in property <string> glyph;
+    in property <string> glyph-font-family: Theme.ui-font-family;
     in property <string> tooltip;
     in property <length> size: 28px;
     in property <brush> fg: Theme.text-secondary;
@@ -19,6 +20,7 @@ export component IconButton inherits Rectangle {
 
     Text {
         text: glyph;
+        font-family: root.glyph-font-family;
         color: touch.has-hover ? fg-hover : fg;
         font-size: Theme.fs-md;
         horizontal-alignment: center;
