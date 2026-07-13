@@ -129,7 +129,7 @@ component SingleTab inherits Rectangle {
     // Keep the tab hit area above title text so it owns the cursor and drag.
     // The close button is declared after this area and therefore stays clickable.
     touch := TouchArea {
-        mouse-cursor: root.pressing ? grabbing : grab;
+        mouse-cursor: root.dragging ? default : pointer;
         scroll-event(ev) => {
             root.scrolled(ev.delta-y > 0 ? 1 : -1);
             accept
@@ -167,14 +167,16 @@ component SingleTab inherits Rectangle {
                         || self.mouse-y < -6px || self.mouse-y > root.height + 6px) {
                     root.dragging = true;
                 }
-                root.drag-moved(self.absolute-position.x + self.mouse-x,
-                                self.absolute-position.y + self.mouse-y);
-                if (self.mouse-y > -10px && self.mouse-y < root.height + 10px) {
-                    // Derive the destination from the total drag distance. The
-                    // previous incremental approach relied on a model rebuild
-                    // after each hop and otherwise kept accumulating at an edge.
-                    root.pending-reorder = round(
-                        (self.mouse-x - root.grab-offset) / (root.width + 2px));
+                if (root.dragging) {
+                    root.drag-moved(self.absolute-position.x + self.mouse-x,
+                                    self.absolute-position.y + self.mouse-y);
+                    if (self.mouse-y > -10px && self.mouse-y < root.height + 10px) {
+                        // Derive the destination from the total drag distance. The
+                        // previous incremental approach relied on a model rebuild
+                        // after each hop and otherwise kept accumulating at an edge.
+                        root.pending-reorder = round(
+                            (self.mouse-x - root.grab-offset) / (root.width + 2px));
+                    }
                 }
             }
         }
