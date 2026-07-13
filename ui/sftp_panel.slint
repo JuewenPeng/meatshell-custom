@@ -127,18 +127,17 @@ export struct TunnelInfo {
 component SftpTooltip inherits Rectangle {
     in property <string> text;
     in property <bool> danger: false;
-    in property <length> anchor-x;
-    in property <length> anchor-y;
+    in property <bool> hover;
     in property <length> anchor-width: 24px;
     in property <length> anchor-height: 22px;
-    in property <length> path-left: 120px;
+    property <bool> visible-after-delay: false;
 
-    y: root.anchor-y + root.anchor-height + 6px;
-    x: root.anchor-x >= root.path-left
-        ? root.anchor-x + root.anchor-width - self.width
-        : root.anchor-x;
+    y: root.anchor-height + 6px;
+    x: root.anchor-width - self.width;
     width: tip-txt.preferred-width + 16px;
     height: 22px;
+    visible: root.visible-after-delay;
+    z: 100;
     background: root.danger ? Theme.danger-hover-solid : Theme.bg-hover;
     border-radius: Theme.radius-sm;
     border-width: 0px;
@@ -146,14 +145,21 @@ component SftpTooltip inherits Rectangle {
     drop-shadow-blur: 4px;
     drop-shadow-offset-y: 1px;
     drop-shadow-color: #00000060;
+    tooltip-delay := Timer {
+        interval: 500ms;
+        running: root.hover && !root.visible-after-delay;
+        triggered => { root.visible-after-delay = true; }
+    }
+    changed hover => {
+        if (!root.hover) { root.visible-after-delay = false; }
+    }
     tip-txt := Text {
         text: root.text;
         color: Theme.text-primary;
         font-size: Theme.fs-xs;
-        horizontal-alignment: left;
+        horizontal-alignment: center;
         vertical-alignment: center;
-        x: 8px;
-        width: parent.width - 16px;
+        width: parent.width;
         height: parent.height;
     }
 }
@@ -279,16 +285,6 @@ export component SftpPanel inherits Rectangle {
     property <string> tunnel-host-port: "80";
     property <length> tree-menu-x;
     property <length> tree-menu-y;
-    property <string> toolbar-tooltip-text;
-    property <string> toolbar-tooltip-pending-text;
-    property <length> toolbar-tooltip-pending-x;
-    property <length> toolbar-tooltip-pending-y;
-    property <length> toolbar-tooltip-pending-width: 24px;
-    property <length> toolbar-tooltip-pending-path-left: 120px;
-    property <length> toolbar-tooltip-x;
-    property <length> toolbar-tooltip-y;
-    property <length> toolbar-tooltip-width: 24px;
-    property <length> toolbar-tooltip-path-left: 120px;
     property <string> load-more-label: root.lang-en ? "Load more..." : "加载更多...";
     property <string> load-all-label: root.lang-en ? "Load all" : "加载全部";
 
@@ -406,43 +402,12 @@ export component SftpPanel inherits Rectangle {
         }
     }
 
-    toolbar-tooltip-delay := Timer {
-        interval: 500ms;
-        running: root.toolbar-tooltip-pending-text != "";
-        triggered => {
-            root.toolbar-tooltip-text = root.toolbar-tooltip-pending-text;
-            root.toolbar-tooltip-x = root.toolbar-tooltip-pending-x;
-            root.toolbar-tooltip-y = root.toolbar-tooltip-pending-y;
-            root.toolbar-tooltip-width = root.toolbar-tooltip-pending-width;
-            root.toolbar-tooltip-path-left = root.toolbar-tooltip-pending-path-left;
-            root.toolbar-tooltip-pending-text = "";
-        }
-    }
-
     public function open-entry(path: string, is-dir: bool) {
         if (is-dir) {
             root.remember-list-position(root.current-path, root.file-viewport-y);
             root.navigate(path);
         } else {
             root.open-external(path);
-        }
-    }
-
-    public function show-toolbar-tooltip(text: string, abs-x: length, abs-y: length, width: length) {
-        root.toolbar-tooltip-text = "";
-        root.toolbar-tooltip-pending-text = text;
-        root.toolbar-tooltip-pending-x = abs-x - root.absolute-position.x;
-        root.toolbar-tooltip-pending-y = abs-y - root.absolute-position.y;
-        root.toolbar-tooltip-pending-width = width;
-        root.toolbar-tooltip-pending-path-left = path-wrap.absolute-position.x - root.absolute-position.x;
-    }
-
-    public function hide-toolbar-tooltip(text: string) {
-        if (root.toolbar-tooltip-pending-text == text) {
-            root.toolbar-tooltip-pending-text = "";
-        }
-        if (root.toolbar-tooltip-text == text) {
-            root.toolbar-tooltip-text = "";
         }
     }
 
@@ -461,8 +426,8 @@ export component SftpPanel inherits Rectangle {
         Rectangle {
             width: root.width;
             height: 32px;
+            z: 100;
             background: Theme.bg-panel-alt;
-            clip: true;
 
             HorizontalLayout {
                 padding-left: 6px;
@@ -570,16 +535,13 @@ export component SftpPanel inherits Rectangle {
                     background: (root.toolbar-enabled && ul-ta.has-hover) ? Theme.bg-hover : transparent;
                     ul-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Upload" : "上传", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Upload" : "上传"); }
-                        }
                         clicked => { if (root.toolbar-enabled) { ul-menu.show(); } }
                     }
                     Text { text: "\u{E2C6}"; font-family: "Material Icons";
                            color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-md;
                            horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
+                    SftpTooltip { text: root.lang-en ? "Upload" : "上传"; hover: ul-ta.has-hover; }
                     ul-menu := PopupWindow {
                         x: 0; y: parent.height + 2px;
                         width: 124px;
@@ -615,15 +577,12 @@ export component SftpPanel inherits Rectangle {
                     background: (root.toolbar-enabled && root.selected-count > 0 && dls-ta.has-hover) ? Theme.bg-hover : transparent;
                     dls-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover && root.toolbar-enabled && root.selected-count > 0) { root.show-toolbar-tooltip(root.lang-en ? "Download" : "下载", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Download" : "下载"); }
-                        }
                         clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.download-selected(); } }
                     }
                     Text { text: "\u{E2C4}"; font-family: "Material Icons"; color: Theme.text-secondary;
                            font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
+                    SftpTooltip { text: root.lang-en ? "Download" : "下载"; hover: dls-ta.has-hover && root.toolbar-enabled && root.selected-count > 0; }
                 }
                 if root.panel-mode == "files" : Rectangle {
                     width: 24px; height: 22px;
@@ -632,15 +591,12 @@ export component SftpPanel inherits Rectangle {
                     background: (root.toolbar-enabled && root.selected-count > 0 && mvs-ta.has-hover) ? Theme.bg-hover : transparent;
                     mvs-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover && root.toolbar-enabled && root.selected-count > 0) { root.show-toolbar-tooltip(root.lang-en ? "Move" : "移动", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Move" : "移动"); }
-                        }
                         clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.move-selected-request(); } }
                     }
                     Text { text: "\u{E675}"; font-family: "Material Icons"; color: Theme.text-secondary;
                            font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
+                    SftpTooltip { text: root.lang-en ? "Move" : "移动"; hover: mvs-ta.has-hover && root.toolbar-enabled && root.selected-count > 0; }
                 }
                 if root.panel-mode == "files" : HorizontalLayout {
                     spacing: 6px;
@@ -653,15 +609,12 @@ export component SftpPanel inherits Rectangle {
                         : transparent;
                     dels-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover && root.toolbar-enabled && root.selected-count > 0) { root.show-toolbar-tooltip(root.lang-en ? "Delete" : "删除", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Delete" : "删除"); }
-                        }
                         clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.delete-selected(); } }
                     }
                     Text { text: "\u{E872}"; font-family: "Material Icons"; color: Theme.danger;
                            font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
+                    SftpTooltip { text: root.lang-en ? "Delete" : "删除"; danger: true; hover: dels-ta.has-hover && root.toolbar-enabled && root.selected-count > 0; }
                 }
 
                 // Copy the current path to the clipboard.
@@ -672,10 +625,6 @@ export component SftpPanel inherits Rectangle {
                     background: (root.toolbar-enabled && copy-ta.has-hover) ? Theme.bg-hover : transparent;
                     copy-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Copy path" : "复制路径", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Copy path" : "复制路径"); }
-                        }
                         clicked => {
                             if (root.toolbar-enabled) {
                                 path-input.select-all();
@@ -688,6 +637,7 @@ export component SftpPanel inherits Rectangle {
                            color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
                            horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
+                    SftpTooltip { text: root.lang-en ? "Copy path" : "复制路径"; hover: copy-ta.has-hover; }
                 }
 
                 // Paste a path from the clipboard and jump straight to it.
@@ -698,10 +648,6 @@ export component SftpPanel inherits Rectangle {
                     background: (root.toolbar-enabled && pj-ta.has-hover) ? Theme.bg-hover : transparent;
                     pj-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Paste and go" : "粘贴并跳转", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Paste and go" : "粘贴并跳转"); }
-                        }
                         clicked => {
                             if (root.toolbar-enabled) {
                                 path-input.select-all();
@@ -714,6 +660,7 @@ export component SftpPanel inherits Rectangle {
                            color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
                            horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
+                    SftpTooltip { text: root.lang-en ? "Paste and go" : "粘贴并跳转"; hover: pj-ta.has-hover; }
                 }
 
                 Rectangle {
@@ -722,16 +669,13 @@ export component SftpPanel inherits Rectangle {
                     background: (root.toolbar-enabled && up-ta.has-hover) ? Theme.bg-hover : transparent;
                     up-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Parent directory" : "上级目录", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Parent directory" : "上级目录"); }
-                        }
                         clicked => { if (root.toolbar-enabled) { root.navigate(".."); } }
                     }
                     Text { text: "\u{E5D8}"; font-family: "Material Icons";
                            color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-md;
                            horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
+                    SftpTooltip { text: root.lang-en ? "Parent directory" : "上级目录"; hover: up-ta.has-hover; }
                 }
 
                 Rectangle {
@@ -741,10 +685,6 @@ export component SftpPanel inherits Rectangle {
                     background: (root.toolbar-enabled && ref-ta.has-hover) ? Theme.bg-hover : transparent;
                     ref-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled ? pointer : default;
-                        changed has-hover => {
-                            if (self.has-hover) { root.show-toolbar-tooltip(root.lang-en ? "Refresh" : "刷新", self.absolute-position.x, self.absolute-position.y, 24px); }
-                            else { root.hide-toolbar-tooltip(root.lang-en ? "Refresh" : "刷新"); }
-                        }
                         clicked => {
                             if (root.toolbar-enabled) {
                                 root.selected-row = -1;
@@ -757,6 +697,7 @@ export component SftpPanel inherits Rectangle {
                            color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
                            horizontal-alignment: center; vertical-alignment: center;
                            width: parent.width; height: parent.height; }
+                    SftpTooltip { text: root.lang-en ? "Refresh" : "刷新"; hover: ref-ta.has-hover; }
                 }
                 }
 
@@ -1811,12 +1752,4 @@ export component SftpPanel inherits Rectangle {
         }
     }
 
-    if root.toolbar-tooltip-text != "" : SftpTooltip {
-        text: root.toolbar-tooltip-text;
-        danger: root.toolbar-tooltip-text == (root.lang-en ? "Delete" : "删除");
-        anchor-x: root.toolbar-tooltip-x;
-        anchor-y: root.toolbar-tooltip-y;
-        anchor-width: root.toolbar-tooltip-width;
-        path-left: root.toolbar-tooltip-path-left;
-    }
 }

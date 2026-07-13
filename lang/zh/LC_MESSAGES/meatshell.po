@@ -536,3 +536,90 @@ msgstr "文件"
 
 msgid "Tunnels"
 msgstr "端口转发"
+
+msgid "System information"
+msgstr "系统信息"
+
+msgid "Overview"
+msgstr "概览"
+
+msgid "No data"
+msgstr "暂无数据"
+
+msgid "CPU"
+msgstr "处理器"
+
+msgid "GPU"
+msgstr "显卡"
+
+msgid "Cores"
+msgstr "核心数"
+
+msgid "Frequency"
+msgstr "频率"
+
+msgid "Cache"
+msgstr "缓存"
+
+msgid "Vendor"
+msgstr "厂商"
+
+msgid "Vendor / BogoMips"
+msgstr "厂商 / BogoMips"
+
+msgid "Driver"
+msgstr "驱动"
+
+msgid "CPU usage"
+msgstr "CPU 使用情况"
+
+msgid "System"
+msgstr "系统"
+
+msgid "Nice"
+msgstr "Nice"
+
+msgid "Idle"
+msgstr "空闲"
+
+msgid "IO / IRQ / SoftIRQ / Steal"
+msgstr "IO / IRQ / 软中断 / Steal"
+
+msgid "Swap"
+msgstr "交换分区"
+
+msgid "Total"
+msgstr "总计"
+
+msgid "Used"
+msgstr "已用"
+
+msgid "Free"
+msgstr "空闲"
+
+msgid "Usage"
+msgstr "使用率"
+
+msgid "Network interfaces"
+msgstr "网络接口"
+
+msgid "Sent"
+msgstr "已发送"
+
+msgid "Received"
+msgstr "已接收"
+
+msgid "Send speed"
+msgstr "发送速度"
+
+msgid "Receive speed"
+msgstr "接收速度"
+
+msgid "Filesystems"
+msgstr "文件系统"
+
+msgid "Available"
+msgstr "可用"
+
+msgid "Mount point"
+msgstr "挂载点"
