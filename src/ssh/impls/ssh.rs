@@ -610,6 +610,8 @@ pub enum SessionCommand {
     TunnelStarted(String),
     /// A local or dynamic listener could not bind its requested local port.
     TunnelFailed(String),
+    /// Start or stop the separate remote resource-monitor channel.
+    SetResourceMonitor(bool),
     /// Gracefully disconnect and drop the session.
     Close,
 }
@@ -806,6 +808,8 @@ pub enum SessionEvent {
         disks: Vec<(String, u64, u64)>,
         /// Effective login name reported by the remote host (`id -un`).
         current_user: String,
+        /// NVIDIA GPUs: (name, used MiB, total MiB), one row per adapter.
+        gpus: Vec<(String, u64, u64)>,
         /// Top processes by CPU (#23). Empty if the host's `ps` is unusable.
         procs: Vec<ProcInfo>,
         /// Detailed system information for the detached system-info window.
@@ -913,6 +917,10 @@ impl SessionHandle {
 
     pub fn clear_failed_tunnels(&self) {
         let _ = self.commands.send(SessionCommand::ClearFailedTunnels);
+    }
+
+    pub fn set_resource_monitor(&self, enabled: bool) {
+        let _ = self.commands.send(SessionCommand::SetResourceMonitor(enabled));
     }
 
     pub fn close(&self) {
@@ -1187,6 +1195,7 @@ pub fn spawn_session(
     jump: Option<Session>,
     initial_cols: u32,
     initial_rows: u32,
+    resource_monitor_enabled: bool,
 ) -> (SessionHandle, UnboundedReceiver<SessionEvent>) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<SessionEvent>();
@@ -1202,6 +1211,7 @@ pub fn spawn_session(
             evt_tx_for_task.clone(),
             initial_cols,
             initial_rows,
+            resource_monitor_enabled,
         )
         .await
         {
@@ -1736,6 +1746,7 @@ async fn run_session(
     events: UnboundedSender<SessionEvent>,
     initial_cols: u32,
     initial_rows: u32,
+    resource_monitor_enabled: bool,
 ) -> Result<()> {
     let session_started = std::time::Instant::now();
     let _ = events.send(SessionEvent::Status(format!(
@@ -1946,7 +1957,7 @@ async fn run_session(
     // pid/user/pcpu/pmem/args, each line clipped to 200 chars so a giant command
     // line can't bloat the stream. A host whose `ps` lacks `--sort`/`-o` simply
     // yields nothing (2>/dev/null), degrading to an empty process list.
-    const MON_CMD: &[u8] = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; while :; do awk '/^cpu /{print}' /proc/stat; awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree|Buffers|Cached):/{print}' /proc/meminfo; cat /proc/net/dev; echo __DF__; df -kP 2>/dev/null; echo __MSTICK__; sleep 2; done\n";
+    const MON_CMD: &[u8] = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; while :; do awk '/^cpu /{print}' /proc/stat; awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree|Buffers|Cached):/{print}' /proc/meminfo; cat /proc/net/dev; echo __DF__; df -kP 2>/dev/null; echo __GPU__; nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null; echo __MSTICK__; sleep 2; done\n";
     // Detailed system information is intentionally one-shot and last priority.
     // It includes commands such as lspci/hostname that may be slow on some hosts
     // and must never delay either the terminal or the lightweight sidebar sample.
@@ -1955,6 +1966,32 @@ async fn run_session(
     // non-POSIX / Windows server) — the /proc-based loop only spews errors there
     // (#140).
     let mut mon_channel: Option<Channel<Msg>> = None;
+/* Legacy single-channel monitor retained in the conflicted commit. The
+ * lightweight resource, process, and system-info channels above are preferred.
+ */
+/*
+    const MON_CMD: &[u8] = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; while :; do awk '/^cpu /{print}' /proc/stat; awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree|Buffers|Cached):/{print}' /proc/meminfo; cat /proc/net/dev; echo __DF__; df -kP 2>/dev/null; echo __ME__; id -un 2>/dev/null; echo __PS__; ps -eo pid,user:32,pcpu,pmem,args --sort=-pcpu 2>/dev/null | head -n 41 | cut -c -200; echo __GPU__; nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null; echo __SYS__; { . /etc/os-release 2>/dev/null; echo OS=${PRETTY_NAME:-$(uname -o 2>/dev/null)}; }; echo KERNEL=$(uname -s 2>/dev/null); echo KERNEL_RELEASE=$(uname -r 2>/dev/null); echo ARCH=$(uname -m 2>/dev/null); echo HOSTNAME=$(hostname 2>/dev/null); echo IPS=$(hostname -I 2>/dev/null); echo UPTIME=$(uptime -p 2>/dev/null); echo LOAD=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null); awk -F: '/model name|Hardware/{gsub(/^[ \\t]+/,\"\",$2); print \"CPU_MODEL=\"$2; exit}' /proc/cpuinfo 2>/dev/null; echo CPU_CORES=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null); awk -F: '/cache size/{gsub(/^[ \\t]+/,\"\",$2); print \"CPU_CACHE=\"$2; exit}' /proc/cpuinfo 2>/dev/null; awk -F: '/bogomips/{gsub(/^[ \\t]+/,\"\",$2); print \"CPU_BOGO=\"$2; exit}' /proc/cpuinfo 2>/dev/null; lspci 2>/dev/null | awk -F': ' '/VGA|3D|Display/{print \"GPU=\" $2; exit}'; echo __MSTICK__; sleep 2; done\n";
+    // Skip the resource monitor entirely when shell integration is off (a
+    // non-POSIX / Windows server) — the /proc-based loop only spews errors there
+    // (#140).
+    let mut mon_channel = if session.disable_shell_integration || !resource_monitor_enabled {
+        None
+    } else {
+        match handle.channel_open_session().await {
+            Ok(ch) => match ch.exec(true, MON_CMD).await {
+                Ok(()) => Some(ch),
+                Err(e) => {
+                    tracing::warn!("monitor exec failed: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("monitor channel open failed: {e}");
+                None
+            }
+        }
+    };
+*/
     let mut mon_buf = String::new();
     let mut sys_buf = String::new();
     let mut prev_cpu: Option<(u64, u64)> = None; // (total jiffies, idle jiffies)
@@ -2209,6 +2246,22 @@ async fn run_session(
                             f.info.active || f.info.status != t("启动失败", "failed")
                         });
                         emit_tunnel_update(&runtime_forwards, &events);
+                    }
+                    Some(SessionCommand::SetResourceMonitor(enabled)) => {
+                        if !enabled {
+                            if let Some(mon) = mon_channel.take() {
+                                let _ = mon.eof().await;
+                            }
+                            mon_buf.clear();
+                        } else if mon_channel.is_none() && !session.disable_shell_integration {
+                            match handle.channel_open_session().await {
+                                Ok(mon) => match mon.exec(true, MON_CMD).await {
+                                    Ok(()) => mon_channel = Some(mon),
+                                    Err(e) => tracing::warn!("monitor restart exec failed: {e}"),
+                                },
+                                Err(e) => tracing::warn!("monitor restart channel open failed: {e}"),
+                            }
+                        }
                     }
                     Some(SessionCommand::Close) | None => {
                         let _ = channel.eof().await;
@@ -2658,6 +2711,7 @@ fn parse_monitor_block(
     let mut net_now: Vec<(String, u64, u64)> = Vec::new();
     // Filesystems from `df -kP`: (mount, available_bytes, total_bytes).
     let mut disks: Vec<(String, u64, u64)> = Vec::new();
+    let mut gpus: Vec<(String, u64, u64)> = Vec::new();
     // Dedup duplicate filesystems before they reach the panel (#38): NAS boxes
     // (FNOS …) report the same underlying volume dozens of times — one Docker
     // overlay mount per container layer, all with identical size. Like dropping rows
@@ -2675,6 +2729,7 @@ fn parse_monitor_block(
         Df,
         Me,
         Ps,
+        Gpu,
         Sys,
     }
     let mut section = Section::Top;
@@ -2695,6 +2750,10 @@ fn parse_monitor_block(
         }
         if line == "__ME__" {
             section = Section::Me;
+            continue;
+        }
+        if line == "__GPU__" {
+            section = Section::Gpu;
             continue;
         }
         if line == "__SYS__" {
@@ -2726,6 +2785,14 @@ fn parse_monitor_block(
             Section::Me => {
                 if current_user.is_empty() {
                     current_user = line.trim().chars().take(64).collect();
+                }
+                continue;
+            }
+            Section::Gpu => {
+                if gpus.len() < 16 {
+                    if let Some(gpu) = parse_nvidia_smi_line(line) {
+                        gpus.push(gpu);
+                    }
                 }
                 continue;
             }
@@ -2840,6 +2907,7 @@ fn parse_monitor_block(
         net,
         disks,
         current_user,
+        gpus,
         procs,
         sys,
     })
@@ -3023,6 +3091,15 @@ fn parse_ps_line(line: &str) -> Option<ProcInfo> {
         mem,
         command,
     })
+}
+
+/// Parse one `nvidia-smi --format=csv,noheader,nounits` row.
+fn parse_nvidia_smi_line(line: &str) -> Option<(String, u64, u64)> {
+    let mut fields = line.split(',').map(str::trim);
+    let name = fields.next()?.to_string();
+    let used_mib: u64 = fields.next()?.parse().ok()?;
+    let total_mib: u64 = fields.next()?.parse().ok()?;
+    (total_mib > 0).then_some((name, used_mib.min(total_mib), total_mib))
 }
 
 /// Parse one `df -kP` data line into `(mount, available_bytes, total_bytes)`.
