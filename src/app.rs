@@ -139,6 +139,8 @@ struct TabStatus {
     net_hist: Vec<f32>,
     /// Per-filesystem (mount, available_bytes, total_bytes).
     disks: Vec<(String, u64, u64)>,
+    /// NVIDIA GPU memory samples: (name, used MiB, total MiB).
+    gpus: Vec<(String, u64, u64)>,
     /// Top remote processes by CPU, for the process monitor popup (#23).
     procs: Vec<ProcInfo>,
     /// Detailed resource rows for the detached system-information window.
@@ -844,6 +846,9 @@ fn open_window(
     // Per-tab SSH handles (shell only; lives on Slint thread via Rc).
     let handles: Rc<RefCell<HashMap<String, SessionHandle>>> =
         Rc::new(RefCell::new(HashMap::new()));
+    // Shared by the sidebar visibility callback and new SSH sessions so hidden
+    // resource panels do not keep sampling local or remote system statistics.
+    let resource_monitor_enabled = Arc::new(AtomicBool::new(true));
 
     // Per-tab SFTP handles — Arc<Mutex> so the event-pump OS thread and the
     // Slint UI thread can both post SftpCommands.
@@ -1234,6 +1239,7 @@ fn open_window(
         window.set_welcome_sidebar_dock(welcome_sidebar_dock.into());
         window.set_welcome_collapsed(welcome_collapsed);
         window.set_sidebar_collapsed(sidebar_collapsed);
+        resource_monitor_enabled.store(!sidebar_collapsed, Ordering::Relaxed);
         window.set_wallpaper_overlay(s.wallpaper_overlay());
         window.set_update_check_enabled(s.update_check_enabled()); // #184
         if collapse_sftp {
@@ -1293,10 +1299,16 @@ fn open_window(
     }
     {
         let store = store.clone();
+        let handles = handles.clone();
+        let resource_monitor_enabled = resource_monitor_enabled.clone();
         window.on_set_sidebar_collapsed(move |v| {
             let mut s = store.borrow_mut();
             s.set_sidebar_collapsed(v);
             let _ = s.save();
+            resource_monitor_enabled.store(!v, Ordering::Relaxed);
+            for handle in handles.borrow().values() {
+                handle.set_resource_monitor(!v);
+            }
         });
     }
     {
@@ -2099,6 +2111,7 @@ fn open_window(
         local_snap.clone(),
         local_net_hist.clone(),
         sftp_follow_cd.clone(),
+        resource_monitor_enabled.clone(),
         startup_collapse_sftp_default,
     );
 
@@ -2157,7 +2170,7 @@ fn open_window(
         let store = store.clone();
         let bufs_theme = bufs.clone();
         let proc_weak = proc_win.as_weak();
-        let registry = registry.clone();
+        let sys_weak = sys_win.as_weak();
         window.on_toggle_theme(move || {
             let Some(w) = weak.upgrade() else { return };
             let current_variant = w.get_theme_variant().to_string();
@@ -2175,6 +2188,9 @@ fn open_window(
             // is a separate instance) so an open process window follows.
             if let Some(p) = proc_weak.upgrade() {
                 sync_proc_theme(&w, &p);
+            }
+            if let Some(s) = sys_weak.upgrade() {
+                sync_system_info_theme(&w, &s);
             }
             let pref = if next_dark { "dark" } else { "light" };
             let mut s = store.borrow_mut();
@@ -2516,6 +2532,7 @@ fn open_window(
             local_net_hist: local_net_hist.clone(),
             last_term_size: last_term_size.clone(),
             sftp_follow_cd: sftp_follow_cd.clone(),
+            resource_monitor_enabled: resource_monitor_enabled.clone(),
             store: store.clone(),
             tab_routes: core.tab_routes.clone(),
         },
@@ -2548,12 +2565,16 @@ fn open_window(
     let tick_local = local_snap.clone();
     let tick_net = local_net_hist.clone();
     let tick_activity = activity.clone();
+    let tick_resource_monitor_enabled = resource_monitor_enabled.clone();
     let mut bg_tick = 0u32;
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
         SystemSampler::recommended_interval(),
         move || {
+            if !tick_resource_monitor_enabled.load(Ordering::Relaxed) {
+                return;
+            }
             // Skip the (non-trivial) sysinfo refresh + sidebar repaint when no one
             // is looking, and back off to ~5 s when the window is in the background.
             match tick_activity.get() {
@@ -3920,6 +3941,7 @@ fn wire_session_callbacks(
     local_snap: LocalSnap,
     local_net_hist: NetHist,
     sftp_follow_cd: Arc<std::sync::atomic::AtomicBool>,
+    resource_monitor_enabled: Arc<AtomicBool>,
     startup_collapse_sftp_default: bool,
 ) {
     // Working set of port forwards (#56) for the session being created/edited.
@@ -5008,6 +5030,7 @@ fn wire_session_callbacks(
         let local_snap = local_snap.clone();
         let local_net_hist = local_net_hist.clone();
         let sftp_follow_cd = sftp_follow_cd.clone();
+        let resource_monitor_enabled = resource_monitor_enabled.clone();
         let startup_collapse_sftp_default = startup_collapse_sftp_default;
         window.on_connect_session(move |id: SharedString| {
             let id = id.to_string();
@@ -5190,9 +5213,9 @@ fn wire_session_callbacks(
                 local_snap: local_snap.clone(),
                 local_net_hist: local_net_hist.clone(),
                 last_term_size: last_term_size.clone(),
-                sftp_follow_cd: sftp_follow_cd.clone(),
-                store: store.clone(),
-                tab_routes: tab_routes.clone(),
+            sftp_follow_cd: sftp_follow_cd.clone(),
+            resource_monitor_enabled: resource_monitor_enabled.clone(),
+            store: store.clone(),
             };
             start_session_in_tab(&tab_id, session, &ctx);
         });
@@ -5343,6 +5366,8 @@ struct ConnectCtx {
     last_term_size: Arc<Mutex<(u32, u32)>>,
     /// Interface setting: SFTP panel follows the terminal's cd (OSC 7).
     sftp_follow_cd: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the resource sidebar is visible and monitoring should run.
+    resource_monitor_enabled: Arc<AtomicBool>,
     /// Config store, so a session's jump host (#211) can be resolved by id at
     /// connect time on the UI thread.
     store: Rc<RefCell<ConfigStore>>,
@@ -5376,6 +5401,7 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
             jump.clone(),
             initial_cols,
             initial_rows,
+            ctx.resource_monitor_enabled.load(Ordering::Relaxed),
         ),
         SessionKind::Serial => crate::terminal::serial::spawn_serial_session(
             ctx.runtime.handle(),
@@ -6271,6 +6297,7 @@ fn sync_proc_theme(main: &AppWindow, proc: &ProcWindow) {
 
 fn sync_system_info_theme(main: &AppWindow, sys: &SystemInfoWindow) {
     sys.set_dark_mode(main.get_dark_mode());
+    sys.set_theme_variant(main.get_theme_variant());
     sys.set_ui_scale(main.get_ui_scale());
     sys.set_ui_font_family(main.get_ui_font_family());
     sys.set_wallpaper_img(main.get_wallpaper_img());
@@ -7312,6 +7339,7 @@ fn refresh_sidebar(
         win.set_swap_percent(snap.swap_percent);
         win.set_mem_detail(format_mem(snap.mem_used_mib, snap.mem_total_mib).into());
         win.set_swap_detail(format_mem(snap.swap_used_mib, snap.swap_total_mib).into());
+        win.set_gpu_usages(ModelRc::from(Rc::new(VecModel::<GpuUsage>::default())));
     };
     let clear_stats = |win: &AppWindow| {
         win.set_cpu_percent(0.0);
@@ -7319,6 +7347,19 @@ fn refresh_sidebar(
         win.set_swap_percent(0.0);
         win.set_mem_detail("".into());
         win.set_swap_detail("".into());
+        win.set_gpu_usages(ModelRc::from(Rc::new(VecModel::<GpuUsage>::default())));
+    };
+    let set_gpus = |win: &AppWindow, gpus: &[(String, u64, u64)]| {
+        let rows: Vec<GpuUsage> = gpus
+            .iter()
+            .enumerate()
+            .map(|(index, (_name, used, total))| GpuUsage {
+                label: format!("GPU {index}").into(),
+                percent: if *total > 0 { *used as f32 / *total as f32 } else { 0.0 },
+                detail: format_mem(*used, *total).into(),
+            })
+            .collect();
+        win.set_gpu_usages(ModelRc::from(Rc::new(VecModel::from(rows))));
     };
 
     // Process monitor (#23) lives in a shared model (the AppWindow and the
@@ -7448,6 +7489,7 @@ fn refresh_sidebar(
             win.set_swap_detail(
                 format_mem(st.swap_used_kib / 1024, st.swap_total_kib / 1024).into(),
             );
+            set_gpus(win, &st.gpus);
             let (name, rx, tx) = selected_iface(&st);
             win.set_net_top_up(format_bytes_per_sec(tx).into());
             win.set_net_top_down(format_bytes_per_sec(rx).into());
@@ -7670,7 +7712,8 @@ fn apply_session_event_to_window(
             net,
             disks,
             current_user: _,
-            procs: _,
+            gpus,
+            procs,
             sys,
         } => {
             if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
@@ -7681,6 +7724,8 @@ fn apply_session_event_to_window(
                 st.swap_total_kib = swap_total_kib;
                 st.net = net;
                 st.disks = disks;
+                st.gpus = gpus;
+                st.procs = procs;
                 if let Some(sys) = sys {
                     st.sys = sys;
                 }
