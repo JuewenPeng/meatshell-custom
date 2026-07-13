@@ -276,6 +276,9 @@ msgstr "Move to"
 msgid "Status"
 msgstr "Status"
 
+msgid "Show terminal status bar"
+msgstr "Show terminal status bar"
+
 msgid "Memory"
 msgstr "Memory"
 

@@ -110,7 +110,6 @@ fn tab_title_len(title: &str) -> i32 {
         .sum::<usize>()
         .min(i32::MAX as usize) as i32
 }
-
 type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
 /// Per-tab flag: once the user explicitly navigates via the SFTP tree or
 /// toolbar, stop auto-syncing to the terminal's `cd` path.
@@ -939,6 +938,16 @@ pub fn run() -> Result<()> {
         });
     }
 
+    window.set_show_terminal_status_bar(store.borrow().show_terminal_status_bar());
+    {
+        let store = store.clone();
+        window.on_set_show_terminal_status_bar(move |show| {
+            let mut s = store.borrow_mut();
+            s.set_show_terminal_status_bar(show);
+            let _ = s.save();
+        });
+    }
+
     // Interface setting: always ask where to save on download (#87). Read live
     // by the download handler from the window property, so just set + persist.
     window.set_download_always_ask(store.borrow().download_always_ask());
@@ -1510,7 +1519,6 @@ pub fn run() -> Result<()> {
     let tabs_model: Rc<VecModel<TabInfo>> = Rc::new(VecModel::default());
     tabs_model.push(TabInfo {
         id: "welcome".into(),
-        title_len: tab_title_len(&t("新标签页", "New tab")),
         title: t("新标签页", "New tab").into(),
         kind: "welcome".into(),
         connected: false,
@@ -1781,7 +1789,6 @@ pub fn run() -> Result<()> {
             for i in 0..tabs_model.row_count() {
                 if let Some(mut row) = tabs_model.row_data(i) {
                     if row.id.as_str() == "welcome" {
-                        row.title_len = tab_title_len(&t("新标签页", "New tab"));
                         row.title = t("新标签页", "New tab").into();
                         tabs_model.set_row_data(i, row);
                     }
@@ -4352,7 +4359,6 @@ fn wire_session_callbacks(
             // Register tab + terminal state (SFTP fields start empty/loading).
             tabs_model.push(TabInfo {
                 id: tab_id.clone().into(),
-                title_len: tab_title_len(&tab_title),
                 title: tab_title.into(),
                 kind: "terminal".into(),
                 connected: false,
@@ -7745,7 +7751,7 @@ fn refresh_panes(
                 h: p.h,
                 active_id: p.active.clone().into(),
                 focused: p.focused,
-                reserve_right: if top_right { 120.0 } else { 0.0 },
+                reserve_right: if top_right { 160.0 } else { 0.0 },
                 tabs: ModelRc::from(Rc::new(VecModel::from(tabs))),
             }
         })
@@ -7954,6 +7960,17 @@ fn wire_tab_callbacks(
         window.on_pane_tab_closed(move |_pane_id: i32, id: SharedString| {
             let id = id.to_string();
             if id == "welcome" {
+                layout.borrow_mut().remove_tab(&id);
+                if let Some(w) = weak.upgrade() {
+                    refresh_panes(
+                        &w,
+                        &layout.borrow(),
+                        content_size.get(),
+                        &tabs_model,
+                        &panes_model,
+                        &splitters_model,
+                    );
+                }
                 return;
             }
             if let Some(handle) = handles.borrow_mut().remove(&id) {

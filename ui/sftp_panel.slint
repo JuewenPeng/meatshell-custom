@@ -1474,18 +1474,6 @@ export component SftpPanel inherits Rectangle {
 
                     // ListView supports exactly one child, and it must be the row `for` loop.
                     // Keep transient status messages outside the ListView as overlays.
-                    if root.loading : Rectangle {
-                        width: parent.width;
-                        height: 40px;
-                        y: 0px;
-                        Text {
-                            text: @tr("Loading...");
-                            color: Theme.text-muted;
-                            font-size: Theme.fs-sm;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
 
                     if !root.loading && root.entries.length == 0 : Rectangle {
                         width: parent.width;
