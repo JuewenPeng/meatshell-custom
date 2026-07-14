@@ -47,7 +47,7 @@ JVM 压到几十 MB 原生级别。
 
 ## 截图
 
-<p align="center">
+<!-- <p align="center">
   <img src="docs/screenshots/1.png" alt="主题 1" width="800"><br>
   <em>主题 1</em>
 </p>
@@ -60,9 +60,9 @@ JVM 压到几十 MB 原生级别。
 <p align="center">
   <img src="docs/screenshots/3.png" alt="主题 3" width="800"><br>
   <em>主题 3</em>
-</p>
+</p> -->
 
-<!-- <p align="center">
+<p align="center">
   <img src="docs/screenshots/01-welcome.png" alt="欢迎页 / 会话管理" width="800"><br>
   <em>欢迎页：会话管理 + 左侧本机资源监控</em>
 </p>
@@ -70,7 +70,7 @@ JVM 压到几十 MB 原生级别。
 <p align="center">
   <img src="docs/screenshots/02-terminal-htop.png" alt="终端 + SFTP" width="800"><br>
   <em>多标签页终端（htop 全屏渲染）+ 底部 SFTP 文件浏览 + 远端资源监控</em>
-</p> -->
+</p>
 
 ## 下载与安装
 
