@@ -47,7 +47,7 @@ This branch is based on the original meatshell project with several custom chang
 
 ## Screenshots
 
-<p align="center">
+<!-- <p align="center">
   <img src="docs/screenshots/1.png" alt="Theme 1" width="800"><br>
   <em>Theme 1</em>
 </p>
@@ -60,10 +60,10 @@ This branch is based on the original meatshell project with several custom chang
 <p align="center">
   <img src="docs/screenshots/3.png" alt="Theme 3" width="800"><br>
   <em>Theme 3</em>
-</p>
+</p> -->
 
 
-<!-- <p align="center">
+<p align="center">
   <img src="docs/screenshots/01-welcome-en.png" alt="Welcome / session management" width="800"><br>
   <em>Welcome page: session management + local resource monitor sidebar</em>
 </p>
@@ -71,7 +71,7 @@ This branch is based on the original meatshell project with several custom chang
 <p align="center">
   <img src="docs/screenshots/02-terminal-htop.png" alt="Terminal + SFTP" width="800"><br>
   <em>Tabbed terminal (full-screen btop) + SFTP file browser + remote resource monitoring</em>
-</p> -->
+</p>
 
 ## Download & install
 
