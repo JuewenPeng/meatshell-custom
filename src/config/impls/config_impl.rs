@@ -702,6 +702,10 @@ pub struct ConfigFile {
     /// terminal's cd (OSC 7) unless the user opts out in Interface settings.
     #[serde(default)]
     pub sftp_no_follow_cd: bool,
+    /// Alternating backgrounds in the SFTP directory tree and file list.
+    /// Stored inverted so existing configurations retain the current default.
+    #[serde(default)]
+    pub sftp_no_zebra_rows: bool,
     /// Always prompt for the save location on each download instead of using the
     /// preset download dir. Defaults to false (#87).
     #[serde(default)]
@@ -1283,6 +1287,15 @@ impl ConfigStore {
 
     pub fn set_sftp_follow_cd(&mut self, follow: bool) {
         self.cache.sftp_no_follow_cd = !follow;
+    }
+
+    /// Whether SFTP directory and file lists use alternating row backgrounds.
+    pub fn sftp_zebra_rows(&self) -> bool {
+        !self.cache.sftp_no_zebra_rows
+    }
+
+    pub fn set_sftp_zebra_rows(&mut self, enabled: bool) {
+        self.cache.sftp_no_zebra_rows = !enabled;
     }
 
     /// Saved quick commands (#55).
