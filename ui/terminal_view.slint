@@ -129,6 +129,7 @@ export component TerminalView inherits Rectangle {
     in property <string> sftp-sort-key: "";
     in property <int> sftp-sort-dir: 0;
     in property <bool> sftp-available: true;
+    in property <bool> sftp-zebra-rows: true;
     in property <[TunnelInfo]> tunnels: [];
 
     // Per-session now (#v0.5): the AppWindow stores these in each TerminalState
@@ -1674,13 +1675,13 @@ export component TerminalView inherits Rectangle {
                 moved => {
                     if (root.sftp-dragging) {
                         if (root.sftp-horizontal) {
-                            // Floor of 150px — by then Size+Modified columns have
-                            // dropped and only Name remains; no narrower (#dock).
+                            // Keep the toolbar and its right-side controls usable
+                            // when SFTP is docked to the left or right.
                             root.set-sftp-panel-width(clamp(
                                 root.sftp-dock == "right"
                                     ? dock-region.width - ((self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x)
                                     : (self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x,
-                                150px, max(160px, dock-region.width - 200px)));
+                                250px, max(250px, dock-region.width - 200px)));
                         } else {
                             root.set-sftp-panel-height(clamp(
                                 root.sftp-dock == "bottom"
@@ -1696,6 +1697,7 @@ export component TerminalView inherits Rectangle {
         // --- SFTP panel — positioned on the docked edge ---------------------
         if root.sftp-available : SftpPanel {
             visible: !root.sftp-collapsed;
+            zebra-rows: root.sftp-zebra-rows;
             x: root.sftp-dock == "right"  ? parent.width - parent.sf-w : 0px;
             y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
             width:  root.sftp-horizontal ? parent.sf-w : parent.width;
