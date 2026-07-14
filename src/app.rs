@@ -828,6 +828,16 @@ pub fn run() -> Result<()> {
         });
     }
 
+    window.set_sftp_zebra_rows(store.borrow().sftp_zebra_rows());
+    {
+        let store = store.clone();
+        window.on_set_sftp_zebra_rows(move |enabled| {
+            let mut s = store.borrow_mut();
+            s.set_sftp_zebra_rows(enabled);
+            let _ = s.save();
+        });
+    }
+
     window.set_show_terminal_status_bar(store.borrow().show_terminal_status_bar());
     {
         let store = store.clone();

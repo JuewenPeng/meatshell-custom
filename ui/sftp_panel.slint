@@ -164,6 +164,22 @@ component SftpTooltip inherits Rectangle {
     }
 }
 
+component SftpToolbarIcon inherits Rectangle {
+    in property <string> glyph;
+    in property <brush> glyph-color;
+    in property <length> glyph-size;
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.glyph;
+        font-family: "Material Icons";
+        color: root.glyph-color;
+        font-size: root.glyph-size;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 // One row of the file-list right-click context menu.
 component SftpMenuItem inherits Rectangle {
     in property <string> label;
@@ -210,6 +226,7 @@ export component SftpPanel inherits Rectangle {
     in property <string> dock-edge: "bottom";
     in property <bool> collapsed: false;   // when true only the toolbar shows
     in property <bool> show-tree: true;    // hide the directory tree when narrow (#dock)
+    in property <bool> zebra-rows: true;
     in property <bool> compact: false;     // side-docked + collapsed → render nothing but a clean strip (#dock)
     property <length> tree-min-width: 96px;
     property <length> tree-width: 220px;
@@ -223,7 +240,7 @@ export component SftpPanel inherits Rectangle {
     property <length> list-w: root.show-tree ? root.width - root.tree-width : root.width;
     property <length> name-min: 180px;     // narrower than this → start dropping columns
     property <length> name-col-w: 440px;
-    property <length> name-col-max-w: max(120px, root.list-w - 78px);
+    property <length> name-col-max-w: max(120px, root.list-w - 6px);
     property <length> size-col-w: 80px;
     property <length> type-col-w: 80px;
     property <length> modified-col-w: 120px;
@@ -231,6 +248,10 @@ export component SftpPanel inherits Rectangle {
     property <length> owner-col-w: 120px;
     property <length> owner-min-w: 120px;
     property <bool> side-docked: !root.show-tree;
+    // Low-priority actions disappear in order only when side-docked space runs out.
+    pure function show-action(hidden-at: length) -> bool {
+        return !root.side-docked || root.width >= hidden-at + 24px;
+    }
     property <bool> show-owner-col: true;
     property <bool> show-perm-col: true;
     property <bool> show-modified-col: true;
@@ -337,7 +358,7 @@ export component SftpPanel inherits Rectangle {
     callback dock-drag-end();
 
     // -----------------------------------------------------------------------
-    background: Theme.bg-panel;
+    background: Theme.term-bg;
     // Focus sink used to blur the path input without changing layout.
     input-blur-scope := FocusScope {
         key-pressed(e) => {
@@ -430,6 +451,8 @@ export component SftpPanel inherits Rectangle {
             background: Theme.bg-panel-alt;
 
             HorizontalLayout {
+                width: parent.width;
+                height: parent.height;
                 padding-left: 6px;
                 padding-right: 6px;
                 padding-top: 5px;
@@ -529,7 +552,7 @@ export component SftpPanel inherits Rectangle {
                 // Upload: a small menu offers file vs folder (#85). The remote
                 // SFTP upload handles both; only the local picker differs.
                 ul-btn := Rectangle {
-                    visible: root.panel-mode == "files" && root.toolbar-enabled;
+                    visible: root.panel-mode == "files" && root.toolbar-enabled && root.show-action(246px);
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && ul-ta.has-hover) ? Theme.bg-hover : transparent;
@@ -537,10 +560,7 @@ export component SftpPanel inherits Rectangle {
                         mouse-cursor: root.toolbar-enabled ? pointer : default;
                         clicked => { if (root.toolbar-enabled) { ul-menu.show(); } }
                     }
-                    Text { text: "\u{E2C6}"; font-family: "Material Icons";
-                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-md;
-                           horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
+                    SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E2C6}"; glyph-color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; glyph-size: Theme.fs-md; }
                     SftpTooltip { text: root.lang-en ? "Upload" : "上传"; hover: ul-ta.has-hover; }
                     ul-menu := PopupWindow {
                         x: 0; y: parent.height + 2px;
@@ -571,39 +591,33 @@ export component SftpPanel inherits Rectangle {
 
                 // Batch actions on checked entries (#100).
                 if root.panel-mode == "files" : Rectangle {
+                    visible: root.show-action(276px);
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
-                    opacity: root.toolbar-enabled && root.selected-count > 0 ? 1 : 0.4;
                     background: (root.toolbar-enabled && root.selected-count > 0 && dls-ta.has-hover) ? Theme.bg-hover : transparent;
                     dls-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
                         clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.download-selected(); } }
                     }
-                    Text { text: "\u{E2C4}"; font-family: "Material Icons"; color: Theme.text-secondary;
-                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
+                    SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E2C4}"; glyph-color: root.toolbar-enabled && root.selected-count > 0 ? Theme.text-secondary : Theme.text-secondary.with-alpha(0.4); glyph-size: Theme.fs-md; }
                     SftpTooltip { text: root.lang-en ? "Download" : "下载"; hover: dls-ta.has-hover && root.toolbar-enabled && root.selected-count > 0; }
                 }
                 if root.panel-mode == "files" : Rectangle {
+                    visible: root.show-action(306px);
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
-                    opacity: root.toolbar-enabled && root.selected-count > 0 ? 1 : 0.4;
                     background: (root.toolbar-enabled && root.selected-count > 0 && mvs-ta.has-hover) ? Theme.bg-hover : transparent;
                     mvs-ta := TouchArea {
                         mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
                         clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.move-selected-request(); } }
                     }
-                    Text { text: "\u{E675}"; font-family: "Material Icons"; color: Theme.text-secondary;
-                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
+                    SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E675}"; glyph-color: root.toolbar-enabled && root.selected-count > 0 ? Theme.text-secondary : Theme.text-secondary.with-alpha(0.4); glyph-size: Theme.fs-md; }
                     SftpTooltip { text: root.lang-en ? "Move" : "移动"; hover: mvs-ta.has-hover && root.toolbar-enabled && root.selected-count > 0; }
                 }
-                if root.panel-mode == "files" : HorizontalLayout {
-                    spacing: 6px;
-                    Rectangle {
+                if root.panel-mode == "files" : Rectangle {
+                    visible: root.show-action(336px);
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
-                    opacity: root.toolbar-enabled && root.selected-count > 0 ? 1 : 0.4;
                     background: (root.toolbar-enabled && root.selected-count > 0 && dels-ta.has-hover)
                         ? Theme.danger-hover-solid
                         : transparent;
@@ -611,15 +625,13 @@ export component SftpPanel inherits Rectangle {
                         mouse-cursor: root.toolbar-enabled && root.selected-count > 0 ? pointer : default;
                         clicked => { if (root.toolbar-enabled && root.selected-count > 0) { root.delete-selected(); } }
                     }
-                    Text { text: "\u{E872}"; font-family: "Material Icons"; color: Theme.danger;
-                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
+                    SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E872}"; glyph-color: root.toolbar-enabled && root.selected-count > 0 ? Theme.danger : Theme.danger.with-alpha(0.4); glyph-size: Theme.fs-md; }
                     SftpTooltip { text: root.lang-en ? "Delete" : "删除"; danger: true; hover: dels-ta.has-hover && root.toolbar-enabled && root.selected-count > 0; }
                 }
 
                 // Copy the current path to the clipboard.
                 Rectangle {
-                    visible: root.toolbar-enabled;
+                    visible: root.toolbar-enabled && root.show-action(366px);
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && copy-ta.has-hover) ? Theme.bg-hover : transparent;
@@ -633,16 +645,13 @@ export component SftpPanel inherits Rectangle {
                             }
                         }
                     }
-                    Text { text: "\u{E14D}"; font-family: "Material Icons";
-                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
+                    SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E14D}"; glyph-color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; glyph-size: Theme.fs-sm; }
                     SftpTooltip { text: root.lang-en ? "Copy path" : "复制路径"; hover: copy-ta.has-hover; }
                 }
 
                 // Paste a path from the clipboard and jump straight to it.
                 Rectangle {
-                    visible: root.toolbar-enabled;
+                    visible: root.toolbar-enabled && root.show-action(396px);
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && pj-ta.has-hover) ? Theme.bg-hover : transparent;
@@ -656,49 +665,15 @@ export component SftpPanel inherits Rectangle {
                             }
                         }
                     }
-                    Text { text: "\u{E14F}"; font-family: "Material Icons";
-                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
+                    SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E14F}"; glyph-color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; glyph-size: Theme.fs-sm; }
                     SftpTooltip { text: root.lang-en ? "Paste and go" : "粘贴并跳转"; hover: pj-ta.has-hover; }
                 }
 
-                Rectangle {
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: (root.toolbar-enabled && up-ta.has-hover) ? Theme.bg-hover : transparent;
-                    up-ta := TouchArea {
-                        mouse-cursor: root.toolbar-enabled ? pointer : default;
-                        clicked => { if (root.toolbar-enabled) { root.navigate(".."); } }
-                    }
-                    Text { text: "\u{E5D8}"; font-family: "Material Icons";
-                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-md;
-                           horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
-                    SftpTooltip { text: root.lang-en ? "Parent directory" : "上级目录"; hover: up-ta.has-hover; }
-                }
-
+                // Reserve the two navigation buttons placed immediately before
+                // the path field. Their visual positions are updated below.
                 Rectangle {
                     visible: root.panel-mode == "files" && root.toolbar-enabled;
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: (root.toolbar-enabled && ref-ta.has-hover) ? Theme.bg-hover : transparent;
-                    ref-ta := TouchArea {
-                        mouse-cursor: root.toolbar-enabled ? pointer : default;
-                        clicked => {
-                            if (root.toolbar-enabled) {
-                                root.selected-row = -1;
-                                root.selection-anchor-row = -1;
-                                root.refresh(root.current-path);
-                            }
-                        }
-                    }
-                    Text { text: "\u{E5D5}"; font-family: "Material Icons";
-                           color: root.toolbar-enabled ? Theme.text-secondary : Theme.text-muted; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
-                    SftpTooltip { text: root.lang-en ? "Refresh" : "刷新"; hover: ref-ta.has-hover; }
-                }
+                    width: 56px;
                 }
 
                 // Editable path bar: type or paste a path and press Enter to
@@ -707,6 +682,7 @@ export component SftpPanel inherits Rectangle {
                 path-wrap := Rectangle {
                     visible: root.panel-mode == "files" && root.toolbar-enabled;
                     horizontal-stretch: 1;
+                    min-width: 0px;
                     height: 22px;
                     changed width => {
                         if (!root.collapsed) {
@@ -732,32 +708,58 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
 
-                if root.collapsed : Rectangle { horizontal-stretch: 1; }
-
-                // Minimise / restore the SFTP panel (#41).
-                Rectangle {
-                    width: 24px; height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: min-ta.has-hover ? Theme.bg-hover : transparent;
-                    min-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.toggle-collapsed(); }
-                    }
-                    Text {
-                           text: root.collapsed
-                               ? (root.dock-edge == "right" ? "\u{E5CB}"
-                                  : root.dock-edge == "top" ? "\u{E5CF}"
-                                  : root.dock-edge == "bottom" ? "\u{E5CE}"
-                                  : "\u{E5CC}")
-                               : (root.dock-edge == "right" ? "\u{E5CC}"
-                                  : root.dock-edge == "top" ? "\u{E5CE}"
-                                  : root.dock-edge == "bottom" ? "\u{E5CF}"
-                                  : "\u{E5CB}");
-                           font-family: "Material Icons";
-                           color: Theme.text-secondary; font-size: Theme.fs-md;
-                           horizontal-alignment: center; vertical-alignment: center;
-                           width: parent.width; height: parent.height; }
+                // When the path field is visible it is the sole flexible item,
+                // keeping the collapse button flush with the toolbar's right edge.
+                // Other panel modes still need this spacer because they omit it.
+                if !(root.panel-mode == "files" && root.toolbar-enabled) : Rectangle {
+                    horizontal-stretch: 1;
                 }
+
+                // Reserve the absolute collapse control at the right edge.
+                Rectangle {
+                    width: 24px;
+                }
+            }
+
+            // When the path reaches zero width, these buttons yield and follow
+            // the right-edge collapse control instead of overlapping it.
+            Rectangle {
+                visible: root.toolbar-enabled;
+                x: min(path-wrap.x - 56px, parent.width - 6px - 24px - 4px - 24px - 4px - 24px);
+                y: 5px; width: 24px; height: 22px;
+                border-radius: Theme.radius-sm;
+                background: up-ta.has-hover ? Theme.bg-hover : transparent;
+                up-ta := TouchArea { mouse-cursor: pointer; clicked => { root.navigate(".."); } }
+                SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E5D8}"; glyph-color: Theme.text-secondary; glyph-size: Theme.fs-md; }
+                SftpTooltip { text: root.lang-en ? "Parent directory" : "上级目录"; hover: up-ta.has-hover; }
+            }
+            Rectangle {
+                visible: root.panel-mode == "files" && root.toolbar-enabled;
+                x: min(path-wrap.x - 28px, parent.width - 6px - 24px - 4px - 24px);
+                y: 5px; width: 24px; height: 22px;
+                border-radius: Theme.radius-sm;
+                background: ref-ta.has-hover ? Theme.bg-hover : transparent;
+                ref-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.selected-row = -1; root.selection-anchor-row = -1; root.refresh(root.current-path); }
+                }
+                SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E5D5}"; glyph-color: Theme.text-secondary; glyph-size: Theme.fs-sm; }
+                SftpTooltip { text: root.lang-en ? "Refresh" : "刷新"; hover: ref-ta.has-hover; }
+            }
+
+            Rectangle {
+                x: parent.width - 6px - 24px;
+                y: 5px; width: 24px; height: 22px;
+                border-radius: Theme.radius-sm;
+                background: min-ta.has-hover ? Theme.bg-hover : transparent;
+                min-ta := TouchArea { mouse-cursor: pointer; clicked => { root.toggle-collapsed(); } }
+                Text {
+                       text: root.collapsed
+                           ? (root.dock-edge == "right" ? "\u{E5CB}" : root.dock-edge == "top" ? "\u{E5CF}" : root.dock-edge == "bottom" ? "\u{E5CE}" : "\u{E5CC}")
+                           : (root.dock-edge == "right" ? "\u{E5CC}" : root.dock-edge == "top" ? "\u{E5CE}" : root.dock-edge == "bottom" ? "\u{E5CF}" : "\u{E5CB}");
+                       font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-md;
+                       horizontal-alignment: center; vertical-alignment: center;
+                       width: parent.width; height: parent.height; }
             }
         }
 
@@ -802,7 +804,7 @@ export component SftpPanel inherits Rectangle {
                                 ? Theme.sftp-row-hover
                                 : ((root.focused-tree-path != "" ? node.path == root.focused-tree-path : node.path == root.current-path)
                                     ? Theme.sftp-row-focus
-                                    : (mod(i, 2) == 0 ? transparent : Theme.bg-row-alt));
+                                    : (root.zebra-rows && mod(i, 2) != 0 ? Theme.bg-row-alt : Theme.term-bg));
 
                             HorizontalLayout {
                                 spacing: 0;
@@ -1245,7 +1247,7 @@ export component SftpPanel inherits Rectangle {
                                     ? Theme.sftp-row-focus
                                     : (row-ta.has-hover
                                         ? Theme.sftp-row-hover
-                                        : (mod(i, 2) == 0 ? transparent : Theme.bg-row-alt)));
+                                        : (root.zebra-rows && mod(i, 2) != 0 ? Theme.bg-row-alt : Theme.term-bg)));
 
                             row-ta := TouchArea {
                                 mouse-cursor: pointer;

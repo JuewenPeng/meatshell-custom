@@ -267,6 +267,7 @@ export component InterfacePanel inherits Rectangle {
     in-out property <bool> term-font-bold;
     in property <float> ui-scale;
     in-out property <bool> sftp-follow-cd;
+    in-out property <bool> sftp-zebra-rows: true;
     in-out property <bool> collapse-sidebar-default;
     in-out property <bool> collapse-sftp-default;
     in-out property <bool> sync-upload-enabled;
@@ -297,6 +298,7 @@ export component InterfacePanel inherits Rectangle {
     callback set-ui-scale(int);
     callback set-panel-font(int);   // settings-panel font scale, percent
     callback set-sftp-follow-cd(bool);
+    callback set-sftp-zebra-rows(bool);
     callback set-collapse-sidebar-default(bool);
     callback set-collapse-sftp-default(bool);
     callback set-sync-upload-enabled(bool);
@@ -710,6 +712,17 @@ export component InterfacePanel inherits Rectangle {
                     Switch {
                         on: root.sftp-follow-cd;
                         toggled(v) => { root.sftp-follow-cd = v; root.set-sftp-follow-cd(v); }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Directory list zebra stripes" : "目录列表斑马纹";
+                    desc: root.lang-en
+                        ? "Alternate row backgrounds in the SFTP directory tree and file list."
+                        : "在 SFTP 目录树和文件列表中交替显示行底色。";
+                    show-divider: false;
+                    Switch {
+                        on: root.sftp-zebra-rows;
+                        toggled(v) => { root.sftp-zebra-rows = v; root.set-sftp-zebra-rows(v); }
                     }
                 }
             }

@@ -471,6 +471,8 @@ export component AppWindow inherits Window {
     // SFTP follows the terminal's cd; opt out in Interface settings.
     in-out property <bool> sftp-follow-cd: true;
     callback set-sftp-follow-cd(bool);             // apply + persist
+    in-out property <bool> sftp-zebra-rows: true;
+    callback set-sftp-zebra-rows(bool);            // apply + persist
     in-out property <bool> show-terminal-status-bar: true;
     callback set-show-terminal-status-bar(bool);   // apply + persist
     // Always ask where to save on each download (#87); default off.
@@ -1591,6 +1593,7 @@ export component AppWindow inherits Window {
                     sftp-sort-key: term.sftp-sort-key;
                     sftp-sort-dir: term.sftp-sort-dir;
                     sftp-available: term.sftp-available;
+                    sftp-zebra-rows: root.sftp-zebra-rows;
                     tunnels: term.tunnels;
                     quick-commands: root.quick-commands;
                     command-history: root.command-history;
@@ -4142,6 +4145,7 @@ export component AppWindow inherits Window {
                     term-font-bold: root.term-font-bold;
                     ui-scale: root.ui-scale;
                     sftp-follow-cd <=> root.sftp-follow-cd;
+                    sftp-zebra-rows <=> root.sftp-zebra-rows;
                     collapse-sidebar-default <=> root.collapse-sidebar-default;
                     collapse-sftp-default <=> root.collapse-sftp-default;
                     sync-upload-enabled <=> root.sync-upload-enabled;
@@ -4166,6 +4170,7 @@ export component AppWindow inherits Window {
                     set-ui-scale(v) => { root.set-ui-scale(v); }
                     set-panel-font(v) => { root.set-panel-font(v); }
                     set-sftp-follow-cd(v) => { root.set-sftp-follow-cd(v); }
+                    set-sftp-zebra-rows(v) => { root.set-sftp-zebra-rows(v); }
                     set-collapse-sidebar-default(v) => { root.set-collapse-sidebar-default(v); }
                     set-collapse-sftp-default(v) => { root.set-collapse-sftp-default(v); }
                     set-sync-upload-enabled(v) => { root.set-sync-upload-enabled(v); }
