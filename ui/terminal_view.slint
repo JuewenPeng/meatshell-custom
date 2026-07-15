@@ -467,15 +467,26 @@ export component TerminalView inherits Rectangle {
             // the keyboard focus, no matter what grabbed it.
             forward-focus: ime-input;
             property <bool> cursor-blink: true;
+            property <bool> cursor-input-hold: false;
 
             init => { root.focus-pending = true; }
 
-            Timer {
+            cursor-blink-timer := Timer {
                 // Stop blinking (and thus repainting) when the window isn't
                 // focused — an idle background terminal should cost ~0 CPU (#127).
                 running: ime-input.has-focus && Theme.window-focused;
                 interval: 530ms;
                 triggered => { key-capture.cursor-blink = !key-capture.cursor-blink; }
+            }
+
+            input-cursor-hold-timer := Timer {
+                interval: 500ms;
+                running: key-capture.cursor-input-hold;
+                triggered => {
+                    key-capture.cursor-input-hold = false;
+                    key-capture.cursor-blink = true;
+                    cursor-blink-timer.restart();
+                }
             }
 
             // Auto-scroll while the drag-selection is held past the top/bottom
@@ -666,7 +677,7 @@ export component TerminalView inherits Rectangle {
 
                         // Blinking block cursor (overlay, decoupled from text).
                         Rectangle {
-                            x: root.cursor-col * root.cell-w;
+                            x: root.cursor-col * root.cell-w + 0.3px;
                             y: root.cursor-row * root.cell-h;
                             width: root.cell-w;
                             height: root.cell-h;
@@ -675,7 +686,21 @@ export component TerminalView inherits Rectangle {
                             // window is unfocused so the cursor neither vanishes nor
                             // keeps the window repainting (#127).
                             visible: ime-input.has-focus
-                                && (key-capture.cursor-blink || !Theme.window-focused);
+                                && (key-capture.cursor-blink || key-capture.cursor-input-hold
+                                    || !Theme.window-focused);
+                        }
+
+                        // An unfocused terminal keeps its cursor location visible
+                        // without competing with the focused terminal's solid block.
+                        Rectangle {
+                            x: root.cursor-col * root.cell-w + 0.3px;
+                            y: root.cursor-row * root.cell-h;
+                            width: root.cell-w;
+                            height: root.cell-h;
+                            border-width: 1px;
+                            border-color: Theme.term-fg;
+                            background: transparent;
+                            visible: !ime-input.has-focus;
                         }
 
                         // Top-most transparent interaction layer. On macOS,
@@ -816,6 +841,18 @@ export component TerminalView inherits Rectangle {
                 }
 
                 key-pressed(event) => {
+                    // Keep the terminal cursor visible only for input or cursor
+                    // navigation, not for standalone modifier/lock-key presses.
+                    if (event.text != ""
+                            && event.text != Key.Shift && event.text != Key.ShiftR
+                            && event.text != Key.Control && event.text != Key.ControlR
+                            && event.text != Key.Alt && event.text != Key.AltGr
+                            && event.text != Key.Meta && event.text != Key.MetaR
+                            && event.text != Key.CapsLock) {
+                        key-capture.cursor-blink = true;
+                        key-capture.cursor-input-hold = true;
+                        input-cursor-hold-timer.restart();
+                    }
                     // ⚠ macOS modifier naming is SWAPPED by Slint (see the winit
                     // backend's muda.rs): `event.modifiers.control` is the **Cmd (⌘)**
                     // key and `event.modifiers.meta` is the **physical Ctrl** key.
