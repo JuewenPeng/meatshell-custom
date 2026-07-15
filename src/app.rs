@@ -104,6 +104,30 @@ use crate::resource::system::{format_bytes_per_sec, format_mem, SystemSampler, S
 use crate::ui::*;
 use crate::webdav::WebDavAcceptAnyCertVerifier;
 
+#[allow(dead_code)]
+#[derive(Clone, Default)]
+struct LocalHardwareInfo {
+    os: String,
+    kernel: String,
+    kernel_version: String,
+    arch: String,
+    hostname: String,
+    cpu_name: String,
+    cpu_vendor: String,
+    cpu_cores: String,
+    cpu_frequency: String,
+    gpus: Vec<LocalGpuInfo>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Default)]
+struct LocalGpuInfo {
+    name: String,
+    vendor: String,
+    driver: String,
+    memory: String,
+}
+
 type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
 /// Per-tab flag: once the user explicitly navigates via the SFTP tree or
 /// toolbar, stop auto-syncing to the terminal's `cd` path.
@@ -6007,6 +6031,7 @@ fn tuple5_rows(rows: &[(String, String, String, String, String)]) -> Vec<SysInfo
         .collect()
 }
 
+#[allow(dead_code)]
 fn nonempty_or_dash(value: impl Into<String>) -> String {
     let value = value.into();
     if value.trim().is_empty() {
@@ -6016,6 +6041,7 @@ fn nonempty_or_dash(value: impl Into<String>) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn local_hardware_info() -> &'static LocalHardwareInfo {
     static INFO: OnceLock<LocalHardwareInfo> = OnceLock::new();
     INFO.get_or_init(|| {
@@ -6056,6 +6082,7 @@ fn local_hardware_info() -> &'static LocalHardwareInfo {
     })
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 fn fill_local_gpu_info(info: &mut LocalHardwareInfo) {
     let output = std::process::Command::new("powershell")
@@ -6135,6 +6162,7 @@ fn fill_local_gpu_info(info: &mut LocalHardwareInfo) {
         .collect();
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 fn json_values(value: &serde_json::Value) -> Vec<serde_json::Value> {
     if let Some(items) = value.as_array() {
@@ -6146,6 +6174,7 @@ fn json_values(value: &serde_json::Value) -> Vec<serde_json::Value> {
     }
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 fn nonempty_prefer(primary: &str, fallback: &str) -> String {
     if primary.trim().is_empty() {
@@ -6155,6 +6184,7 @@ fn nonempty_prefer(primary: &str, fallback: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 fn gpu_from_registry_json(gpu: &serde_json::Value) -> Option<LocalGpuInfo> {
     let get_str = |key: &str| {
@@ -6195,9 +6225,11 @@ fn gpu_from_registry_json(gpu: &serde_json::Value) -> Option<LocalGpuInfo> {
     })
 }
 
+#[allow(dead_code)]
 #[cfg(not(target_os = "windows"))]
 fn fill_local_gpu_info(_info: &mut LocalHardwareInfo) {}
 
+#[allow(dead_code)]
 fn local_system_details(snap: &SystemSnapshot) -> SystemDetails {
     let mem_used = snap.mem_used_mib.saturating_mul(1024 * 1024);
     let mem_total = snap.mem_total_mib.saturating_mul(1024 * 1024);
@@ -7721,7 +7753,7 @@ fn apply_session_event_to_window(
             swap_total_kib,
             net,
             disks,
-            current_user: _,
+            current_user,
             gpus,
             procs,
             sys,
@@ -7734,6 +7766,9 @@ fn apply_session_event_to_window(
                 st.swap_total_kib = swap_total_kib;
                 st.net = net;
                 st.disks = disks;
+                if !current_user.is_empty() {
+                    st.user = current_user;
+                }
                 st.gpus = gpus;
                 st.procs = procs;
                 if let Some(sys) = sys {
