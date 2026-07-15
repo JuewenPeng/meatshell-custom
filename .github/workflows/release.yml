@@ -159,7 +159,9 @@ jobs:
             mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
             cp "target/${{ matrix.target }}/release/meatshell" "$CONTENTS/MacOS/"
-            cp THIRD_PARTY_NOTICES.md "$CONTENTS/Resources/"
+            # The notices file is optional, just like it is for the other
+            # release packages. Some historical branches do not contain it.
+            [ ! -f THIRD_PARTY_NOTICES.md ] || cp THIRD_PARTY_NOTICES.md "$CONTENTS/Resources/"
 
             # Generate .icns from the 512×512 PNG using sips + iconutil (both
             # ship with every macOS, no extra tooling needed in CI).
