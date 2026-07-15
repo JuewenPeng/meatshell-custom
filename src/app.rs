@@ -7119,6 +7119,11 @@ fn apply_session_event_to_window(
                 .collect();
             update_terminal(&|t| {
                 let mut displayed_entries = slint_entries.clone();
+                sort_sftp_entries(
+                    &mut displayed_entries,
+                    t.sftp_sort_key.as_str(),
+                    t.sftp_sort_dir,
+                );
                 let restore_selection = if t.sftp_restore_selected_path.is_empty()
                     || parent_path(t.sftp_restore_selected_path.as_str()) != path
                 {
@@ -8904,7 +8909,7 @@ fn wire_sftp_callbacks(
             };
 
             for ti in 0..tm.row_count() {
-                let Some(row) = tm.row_data(ti) else { continue };
+                let Some(mut row) = tm.row_data(ti) else { continue };
                 if row.id.as_str() != tab_id.as_str() {
                     continue;
                 }
@@ -8922,6 +8927,9 @@ fn wire_sftp_callbacks(
                     );
                     em.set_vec(entries);
                 }
+                row.sftp_sort_key = column;
+                row.sftp_sort_dir = if ascending { 1 } else { -1 };
+                tm.set_row_data(ti, row);
                 break;
             }
         });
