@@ -1657,7 +1657,7 @@ export component TerminalView inherits Rectangle {
                                 root.sftp-dock == "right"
                                     ? dock-region.width - ((self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x)
                                     : (self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x,
-                                250px, max(250px, dock-region.width - 200px)));
+                                205px, max(205px, dock-region.width - 200px)));
                         } else {
                             root.set-sftp-panel-height(clamp(
                                 root.sftp-dock == "bottom"
