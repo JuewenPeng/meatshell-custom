@@ -1883,13 +1883,12 @@ async fn run_session(
         let sys_flag = mon_flag.clone();
         let mon_flag = mon_flag.clone();
         let mon_handle = handle.clone();
+        let resources_enabled = resource_monitor_enabled;
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            if !mon_flag.load(Ordering::Relaxed) {
-                let _ = mon_ready_tx.send(None);
-                return;
-            }
-            let channel = match mon_handle.channel_open_session().await {
+            let channel = if !resources_enabled {
+                None
+            } else { match mon_handle.channel_open_session().await {
                 Ok(ch) => match ch.exec(true, MON_CMD).await {
                     Ok(()) => Some(ch),
                     Err(error) => {
@@ -1901,7 +1900,7 @@ async fn run_session(
                     tracing::warn!("monitor channel open failed: {error}");
                     None
                 }
-            };
+            }};
             let _ = mon_ready_tx.send(channel);
         });
         let proc_handle = handle.clone();

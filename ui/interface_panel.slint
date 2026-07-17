@@ -289,6 +289,31 @@ component CursorStyleButton inherits Rectangle {
     }
 }
 
+// Matches the cursor-style controls, but keeps its text centered without a
+// shape preview for the automatic-colour mode.
+component CursorAutoButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    width: 74px;
+    height: 30px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent : Theme.border-subtle;
+    background: root.selected ? Theme.bg-active : (touch.has-hover ? Theme.bg-hover : Theme.bg-elevated);
+    Text {
+        text: root.label;
+        color: root.selected ? Theme.text-primary : Theme.text-secondary;
+        font-size: 11px * Theme.panel-font;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 component CursorPaletteSwatch inherits Rectangle {
     in property <string> hex;
     in property <color> swatch-color;
@@ -454,6 +479,7 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> term-cursor-style: "block";
     in-out property <string> term-cursor-color-hex: "#D4D4D4";
     in property <color> term-cursor-color: #D4D4D4;
+    in-out property <bool> term-cursor-auto: true;
     in-out property <bool> output-highlight-enabled;
     in-out property <bool> json-format-output: true;
     in-out property <string> output-highlight-preset;
@@ -510,6 +536,7 @@ export component InterfacePanel inherits Rectangle {
     callback set-term-font-bold(bool);
     callback set-term-cursor-style(string);
     callback set-term-cursor-color(string) -> bool;
+    callback set-term-cursor-auto(bool);
     callback set-output-highlight(bool, string);
     callback set-json-format-output(bool);
     callback add-output-highlight-rule(string, bool, bool, bool, string) -> bool;
@@ -734,10 +761,21 @@ export component InterfacePanel inherits Rectangle {
                     label: root.lang-en ? "Cursor color" : "光标颜色";
                     desc: root.lang-en ? "Enter a hexadecimal RGB color."
                                        : "输入十六进制 RGB 颜色。";
-                    CursorColorInput {
-                        value <=> root.term-cursor-color-hex;
-                        preview-color: root.term-cursor-color;
-                        apply-color(v) => { root.set-term-cursor-color(v) }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        CursorColorInput {
+                            value <=> root.term-cursor-color-hex;
+                            preview-color: root.term-cursor-color;
+                            apply-color(v) => { root.set-term-cursor-color(v) }
+                        }
+                        CursorAutoButton {
+                            selected: root.term-cursor-auto;
+                            label: root.lang-en ? "Auto" : "自动";
+                            clicked => {
+                                root.term-cursor-auto = !root.term-cursor-auto;
+                                root.set-term-cursor-auto(root.term-cursor-auto);
+                            }
+                        }
                     }
                 }
                 SettingRow {
