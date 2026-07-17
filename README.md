@@ -47,21 +47,6 @@ JVM 压到几十 MB 原生级别。
 
 ## 截图
 
-<!-- <p align="center">
-  <img src="docs/screenshots/1.png" alt="主题 1" width="800"><br>
-  <em>主题 1</em>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/2.png" alt="主题 2" width="800"><br>
-  <em>主题 2</em>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/3.png" alt="主题 3" width="800"><br>
-  <em>主题 3</em>
-</p> -->
-
 <p align="center">
   <img src="docs/screenshots/01-welcome.png" alt="欢迎页 / 会话管理" width="800"><br>
   <em>欢迎页：会话管理 + 左侧本机资源监控</em>
