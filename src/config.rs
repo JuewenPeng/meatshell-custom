@@ -659,9 +659,12 @@ pub struct ConfigFile {
     /// Terminal insertion cursor shape: block (default), bar, or underline (#275).
     #[serde(default)]
     pub terminal_cursor_style: String,
-    /// Custom terminal cursor colour as #RRGGBB. Empty follows the theme (#275).
+    /// Custom terminal cursor colour as #RRGGBB.
     #[serde(default)]
     pub terminal_cursor_color: String,
+    /// Whether the cursor follows the active theme instead of the saved colour.
+    #[serde(default)]
+    pub terminal_cursor_auto: bool,
     /// Stored inverted so missing/legacy config keeps the automatic plain-text
     /// output highlighter enabled by default.
     #[serde(default)]
@@ -1159,11 +1162,20 @@ impl ConfigStore {
         }
     }
 
+    pub fn terminal_cursor_auto(&self) -> bool {
+        self.cache.terminal_cursor_auto || self.terminal_cursor_color().is_empty()
+    }
+
+    pub fn set_terminal_cursor_auto(&mut self, automatic: bool) {
+        self.cache.terminal_cursor_auto = automatic;
+    }
+
     pub fn set_terminal_cursor_color(&mut self, color: &str) -> bool {
         let Some(normalized) = normalize_hex_color(color) else {
             return false;
         };
         self.cache.terminal_cursor_color = normalized;
+        self.cache.terminal_cursor_auto = false;
         true
     }
 
