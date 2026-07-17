@@ -98,6 +98,8 @@ export component TerminalView inherits Rectangle {
     in property <[TermSpan]> spans;     // coloured runs of the visible screen
     in property <int> cursor-row;       // cursor cell (grid coords)
     in property <int> cursor-col;
+    in property <string> cursor-style: "block";
+    in property <color> cursor-color: Theme.term-fg;
     in property <int> rows-used;        // content rows, for viewport sizing
     in property <int> scroll-max;       // scrollback depth (max offset) (#103)
     in property <int> scroll-offset;    // current offset (0 = live bottom) (#103)
@@ -676,13 +678,20 @@ export component TerminalView inherits Rectangle {
                             }
                         }
 
-                        // Blinking block cursor (overlay, decoupled from text).
+                        // Blinking cursor (overlay, decoupled from text). Its
+                        // shape follows the persisted user preference (#275).
                         Rectangle {
-                            x: root.cursor-col * root.cell-w + 0.3px;
-                            y: root.cursor-row * root.cell-h;
-                            width: root.cell-w;
-                            height: root.cell-h;
-                            background: Theme.term-fg;
+                            // Full-screen editors address the current cell; put a
+                            // bar at its trailing edge so it remains visible after
+                            // a double-width final glyph. Shells keep the insertion
+                            // cell edge, including the custom 0.3px spacing.
+                            x: root.cursor-col * root.cell-w + 0.3px
+                                + (root.cursor-style == "bar" && root.is-alt-screen ? root.cell-w : 0px);
+                            y: root.cursor-row * root.cell-h
+                                + (root.cursor-style == "underline" ? max(0px, root.cell-h - max(2px, root.cell-h / 8)) : 0px);
+                            width: root.cursor-style == "bar" ? max(2px, root.cell-w / 8) : root.cell-w;
+                            height: root.cursor-style == "underline" ? max(2px, root.cell-h / 8) : root.cell-h;
+                            background: root.cursor-color;
                             // Blink while focused; show solid (no repaint) when the
                             // window is unfocused so the cursor neither vanishes nor
                             // keeps the window repainting (#127).
@@ -692,14 +701,16 @@ export component TerminalView inherits Rectangle {
                         }
 
                         // An unfocused terminal keeps its cursor location visible
-                        // without competing with the focused terminal's solid block.
+                        // without competing with the focused terminal's solid shape.
                         Rectangle {
-                            x: root.cursor-col * root.cell-w + 0.3px;
-                            y: root.cursor-row * root.cell-h;
-                            width: root.cell-w;
-                            height: root.cell-h;
+                            x: root.cursor-col * root.cell-w + 0.3px
+                                + (root.cursor-style == "bar" && root.is-alt-screen ? root.cell-w : 0px);
+                            y: root.cursor-row * root.cell-h
+                                + (root.cursor-style == "underline" ? max(0px, root.cell-h - max(2px, root.cell-h / 8)) : 0px);
+                            width: root.cursor-style == "bar" ? max(2px, root.cell-w / 8) : root.cell-w;
+                            height: root.cursor-style == "underline" ? max(2px, root.cell-h / 8) : root.cell-h;
                             border-width: 1px;
-                            border-color: Theme.term-fg;
+                            border-color: root.cursor-color;
                             background: transparent;
                             visible: !ime-input.has-focus;
                         }
