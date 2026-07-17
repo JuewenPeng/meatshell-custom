@@ -898,6 +898,7 @@ pub fn run() -> Result<()> {
         window.set_term_font_size(s.font_size() as f32);
         window.set_term_font_bold(s.terminal_bold());
         window.set_term_cursor_style(s.terminal_cursor_style().into());
+        window.set_term_cursor_auto(s.terminal_cursor_auto());
         if let Some(color) = parse_hex_color(s.terminal_cursor_color()) {
             window.set_term_cursor_color_hex(s.terminal_cursor_color().into());
             window.set_term_cursor_color(color);
@@ -1254,9 +1255,25 @@ pub fn run() -> Result<()> {
                 let _ = s.save();
             }
             if let Some(w) = weak.upgrade() {
+                w.set_term_cursor_color_hex(value.clone());
                 w.set_term_cursor_color(color);
+                w.set_term_cursor_auto(false);
             }
             true
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_term_cursor_auto(move |automatic| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_terminal_cursor_auto(automatic);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_term_cursor_auto(automatic);
+            }
         });
     }
     {
@@ -3467,6 +3484,8 @@ fn session_from_draft(
         disable_shell_integration: draft.disable_shell_integration,
         note: draft.note.to_string(),
         jump_session_id: draft.jump_session_id.to_string(),
+        x11_forwarding: draft.x11_forwarding,
+        x11_display: draft.x11_display.to_string(),
     }
 }
 
