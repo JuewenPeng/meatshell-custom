@@ -74,15 +74,17 @@ export component PrimaryButton inherits Rectangle {
 // --- GhostButton -----------------------------------------------------------
 export component GhostButton inherits Rectangle {
     in property <string> text;
+    in property <bool> selected: false;
     callback clicked();
 
     height: 30px;
     min-width: 80px;
     border-radius: Theme.radius-sm;
     border-width: 1px;
-    border-color: touch.has-hover ? Theme.border-strong : Theme.border-subtle;
-    background: touch.pressed ? Theme.bg-active
-        : (touch.has-hover ? Theme.bg-hover : Theme.bg-panel);
+    border-color: root.selected ? Theme.accent : (touch.has-hover ? Theme.border-strong : Theme.border-subtle);
+    background: root.selected ? Theme.accent
+        : (touch.pressed ? Theme.bg-active
+        : (touch.has-hover ? Theme.bg-hover : Theme.bg-panel));
     animate background, border-color { duration: 120ms; }
 
     HorizontalLayout {
@@ -91,7 +93,7 @@ export component GhostButton inherits Rectangle {
         alignment: center;
         Text {
             text: root.text;
-            color: Theme.text-primary;
+            color: root.selected ? #ffffff : Theme.text-primary;
             font-size: Theme.fs-md;
             vertical-alignment: center;
         }
