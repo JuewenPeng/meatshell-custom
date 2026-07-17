@@ -48,7 +48,7 @@ component SingleTab inherits Rectangle {
 
     // Declared FIRST so the HorizontalLayout's children (close button) are at
     // a higher z-order and receive their own click events.
-    touch := TouchArea {
+    legacy-drag-touch := TouchArea {
         mouse-cursor: pointer;
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
