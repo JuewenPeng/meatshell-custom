@@ -2059,15 +2059,94 @@ async fn run_session(
     }
     let handle = Arc::new(handle);
 
-    // Delay auxiliary channels until after the terminal is usable, but open them
-    // from this task. Opening them in detached tasks while `channel.wait()` was
-    // being polled could make russh/strict servers close the primary PTY exactly
-    // when the first monitor started (#264 follow-up).
-    let auxiliary_started_at = tokio::time::Instant::now();
-    let mut auxiliary_startup = AuxiliaryStartup::new(!session.disable_shell_integration);
-    let mut auxiliary_deadline = auxiliary_startup
-        .pending()
-        .map(|kind| auxiliary_started_at + kind.delay());
+    // Auxiliary channels are deliberately outside the terminal-ready critical
+    // path. SFTP gets the first opportunity after Connected; lightweight
+    // resources follow, and process/system enrichment starts last.
+    let (mon_ready_tx, mut mon_ready_rx) = tokio::sync::oneshot::channel();
+    let (proc_ready_tx, mut proc_ready_rx) = tokio::sync::oneshot::channel();
+    let (sys_ready_tx, mut sys_ready_rx) = tokio::sync::oneshot::channel();
+    // Shared flag so the delayed spawn tasks can skip opening a channel
+    // when monitoring was disabled (e.g. sidebar collapsed) during the
+    // sleep window. Opening a channel just to immediately close it can
+    // cause some SSH servers to drop the entire transport (#345).
+    let mon_flag = Arc::new(AtomicBool::new(true));
+    if session.disable_shell_integration {
+        let _ = mon_ready_tx.send(None);
+        let _ = proc_ready_tx.send(None);
+        let _ = sys_ready_tx.send(None);
+    } else {
+        let proc_flag = mon_flag.clone();
+        let sys_flag = mon_flag.clone();
+        let mon_flag = mon_flag.clone();
+        let mon_handle = handle.clone();
+        let resources_enabled = resource_monitor_enabled;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            let channel = if !resources_enabled {
+                None
+            } else { match mon_handle.channel_open_session().await {
+                Ok(ch) => match ch.exec(true, MON_CMD).await {
+                    Ok(()) => Some(ch),
+                    Err(error) => {
+                        tracing::warn!("monitor exec failed: {error}");
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!("monitor channel open failed: {error}");
+                    None
+                }
+            }};
+            let _ = mon_ready_tx.send(channel);
+        });
+        let proc_handle = handle.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            if !proc_flag.load(Ordering::Relaxed) {
+                let _ = proc_ready_tx.send(None);
+                return;
+            }
+            let channel = match proc_handle.channel_open_session().await {
+                Ok(ch) => match ch.exec(true, PROC_CMD).await {
+                    Ok(()) => Some(ch),
+                    Err(error) => {
+                        tracing::warn!("process monitor exec failed: {error}");
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!("process monitor channel open failed: {error}");
+                    None
+                }
+            };
+            let _ = proc_ready_tx.send(channel);
+        });
+        let sys_handle = handle.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            if !sys_flag.load(Ordering::Relaxed) {
+                let _ = sys_ready_tx.send(None);
+                return;
+            }
+            let channel = match sys_handle.channel_open_session().await {
+                Ok(ch) => match ch.exec(true, SYS_CMD).await {
+                    Ok(()) => Some(ch),
+                    Err(error) => {
+                        tracing::warn!("system-info exec failed: {error}");
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!("system-info channel open failed: {error}");
+                    None
+                }
+            };
+            let _ = sys_ready_tx.send(channel);
+        });
+    }
+    let mut mon_start_pending = true;
+    let mut proc_start_pending = true;
+    let mut sys_start_pending = true;
     let mut resource_monitoring = true;
     let mut first_terminal_output = true;
     // Local (-L) and dynamic (-D) listen client-side; their tasks are aborted
