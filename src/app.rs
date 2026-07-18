@@ -10066,10 +10066,9 @@ fn wire_key_input(
             //
             // Three-layer defence:
             //
-            //   Layer 1 – shift=true guard.
-            //     The synthetic Backspace arrives during Shift keydown, so
-            //     GetKeyState(VK_SHIFT) is still "down" → Slint reports shift=true.
-            //     Drop any Backspace (0x08) arriving while Shift is flagged.
+            //   Layer 1 – physical Backspace guard while Shift is held.
+            //     The synthetic event arrives during Shift keydown, but a real
+            //     Shift+Backspace must remain a normal terminal backspace.
             //
             //   Layer 2 – time-based guard.
             //     Baidu Pinyin posts WM_CHAR 0x08 asynchronously, so by the time
@@ -10085,8 +10084,11 @@ fn wire_key_input(
             if key.as_str() == "\u{0008}" && !ctrl && !alt {
                 // Layer 1
                 if shift {
-                    tracing::info!("[KEY_DIAG] Backspace DROPPED by layer-1 (shift=true)");
-                    return;
+                    #[cfg(windows)]
+                    if !is_vk_back_down() {
+                        tracing::info!("[KEY_DIAG] Backspace DROPPED by layer-1 (shift held, VK_BACK not down)");
+                        return;
+                    }
                 }
                 // Layer 2 — 时间窗口 1500ms
                 // 日志显示百度拼音注入 U+0010(右Shift标记) 到 Backspace 之间
@@ -10101,7 +10103,7 @@ fn wire_key_input(
                         None => (false, 0),
                     }
                 };
-                if shift_just_pressed {
+                if !shift && shift_just_pressed {
                     tracing::info!(
                         "[KEY_DIAG] Backspace DROPPED by layer-2 ({}ms after IME Shift marker)",
                         elapsed_ms
