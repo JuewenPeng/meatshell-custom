@@ -701,12 +701,9 @@ export component TerminalView inherits Rectangle {
                         // Blinking cursor (overlay, decoupled from text). Its
                         // shape follows the persisted user preference (#275).
                         Rectangle {
-                            // Full-screen editors address the current cell; put a
-                            // bar at its trailing edge so it remains visible after
-                            // a double-width final glyph. Shells keep the insertion
-                            // cell edge, including the custom 0.3px spacing.
-                            x: root.cursor-col * root.cell-w + 0.3px
-                                + (root.cursor-style == "bar" && root.is-alt-screen ? root.cell-w : 0px);
+                            // All cursor shapes begin at the current cell's left
+                            // edge, including the bar cursor in full-screen apps.
+                            x: root.cursor-col * root.cell-w;
                             y: root.cursor-row * root.cell-h
                                 + (root.cursor-style == "underline" ? max(0px, root.cell-h - max(2px, root.cell-h / 8)) : 0px);
                             width: root.cursor-style == "bar" ? max(2px, root.cell-w / 8) : root.cell-w;
@@ -723,8 +720,7 @@ export component TerminalView inherits Rectangle {
                         // An unfocused terminal keeps its cursor location visible
                         // without competing with the focused terminal's solid shape.
                         Rectangle {
-                            x: root.cursor-col * root.cell-w + 0.3px
-                                + (root.cursor-style == "bar" && root.is-alt-screen ? root.cell-w : 0px);
+                            x: root.cursor-col * root.cell-w;
                             y: root.cursor-row * root.cell-h
                                 + (root.cursor-style == "underline" ? max(0px, root.cell-h - max(2px, root.cell-h / 8)) : 0px);
                             width: root.cursor-style == "bar" ? max(2px, root.cell-w / 8) : root.cell-w;
