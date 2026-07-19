@@ -201,7 +201,24 @@ else {
 }
 
 Run-Git @('add', 'Cargo.toml', 'Cargo.lock')
-Run-Git @('commit', '-m', "Release $Tag")
+
+# Re-running a release for an already-versioned clean HEAD should recreate the
+# tag without failing on an empty commit.
+if ($DryRun) {
+    Write-Host "Would commit release changes if Cargo.toml or Cargo.lock changed."
+}
+else {
+    & git diff --cached --quiet --exit-code
+    if ($LASTEXITCODE -eq 1) {
+        Run-Git @('commit', '-m', "Release $Tag")
+    }
+    elseif ($LASTEXITCODE -eq 0) {
+        Write-Host "Version is already $version; creating tag without an empty release commit."
+    }
+    else {
+        throw 'Could not determine whether the release files changed.'
+    }
+}
 Run-Git @('tag', '-a', $Tag, '-m', "Release $Tag")
 
 if ($Push) {
