@@ -470,6 +470,7 @@ export component InterfacePanel inherits Rectangle {
     in-out property <string> term-cursor-color-hex: "#D4D4D4";
     in property <color> term-cursor-color: #D4D4D4;
     in-out property <bool> term-cursor-auto: true;
+    in-out property <float> term-cursor-opacity: 0.6;
     in-out property <bool> output-highlight-enabled;
     in-out property <string> output-highlight-preset;
     in property <[OutputRuleItem]> output-highlight-rules;
@@ -512,6 +513,7 @@ export component InterfacePanel inherits Rectangle {
     callback set-term-cursor-style(string);
     callback set-term-cursor-color(string) -> bool;
     callback set-term-cursor-auto(bool);
+    callback set-term-cursor-opacity(float);
     callback set-output-highlight(bool, string);
     callback add-output-highlight-rule(string, bool, bool, bool, string) -> bool;
     callback remove-output-highlight-rule(int);
@@ -696,6 +698,22 @@ export component InterfacePanel inherits Rectangle {
                                 root.set-term-cursor-auto(root.term-cursor-auto);
                             }
                         }
+                    }
+                }
+                SettingRow {
+                    label: root.lang-en ? "Cursor opacity" : "光标不透明度";
+                    desc: root.lang-en ? "Controls how opaque the cursor is over terminal text."
+                                       : "调整光标覆盖终端文字时的不透明程度。";
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Slider {
+                            width: 150px; minimum: 10; maximum: 100;
+                            value: root.term-cursor-opacity * 100;
+                            changed(v) => { root.term-cursor-opacity = v / 100; }
+                            released(v) => { root.set-term-cursor-opacity(v / 100); }
+                        }
+                        Text { text: round(root.term-cursor-opacity * 100) + "%"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
                     }
                 }
                 SettingRow {
