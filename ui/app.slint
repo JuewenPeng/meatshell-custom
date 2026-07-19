@@ -488,6 +488,7 @@ export component AppWindow inherits Window {
     in-out property <string> term-cursor-color-hex: "";
     in-out property <color> term-cursor-color: Theme.term-fg;
     in-out property <bool> term-cursor-auto: true;
+    in-out property <float> term-cursor-opacity: 0.6;
     in-out property <bool> output-highlight-enabled: true;
     in-out property <string> output-highlight-preset: "log";
     in property <[OutputRuleItem]> output-highlight-rules;
@@ -555,6 +556,7 @@ export component AppWindow inherits Window {
     callback set-term-cursor-style(string);        // apply + persist cursor shape (#275)
     callback set-term-cursor-color(string) -> bool;// validate + persist cursor colour (#275)
     callback set-term-cursor-auto(bool);
+    callback set-term-cursor-opacity(float);
     callback set-output-highlight(bool, string);   // enable + built-in preset
     callback add-output-highlight-rule(string, bool, bool, bool, string) -> bool;
     callback remove-output-highlight-rule(int);
@@ -1715,6 +1717,7 @@ export component AppWindow inherits Window {
                     cursor-col: term.cursor-col;
                     cursor-style: root.term-cursor-style;
                     cursor-color: root.term-cursor-auto ? Theme.term-fg : root.term-cursor-color;
+                    cursor-opacity: root.term-cursor-opacity;
                     rows-used: term.rows-used;
                     scroll-max: term.scroll-max;
                     scroll-offset: term.scroll-offset;
@@ -4979,6 +4982,7 @@ export component AppWindow inherits Window {
                     term-cursor-color-hex <=> root.term-cursor-color-hex;
                     term-cursor-color: root.term-cursor-color;
                     term-cursor-auto <=> root.term-cursor-auto;
+                    term-cursor-opacity <=> root.term-cursor-opacity;
                     output-highlight-enabled <=> root.output-highlight-enabled;
                     output-highlight-preset <=> root.output-highlight-preset;
                     output-highlight-rules: root.output-highlight-rules;
@@ -5014,6 +5018,7 @@ export component AppWindow inherits Window {
                     set-term-cursor-style(v) => { root.set-term-cursor-style(v); }
                     set-term-cursor-color(v) => { root.set-term-cursor-color(v) }
                     set-term-cursor-auto(v) => { root.set-term-cursor-auto(v); }
+                    set-term-cursor-opacity(v) => { root.set-term-cursor-opacity(v); }
                     set-output-highlight(enabled, preset) => {
                         root.set-output-highlight(enabled, preset);
                     }

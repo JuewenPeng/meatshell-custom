@@ -76,9 +76,28 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Tracked files have staged changes. Commit or stash them before releasing.'
 }
 
-$existingTag = & git tag --list $Tag
-if ($existingTag) {
-    throw "Tag '$Tag' already exists."
+$existingLocalTag = & git tag --list $Tag
+if ($existingLocalTag) {
+    Confirm-DeleteTag 'locally'
+    Run-Git @('tag', '-d', $Tag)
+}
+
+# A remote tag matters only when this invocation will push the release. Keep
+# non-pushing releases entirely local.
+if ($Push) {
+    if ($DryRun) {
+        Write-Host "Would check origin for tag '$Tag'."
+    }
+    else {
+        $existingRemoteTag = & git ls-remote --tags --refs origin "refs/tags/$Tag"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not check whether tag '$Tag' exists on origin."
+        }
+        if ($existingRemoteTag) {
+            Confirm-DeleteTag 'on origin'
+            Run-Git @('push', 'origin', ":refs/tags/$Tag")
+        }
+    }
 }
 
 $version = $Tag.Substring(1)
@@ -179,4 +198,18 @@ if ($Push) {
 else {
     Write-Host "Created release commit and tag $Tag."
     Write-Host "Push with: git push origin HEAD && git push origin $Tag"
+}
+
+function Confirm-DeleteTag {
+    param([Parameter(Mandatory = $true)][string] $Location)
+
+    if ($DryRun) {
+        Write-Host "Would ask to delete existing $Location tag '$Tag'."
+        return
+    }
+
+    $answer = Read-Host "Tag '$Tag' already exists $Location. Delete it? [y/N]"
+    if ($answer -notmatch '^(?i:y|yes)$') {
+        throw "Release cancelled; existing $Location tag '$Tag' was not deleted."
+    }
 }
