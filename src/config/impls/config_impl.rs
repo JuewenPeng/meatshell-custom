@@ -677,6 +677,8 @@ pub struct ConfigFile {
     /// Whether the cursor follows the active theme instead of the saved colour.
     #[serde(default)]
     pub terminal_cursor_auto: bool,
+    #[serde(default)]
+    pub terminal_cursor_opacity: f32,
     /// Stored inverted so missing/legacy config keeps the automatic plain-text
     /// output highlighter enabled by default.
     #[serde(default)]
@@ -1212,6 +1214,15 @@ impl ConfigStore {
 
     pub fn set_terminal_cursor_auto(&mut self, automatic: bool) {
         self.cache.terminal_cursor_auto = automatic;
+    }
+
+    pub fn terminal_cursor_opacity(&self) -> f32 {
+        let opacity = self.cache.terminal_cursor_opacity;
+        if opacity > 0.0 && opacity <= 1.0 { opacity } else { 0.6 }
+    }
+
+    pub fn set_terminal_cursor_opacity(&mut self, opacity: f32) {
+        self.cache.terminal_cursor_opacity = opacity.clamp(0.1, 1.0);
     }
 
     pub fn set_terminal_cursor_color(&mut self, color: &str) -> bool {

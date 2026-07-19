@@ -899,6 +899,7 @@ pub fn run() -> Result<()> {
         window.set_term_font_bold(s.terminal_bold());
         window.set_term_cursor_style(s.terminal_cursor_style().into());
         window.set_term_cursor_auto(s.terminal_cursor_auto());
+        window.set_term_cursor_opacity(s.terminal_cursor_opacity());
         if let Some(color) = parse_hex_color(s.terminal_cursor_color()) {
             window.set_term_cursor_color_hex(s.terminal_cursor_color().into());
             window.set_term_cursor_color(color);
@@ -1273,6 +1274,21 @@ pub fn run() -> Result<()> {
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_cursor_auto(automatic);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_term_cursor_opacity(move |opacity| {
+            let opacity = opacity.clamp(0.1, 1.0);
+            {
+                let mut s = store.borrow_mut();
+                s.set_terminal_cursor_opacity(opacity);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_term_cursor_opacity(opacity);
             }
         });
     }
