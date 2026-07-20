@@ -379,9 +379,7 @@ export component SftpPanel inherits Rectangle {
     // Keep the editable path bar in sync when the directory changes elsewhere
     // (tree click, file double-click, terminal cd) (#54).
     changed current-path => {
-        path-input.text = root.current-path;
-        side-path-input.text = root.current-path;
-        root.scroll-path-to-end();
+        root.sync-path-inputs();
         root.selected-row = -1;
         root.focused-tree-path = root.current-path;
     }
@@ -411,6 +409,12 @@ export component SftpPanel inherits Rectangle {
         path-input.scroll-to-end();
         side-path-input.set-selection-offsets(1000000, 1000000);
         side-path-input.scroll-to-end();
+    }
+
+    public function sync-path-inputs() {
+        path-input.text = root.current-path;
+        side-path-input.text = root.current-path;
+        root.scroll-path-to-end();
     }
 
     tree-name-click-delay := Timer {
@@ -795,7 +799,12 @@ export component SftpPanel inherits Rectangle {
                 background: ref-ta.has-hover ? Theme.bg-hover : transparent;
                 ref-ta := TouchArea {
                     mouse-cursor: pointer;
-                    clicked => { root.selected-row = -1; root.selection-anchor-row = -1; root.refresh(root.current-path); }
+                    clicked => {
+                        root.selected-row = -1;
+                        root.selection-anchor-row = -1;
+                        root.sync-path-inputs();
+                        root.refresh(root.current-path);
+                    }
                 }
                 SftpToolbarIcon { width: parent.width; height: parent.height; glyph: "\u{E5D5}"; glyph-color: Theme.text-secondary; glyph-size: Theme.fs-sm; }
                 SftpTooltip { text: root.lang-en ? "Refresh" : "刷新"; hover: ref-ta.has-hover; }
@@ -1643,6 +1652,7 @@ export component SftpPanel inherits Rectangle {
                                     clicked => {
                                         root.selected-row = -1;
                                         root.selection-anchor-row = -1;
+                                        root.sync-path-inputs();
                                         root.refresh(root.current-path);
                                     }
                                 }
