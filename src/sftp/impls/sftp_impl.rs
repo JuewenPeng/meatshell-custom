@@ -234,6 +234,8 @@ pub enum SftpCommand {
     ProbeTreeNode(String),
     /// Expand enough parent directories to make this path visible in the flat tree.
     RevealTreePath(String),
+    /// Replace the visible directory-tree expansion state after an in-place reconnect.
+    RestoreTreeExpanded(Vec<String>),
     /// Expand enough parent directories in the move-target tree only.
     RevealMoveTreePath(String),
     /// Download a remote file to a local directory.
@@ -414,6 +416,9 @@ impl SftpHandle {
     }
     pub fn reveal_tree_path(&self, path: String) {
         let _ = self.commands.send(SftpCommand::RevealTreePath(path));
+    }
+    pub fn restore_tree_expanded(&self, paths: Vec<String>) {
+        let _ = self.commands.send(SftpCommand::RestoreTreeExpanded(paths));
     }
     pub fn delete(&self, path: String) {
         let _ = self.commands.send(SftpCommand::Delete(path));
@@ -1176,6 +1181,25 @@ async fn run_sftp(
 
             SftpCommand::RevealTreePath(path) => {
                 reveal_tree_path(&sftp, &path, &mut tree_dirs, &mut tree_expanded).await;
+                emit_tree(&tree_dirs, &tree_expanded, &events);
+            }
+
+            SftpCommand::RestoreTreeExpanded(paths) => {
+                tree_expanded.clear();
+                tree_expanded.insert("/".to_string());
+                let mut paths = paths;
+                paths.sort_by_key(|path| path.matches('/').count());
+                for path in paths {
+                    if path == "/" {
+                        continue;
+                    }
+                    reveal_tree_path(&sftp, &path, &mut tree_dirs, &mut tree_expanded).await;
+                    if !tree_dirs.contains_key(&path) {
+                        let dirs = list_tree_children_impl(&sftp, &path).await.unwrap_or_default();
+                        tree_dirs.insert(path.clone(), dirs);
+                    }
+                    tree_expanded.insert(path);
+                }
                 emit_tree(&tree_dirs, &tree_expanded, &events);
             }
 
