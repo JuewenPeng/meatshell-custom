@@ -4659,6 +4659,25 @@ fn resolve_jump(store: &Rc<RefCell<ConfigStore>>, session: &Session) -> Option<S
 /// reconnect (#79); the tab/terminal/parser must already exist.
 fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
     let has_sftp = session.kind == SessionKind::Ssh;
+    // Reconnect reuses the existing tab model. Snapshot its SFTP location and
+    // expanded nodes before the fresh worker publishes its initial home tree.
+    let (restore_sftp_path, restore_tree_expanded) = if has_sftp {
+        ctx.weak.upgrade().and_then(|w| {
+            let terminals = w.get_terminals();
+            let terminals = terminals.as_any().downcast_ref::<VecModel<TerminalState>>()?;
+            (0..terminals.row_count()).find_map(|i| {
+                let row = terminals.row_data(i)?;
+                if row.id.as_str() != tab_id { return None; }
+                let nodes = row.sftp_tree_nodes.as_any().downcast_ref::<VecModel<SftpTreeNode>>();
+                let expanded = nodes.map(|nodes| {
+                    (0..nodes.row_count()).filter_map(|n| nodes.row_data(n))
+                        .filter(|node| node.expanded && node.is_dir)
+                        .map(|node| node.path.to_string()).collect()
+                }).unwrap_or_default();
+                Some((row.sftp_path.to_string(), expanded))
+            })
+        }).unwrap_or_else(|| ("/".to_string(), Vec::new()))
+    } else { ("/".to_string(), Vec::new()) };
     let (initial_cols, initial_rows) = *ctx.last_term_size.lock().unwrap();
     // Resolve the optional SSH jump host now (on the UI thread, where the store
     // lives) so the owned Session can be handed to the worker threads (#211).
@@ -4705,6 +4724,8 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
         let sftp_task_runtime = sftp_runtime.clone();
         let sftp_handles = ctx.sftp_handles.clone();
         let sftp_tab_id = tab_id.to_string();
+        let restore_path = restore_sftp_path.clone();
+        let restore_expanded = restore_tree_expanded.clone();
         sftp_runtime.spawn(async move {
             if ready_rx.await.is_err() {
                 return;
@@ -4712,6 +4733,12 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
             tokio::task::yield_now().await;
             let sftp_handle =
                 spawn_sftp(sftp_task_runtime.handle(), session, jump, sftp_tx);
+            if !restore_expanded.is_empty() {
+                sftp_handle.restore_tree_expanded(restore_expanded);
+            }
+            if restore_path != "/" {
+                sftp_handle.list_dir(restore_path);
+            }
             if let Ok(mut handles) = sftp_handles.lock() {
                 handles.insert(sftp_tab_id, sftp_handle);
             }
