@@ -8460,6 +8460,15 @@ fn wire_sftp_callbacks(
                         paths.entry(tab_id.clone()).or_default().insert(current.clone(), selected);
                     }
                 }
+                // Tree clicks and path-bar navigation have no selected file-list
+                // row. When they enter a direct child, remember that child just
+                // like a double-clicked list entry so returning with `..` can
+                // select it in its parent directory.
+                if path != ".." && parent_path(&resolved) == current {
+                    if let Ok(mut paths) = sftp_selection_paths.lock() {
+                        paths.entry(tab_id.clone()).or_default().insert(current.clone(), resolved.clone());
+                    }
+                }
                 let terminals_rc = w.get_terminals();
                 if let Some(terminals) = terminals_rc.as_any().downcast_ref::<VecModel<TerminalState>>() {
                     for i in 0..terminals.row_count() {
@@ -10203,56 +10212,13 @@ fn wire_key_input(
             //   2. Posts WM_KEYDOWN VK_BACK + WM_CHAR 0x08 to erase whatever
             //      character it had already forwarded to the app.
             //
-            // Three-layer defence:
-            //
-            //   Layer 1 – physical Backspace guard while Shift is held.
-            //     The synthetic event arrives during Shift keydown, but a real
-            //     Shift+Backspace must remain a normal terminal backspace.
-            //
-            //   Layer 2 – time-based guard.
-            //     Baidu Pinyin posts WM_CHAR 0x08 asynchronously, so by the time
-            //     the message is dequeued Shift may already read as "up"
-            //     → shift=false defeats Layer 1.
-            //     Mitigation: we recorded the timestamp when the Shift key alone
-            //     was pressed (key="", shift=true) a few lines above.  Drop any
-            //     Backspace arriving within 200 ms of that moment.
-            //
-            //   Layer 3 – GetKeyState guard (belt-and-suspenders).
-            //     If VK_BACK is not actually "down" (i.e. no real WM_KEYDOWN
-            //     VK_BACK was ever queued), the Backspace must be synthetic.
+            // Only trust the physical Backspace key state. A time-based Shift
+            // window also catches real Backspace immediately after typing an
+            // uppercase letter, making normal editing feel temporarily locked.
             if key.as_str() == "\u{0008}" && !ctrl && !alt {
-                // Layer 1
-                if shift {
-                    #[cfg(windows)]
-                    if !is_vk_back_down() {
-                        tracing::info!("[KEY_DIAG] Backspace DROPPED by layer-1 (shift held, VK_BACK not down)");
-                        return;
-                    }
-                }
-                // Layer 2 — 时间窗口 1500ms
-                // 日志显示百度拼音注入 U+0010(右Shift标记) 到 Backspace 之间
-                // 间隔约 914ms，因此窗口设为 1500ms 以覆盖该场景。
-                let (shift_just_pressed, elapsed_ms) = {
-                    let guard = last_shift_time.lock().unwrap();
-                    match *guard {
-                        Some(t) => {
-                            let ms = t.elapsed().as_millis();
-                            (ms < 1500, ms)
-                        }
-                        None => (false, 0),
-                    }
-                };
-                if !shift && shift_just_pressed {
-                    tracing::info!(
-                        "[KEY_DIAG] Backspace DROPPED by layer-2 ({}ms after IME Shift marker)",
-                        elapsed_ms
-                    );
-                    return;
-                }
-                // Layer 3
                 #[cfg(windows)]
                 if !is_vk_back_down() {
-                    tracing::info!("[KEY_DIAG] Backspace DROPPED by layer-3 (VK_BACK not down)");
+                    tracing::info!("[KEY_DIAG] Backspace DROPPED (VK_BACK not down)");
                     return;
                 }
                 tracing::info!("[KEY_DIAG] Backspace PASSED all filters → sent to PTY");
