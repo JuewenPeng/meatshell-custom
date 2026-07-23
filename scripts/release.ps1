@@ -91,14 +91,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $existingLocalTag = & git tag --list $Tag
+$replaceExistingTag = $false
 if ($existingLocalTag) {
     Confirm-DeleteTag 'locally'
     Run-Git @('tag', '-d', $Tag)
+    # Confirming replacement of a local release tag also replaces its remote
+    # counterpart and pushes the rebuilt tag at the end of this script.
+    $replaceExistingTag = $true
 }
 
-# A remote tag matters only when this invocation will push the release. Keep
-# non-pushing releases entirely local.
-if ($Push) {
+# A remote tag is touched for an explicit push, or when the user confirmed
+# replacement of an existing local release tag.
+if ($Push -or $replaceExistingTag) {
     if ($DryRun) {
         Write-Host "Would check origin for tag '$Tag'."
     }
@@ -108,7 +112,9 @@ if ($Push) {
             throw "Could not check whether tag '$Tag' exists on origin."
         }
         if ($existingRemoteTag) {
-            Confirm-DeleteTag 'on origin'
+            if (-not $replaceExistingTag) {
+                Confirm-DeleteTag 'on origin'
+            }
             Run-Git @('push', 'origin', ":refs/tags/$Tag")
         }
     }
@@ -225,6 +231,10 @@ if ($Push) {
     Run-Git @('push', 'origin', 'HEAD')
     Run-Git @('push', 'origin', $Tag)
     Write-Host "Released $Tag and pushed branch + tag."
+}
+elseif ($replaceExistingTag) {
+    Run-Git @('push', 'origin', $Tag)
+    Write-Host "Replaced and pushed tag $Tag."
 }
 else {
     Write-Host "Created release commit and tag $Tag."
