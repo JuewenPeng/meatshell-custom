@@ -1395,14 +1395,6 @@ impl ConfigStore {
         self.cache.output_highlight_disabled = !enabled;
     }
 
-    pub fn json_format_output(&self) -> bool {
-        !self.cache.json_format_disabled
-    }
-
-    pub fn set_json_format_output(&mut self, enabled: bool) {
-        self.cache.json_format_disabled = !enabled;
-    }
-
     /// Selected built-in rule set. Unknown values safely fall back to the
     /// conservative log-level preset for forward/backward compatibility.
     pub fn output_highlight_preset(&self) -> &str {
@@ -1488,94 +1480,6 @@ impl ConfigStore {
 
     pub fn set_quick_commands(&mut self, cmds: Vec<QuickCommand>) {
         self.cache.quick_commands = cmds;
-    }
-
-    pub fn wsl_profiles(&self) -> &[WslProfile] {
-        &self.cache.wsl_profiles
-    }
-
-    pub fn add_wsl_profile(&mut self, name: String, distribution: String, directory: String) {
-        let name = name.trim();
-        if name.is_empty() {
-            return;
-        }
-        self.cache.wsl_profiles.push(WslProfile {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.to_string(),
-            distribution: distribution.trim().to_string(),
-            directory: match directory.trim() {
-                "" => "~".to_string(),
-                value => value.to_string(),
-            },
-        });
-    }
-
-    pub fn remove_wsl_profile(&mut self, id: &str) {
-        self.cache.wsl_profiles.retain(|profile| profile.id != id);
-    }
-
-    pub fn quick_panel_open(&self) -> bool {
-        self.cache.quick_panel_open
-    }
-
-    pub fn quick_commands_as_sidebar(&self) -> bool {
-        self.cache.quick_commands_as_sidebar
-    }
-
-    pub fn set_quick_commands_as_sidebar(&mut self, enabled: bool) {
-        self.cache.quick_commands_as_sidebar = enabled;
-        if !enabled {
-            self.cache.quick_panel_open = false;
-        }
-    }
-
-    pub fn set_quick_panel_open(&mut self, open: bool) {
-        self.cache.quick_panel_open = open;
-    }
-
-    pub fn quick_panel_collapsed(&self) -> bool {
-        self.cache.quick_panel_collapsed
-    }
-
-    pub fn set_quick_panel_collapsed(&mut self, collapsed: bool) {
-        self.cache.quick_panel_collapsed = collapsed;
-    }
-
-    pub fn quick_panel_width(&self) -> f32 {
-        let width = self.cache.quick_panel_width;
-        if width <= 0.0 {
-            default_quick_panel_width()
-        } else {
-            width
-        }
-    }
-
-    pub fn set_quick_panel_width(&mut self, width: f32) {
-        self.cache.quick_panel_width = width;
-    }
-
-    pub fn quick_panel_height(&self) -> f32 {
-        let height = self.cache.quick_panel_height;
-        if height <= 0.0 {
-            default_quick_panel_height()
-        } else {
-            height
-        }
-    }
-
-    pub fn set_quick_panel_height(&mut self, height: f32) {
-        self.cache.quick_panel_height = height;
-    }
-
-    pub fn quick_panel_dock(&self) -> String {
-        match self.cache.quick_panel_dock.trim() {
-            "left" | "right" | "top" | "bottom" => self.cache.quick_panel_dock.clone(),
-            _ => "right".into(),
-        }
-    }
-
-    pub fn set_quick_panel_dock(&mut self, dock: String) {
-        self.cache.quick_panel_dock = dock;
     }
 
     /// Explicit quick-command groups (#55) — parallels [`groups`](Self::groups).
@@ -2643,14 +2547,11 @@ mod tests {
     fn output_highlight_defaults_and_preset_validation() {
         let mut store = temp_store();
         assert!(store.output_highlight_enabled());
-        assert!(store.json_format_output());
         assert_eq!(store.output_highlight_preset(), "log");
 
         store.set_output_highlight_enabled(false);
         store.set_output_highlight_preset("devops".to_string());
         assert!(!store.output_highlight_enabled());
-        store.set_json_format_output(false);
-        assert!(!store.json_format_output());
         assert_eq!(store.output_highlight_preset(), "devops");
 
         store.set_output_highlight_preset("future-preset".to_string());
