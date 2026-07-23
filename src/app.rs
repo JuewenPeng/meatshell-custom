@@ -1024,27 +1024,15 @@ pub fn run() -> Result<()> {
         let collapse_sftp = s.collapse_sftp_default();
         let sidebar_dock = s.sidebar_dock();
         let welcome_as_sidebar = s.welcome_as_sidebar();
-        let quick_commands_as_sidebar = s.quick_commands_as_sidebar();
-        let quick_panel_open = quick_commands_as_sidebar && s.quick_panel_open();
-        let quick_panel_collapsed = s.quick_panel_collapsed();
-        let quick_panel_dock = s.quick_panel_dock();
         let welcome_sidebar_dock = s.welcome_sidebar_dock();
-        let mut sidebar_collapsed = s.sidebar_collapsed().unwrap_or(collapse_sidebar);
-        let mut welcome_collapsed = s.welcome_collapsed().unwrap_or(false);
+        let mut sidebar_collapsed = collapse_sidebar;
+        let welcome_collapsed = s.welcome_collapsed().unwrap_or(false);
         if welcome_as_sidebar
             && sidebar_dock == welcome_sidebar_dock
             && !sidebar_collapsed
             && !welcome_collapsed
         {
             sidebar_collapsed = true;
-        }
-        if quick_panel_open && !quick_panel_collapsed {
-            if sidebar_dock == quick_panel_dock {
-                sidebar_collapsed = true;
-            }
-            if welcome_as_sidebar && welcome_sidebar_dock == quick_panel_dock {
-                welcome_collapsed = true;
-            }
         }
         window.set_collapse_sidebar_default(collapse_sidebar);
         window.set_collapse_sftp_default(collapse_sftp);
@@ -1055,12 +1043,6 @@ pub fn run() -> Result<()> {
         window.set_sftp_panel_width(s.sftp_panel_width());
         window.set_sftp_panel_height(s.sftp_panel_height());
         window.set_sftp_dock(s.sftp_dock().into());
-        window.set_quick_commands_as_sidebar(quick_commands_as_sidebar);
-        window.set_quick_panel_open(quick_panel_open);
-        window.set_quick_panel_collapsed(quick_panel_collapsed);
-        window.set_quick_panel_width(s.quick_panel_width());
-        window.set_quick_panel_height(s.quick_panel_height());
-        window.set_quick_panel_dock(quick_panel_dock.into());
         window.set_welcome_as_sidebar(welcome_as_sidebar);
         window.set_welcome_sidebar_width(s.welcome_sidebar_width());
         window.set_welcome_sidebar_dock(welcome_sidebar_dock.into());
@@ -1085,14 +1067,6 @@ pub fn run() -> Result<()> {
         window.on_set_collapse_sidebar_default(move |v| {
             let mut s = store.borrow_mut();
             s.set_collapse_sidebar_default(v);
-            let _ = s.save();
-        });
-    }
-    {
-        let store = store.clone();
-        window.on_set_quick_commands_as_sidebar(move |v| {
-            let mut s = store.borrow_mut();
-            s.set_quick_commands_as_sidebar(v);
             let _ = s.save();
         });
     }
@@ -2970,32 +2944,6 @@ fn app_content_area(win: &AppWindow) -> LogicalRect {
         &side_dock,
         side_take,
     );
-    if win.get_quick_panel_open() {
-        let quick_dock = win.get_quick_panel_dock().to_string();
-        let quick_merged = win.get_quick_panel_collapsed()
-            && ((win.get_welcome_as_sidebar()
-                && win.get_welcome_collapsed()
-                && win.get_welcome_sidebar_dock().as_str() == quick_dock.as_str())
-                || (win.get_sidebar_collapsed() && side_dock.as_str() == quick_dock.as_str()));
-        if quick_merged {
-            return area;
-        }
-        let quick_take = if win.get_quick_panel_collapsed() {
-            36.0
-        } else if quick_dock == "left" || quick_dock == "right" {
-            win.get_quick_panel_width() + 4.0
-        } else {
-            win.get_quick_panel_height() + 4.0
-        };
-        shrink_edge(
-            &mut area.x,
-            &mut area.y,
-            &mut area.w,
-            &mut area.h,
-            &quick_dock,
-            quick_take,
-        );
-    }
     area
 }
 
@@ -5738,11 +5686,6 @@ fn save_layout(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
     s.set_sftp_panel_width(win.get_sftp_panel_width());
     s.set_sftp_panel_height(win.get_sftp_panel_height());
     s.set_sftp_dock(win.get_sftp_dock().to_string());
-    s.set_quick_panel_open(win.get_quick_panel_open());
-    s.set_quick_panel_collapsed(win.get_quick_panel_collapsed());
-    s.set_quick_panel_width(win.get_quick_panel_width());
-    s.set_quick_panel_height(win.get_quick_panel_height());
-    s.set_quick_panel_dock(win.get_quick_panel_dock().to_string());
     s.set_welcome_sidebar_width(win.get_welcome_sidebar_width());
     s.set_welcome_sidebar_dock(win.get_welcome_sidebar_dock().to_string());
     s.set_welcome_collapsed(win.get_welcome_collapsed());
