@@ -326,6 +326,7 @@ export component SftpPanel inherits Rectangle {
     callback load-more();
     callback load-all();
     callback sort-request(string /* column */, bool /* ascending */);
+    callback clear-sort();
     callback tree-expand(string, bool);   // toggle expand/collapse; navigate only when expanding
     callback tree-probe(string);          // load child information without expanding
     callback tree-load-more(string);
