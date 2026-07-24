@@ -8444,10 +8444,13 @@ fn wire_sftp_callbacks(
                     for i in 0..terminals.row_count() {
                         let Some(mut row) = terminals.row_data(i) else { continue };
                         if row.id.as_str() == tab_id {
+                            // Going to the parent always selects the directory
+                            // we just left.  Derive it from the current path,
+                            // rather than a remembered list selection: that
+                            // cache can be stale after a refresh, tree click,
+                            // or path-bar navigation.
                             row.sftp_restore_selected_path = if path == ".." && current != "/" {
-                                sftp_selection_paths.lock().ok()
-                                    .and_then(|paths| paths.get(&tab_id)?.get(&resolved).cloned())
-                                    .unwrap_or(current.clone()).into()
+                                current.clone().into()
                             } else { "".into() };
                             // Force the restored row to transition on the way
                             // back, even when it is the same row as last time.
@@ -8505,9 +8508,10 @@ fn wire_sftp_callbacks(
                     }
                 }
             }
-            let restore = sftp_selection_paths.lock().ok()
-                .and_then(|paths| paths.get(&tab_id)?.get(&target).cloned())
-                .unwrap_or_default();
+            // History back is also a parent-style navigation in the common
+            // case.  The current directory is the only authoritative path
+            // for the row that should be selected in its parent.
+            let restore = current_paths.get(&tab_id).cloned().unwrap_or_default();
             let terminals = w.get_terminals();
             if let Some(model) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() {
                 for index in 0..model.row_count() {
