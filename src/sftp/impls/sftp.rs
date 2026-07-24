@@ -301,7 +301,7 @@ struct PathHistory {
     forward: Vec<String>,
 }
 
-const SFTP_PATH_HISTORY_LIMIT: usize = 20;
+const SFTP_PATH_HISTORY_LIMIT: usize = 50;
 
 impl SftpHandle {
     pub fn list_dir(&self, path: String) {
