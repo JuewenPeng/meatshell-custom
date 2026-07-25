@@ -9,7 +9,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// How much of the byte stream we retain per tab for resize-reflow (#169).
@@ -87,11 +87,8 @@ use crate::config::{
 };
 use crate::i18n::t;
 use crate::layout::{LogicalRect, TerminalWheelHit};
-use crate::resource::{
-    LocalGpuInfo, LocalHardwareInfo, LocalSnap, NetHist, TabStatus, TabStatuses,
-};
-use crate::session::{ConnectCtx, PendingCred, PendingHostKey, PendingMfa};
-use crate::sftp::{spawn_sftp, SftpHandles, SftpLastCwd};
+use crate::session::{PendingCred, PendingHostKey, PendingMfa};
+use crate::sftp::{spawn_sftp, SftpHandle};
 use crate::ssh::{
     format_mtime, format_size, spawn_session, test_session_auth, ProcInfo, SessionCommand,
     SessionEvent, SessionHandle, SystemDetails,
