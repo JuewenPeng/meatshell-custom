@@ -4894,11 +4894,12 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
                 let nh_evt = net_pump.clone();
                 let gates_evt = render_gates_pump.clone();
                 let viewports_evt = sftp_viewports_pump.clone();
+                let sftp_handles_evt = sftp_handles_pump.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = weak_evt.upgrade() {
                         for evt in ui_only {
                             apply_session_event_to_window(
-                                &win, &tid, evt, &bufs_evt, &gates_evt, &st_evt, &lc_evt, &nh_evt, &viewports_evt,
+                                &win, &tid, evt, &bufs_evt, &gates_evt, &st_evt, &lc_evt, &nh_evt, &viewports_evt, &sftp_handles_evt,
                             );
                         }
                     }
@@ -4917,6 +4918,7 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
         let net_sftp = ctx.local_net_hist.clone();
         let gates_sftp = ctx.render_gates.clone();
         let viewports_sftp = ctx.sftp_viewport_positions.clone();
+        let handles_sftp = ctx.sftp_handles.clone();
         std::thread::spawn(move || {
             let mut sftp_rx = sftp_evt_tx;
             let mut drained: Vec<SessionEvent> = Vec::new();
@@ -4944,11 +4946,12 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
                 let nh_s = net_sftp.clone();
                 let gates_s = gates_sftp.clone();
                 let viewports_s = viewports_sftp.clone();
+                let handles_s = handles_sftp.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = weak_s.upgrade() {
                         for sftp_evt in ui_batch {
                             apply_session_event_to_window(
-                                &win, &tid, sftp_evt, &bufs_s, &gates_s, &st_s, &lc_s, &nh_s, &viewports_s,
+                                &win, &tid, sftp_evt, &bufs_s, &gates_s, &st_s, &lc_s, &nh_s, &viewports_s, &handles_s,
                             );
                         }
                     }
@@ -6877,6 +6880,7 @@ fn apply_session_event_to_window(
     local: &LocalSnap,
     local_net_hist: &NetHist,
     sftp_viewport_positions: &SftpViewportPositions,
+    sftp_handles: &SftpHandles,
 ) {
     let tabs_rc = win.get_tabs();
     let terminals_rc = win.get_terminals();
@@ -6976,6 +6980,7 @@ fn apply_session_event_to_window(
                 local,
                 local_net_hist,
                 sftp_viewport_positions,
+                sftp_handles,
             );
             update_tab(&|t| t.connected = false);
             update_terminal(&|t| {
@@ -7085,6 +7090,11 @@ fn apply_session_event_to_window(
             });
         }
         SessionEvent::SftpEntries { path, entries } => {
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(handle) = handles.get(tab_id) {
+                    handle.confirm_navigation(&path);
+                }
+            }
             let slint_entries: Vec<SftpEntry> = entries
                 .iter()
                 .map(|e| SftpEntry {
@@ -7275,6 +7285,7 @@ fn apply_session_event_to_window(
                     local,
                     local_net_hist,
                     sftp_viewport_positions,
+                    sftp_handles,
                 );
                 update_terminal(&|t| t.sftp_status = error.clone().into());
             }
