@@ -992,12 +992,22 @@ export component SftpPanel inherits Rectangle {
 
                                     Text {
                                         x: 2px;
-                                        text: node.depth == 0 ? "/" : (node.name == "加载全部..." ? "⏬ " + root.load-all-label : (node.name == "⏫收起" ? node.name : (node.is-dir ? (node.expanded ? "📂 " : "📁 ") + node.name : "📄 " + node.name)));
+                                        width: 18px;
+                                        text: node.depth == 0 || node.name == "加载全部..." || node.name == "⏫收起" ? "" : (node.is-dir ? (node.expanded ? "📂" : "📁") : "📄");
+                                        font-family: "Segoe UI Emoji";
+                                        font-size: Theme.fs-sm;
+                                        height: parent.height;
+                                        overflow: clip;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        x: node.depth == 0 || node.name == "加载全部..." || node.name == "⏫收起" ? 2px : 24px;
+                                        text: node.depth == 0 ? "/" : (node.name == "加载全部..." ? "⏬ " + root.load-all-label : (node.name == "⏫收起" ? node.name : node.name));
                                         color: node.path == root.current-path
                                             ? Theme.accent
                                             : (node.is-dir ? Theme.text-primary : Theme.text-secondary);
                                         font-size: Theme.fs-sm;
-                                        width: parent.width - 4px;
+                                        width: node.depth == 0 || node.name == "加载全部..." || node.name == "⏫收起" ? parent.width - 4px : parent.width - 26px;
                                         height: parent.height;
                                         overflow: elide;
                                         vertical-alignment: center;
