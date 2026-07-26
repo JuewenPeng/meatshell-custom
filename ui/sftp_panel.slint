@@ -367,7 +367,52 @@ export component SftpPanel inherits Rectangle {
     // Focus sink used to blur the path input without changing layout.
     input-blur-scope := FocusScope {
         key-pressed(e) => {
-            if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
+            if (root.panel-mode == "files" && root.toolbar-enabled
+                    && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta
+                    && e.text == Key.Backspace) {
+                root.navigate("..");
+                accept
+            } else if (root.panel-mode == "files" && root.toolbar-enabled
+                    && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta
+                    && e.text == Key.Delete
+                    && root.selected-row >= 0
+                    && root.selected-row < root.entries.length
+                    && root.entries[root.selected-row].full-path != "__MEATSHELL_LOAD_MORE__"
+                    && root.entries[root.selected-row].full-path != "__MEATSHELL_LOAD_ALL__") {
+                if (root.selected-count > 1) {
+                    root.delete-selected();
+                } else {
+                    root.delete(root.entries[root.selected-row].full-path);
+                }
+                accept
+            } else if (root.panel-mode == "files" && root.toolbar-enabled
+                    && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta
+                    && (e.text == Key.UpArrow || e.text == Key.DownArrow)
+                    && root.entries.length > 0) {
+                let row = root.selected-row < 0
+                    ? (e.text == Key.UpArrow ? root.entries.length - 1 : 0)
+                    : (e.text == Key.UpArrow
+                        ? max(0, root.selected-row - 1)
+                        : min(root.entries.length - 1, root.selected-row + 1));
+                root.selected-row = row;
+                root.selection-anchor-row = row;
+                root.select-single(row);
+                accept
+            } else if (root.panel-mode == "files" && root.toolbar-enabled
+                    && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta
+                    && e.text == Key.Return
+                    && root.selected-row >= 0
+                    && root.selected-row < root.entries.length) {
+                if (root.entries[root.selected-row].full-path == "__MEATSHELL_LOAD_MORE__") {
+                    root.load-more();
+                } else if (root.entries[root.selected-row].full-path == "__MEATSHELL_LOAD_ALL__") {
+                    root.load-all();
+                } else {
+                    root.open-entry(root.entries[root.selected-row].full-path,
+                        root.entries[root.selected-row].is-dir);
+                }
+                accept
+            } else if ((Theme.is-mac ? e.modifiers.meta : e.modifiers.control)
                     && (e.text == "a" || e.text == "A" || e.text == "\u{0001}")) {
                 root.select-all();
                 accept
@@ -385,9 +430,25 @@ export component SftpPanel inherits Rectangle {
         root.focused-tree-path = root.current-path;
     }
 
+    // Rust supplies this after a parent-directory listing is rebuilt. Keep the
+    // keyboard cursor on that restored folder too, rather than restarting
+    // Up/Down navigation from the first list row.
+    changed restore-selected-row => {
+        if (root.restore-selected-row >= 0) {
+            root.selected-row = root.restore-selected-row;
+            root.selection-anchor-row = root.restore-selected-row;
+        }
+    }
+
     // Rust increments this only after the new directory rows have been set.
     // 1 = start at top, 2 = restore exact parent position, 3 = reveal selection.
     changed list-scroll-token => {
+        if (root.restore-selected-row >= 0) {
+            // This token is published last with a rebuilt listing, after the
+            // current-path binding may have cleared the transient row cursor.
+            root.selected-row = root.restore-selected-row;
+            root.selection-anchor-row = root.restore-selected-row;
+        }
         if (root.list-scroll-mode != 0) {
             root.file-scroll-mode = root.list-scroll-mode;
             if (root.file-scroll-mode == 1) {
