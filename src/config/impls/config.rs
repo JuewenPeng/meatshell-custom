@@ -661,7 +661,7 @@ pub struct ConfigFile {
     /// Theme preference: "system" (default) | "dark" | "light".
     #[serde(default)]
     pub theme_pref: String,
-    /// Platform renderer preference. Windows uses software/auto/gpu; macOS uses
+    /// Platform renderer preference. Windows uses auto/software/gpu; macOS uses
     /// femtovg/skia. Missing or foreign-platform values use the platform default.
     #[serde(default)]
     pub renderer_mode: String,
@@ -1143,14 +1143,14 @@ impl ConfigStore {
         }
     }
 
-    /// Missing and invalid Windows values deliberately use software so upgrades
-    /// preserve the high-DPI/VM compatibility from #224.
+    /// Missing and invalid Windows values use Slint's system default so platform
+    /// colour fonts (such as emoji) remain available.
     #[cfg(not(target_os = "macos"))]
     pub fn renderer_mode(&self) -> &str {
         match self.cache.renderer_mode.as_str() {
             "auto" => "auto",
             "gpu" => "gpu",
-            _ => "software",
+            _ => "auto",
         }
     }
 
@@ -1167,7 +1167,7 @@ impl ConfigStore {
         self.cache.renderer_mode = match mode.as_str() {
             "auto" => "auto".into(),
             "gpu" => "gpu".into(),
-            _ => "software".into(),
+            _ => "auto".into(),
         };
     }
 
@@ -2068,19 +2068,19 @@ mod tests {
 
     #[test]
     #[cfg(not(target_os = "macos"))]
-    fn renderer_mode_preserves_compatibility_default_and_validates() {
+    fn renderer_mode_defaults_to_auto_and_validates() {
         let mut store = temp_store();
-        assert_eq!(store.renderer_mode(), "software");
+        assert_eq!(store.renderer_mode(), "auto");
 
         store.set_renderer_mode("auto".into());
         assert_eq!(store.renderer_mode(), "auto");
         store.set_renderer_mode("gpu".into());
         assert_eq!(store.renderer_mode(), "gpu");
         store.set_renderer_mode("unexpected".into());
-        assert_eq!(store.renderer_mode(), "software");
+        assert_eq!(store.renderer_mode(), "auto");
 
         store.cache = serde_json::from_str("{}").expect("legacy config must deserialize");
-        assert_eq!(store.renderer_mode(), "software");
+        assert_eq!(store.renderer_mode(), "auto");
     }
 
     #[test]
