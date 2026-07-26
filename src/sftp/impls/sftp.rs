@@ -299,6 +299,9 @@ struct PathHistory {
     current: Option<String>,
     back: Vec<String>,
     forward: Vec<String>,
+    /// A manually entered/tree-selected destination awaiting a successful
+    /// directory listing. Invalid paths must never enter browser history.
+    pending: Option<(String, String)>,
 }
 
 const SFTP_PATH_HISTORY_LIMIT: usize = 50;
@@ -310,20 +313,32 @@ impl SftpHandle {
 
     pub fn navigate_to(&self, current: String, path: String) {
         let mut history = self.path_history.lock().unwrap();
+        history.pending = (current != path).then_some((current, path.clone()));
+        drop(history);
+        let _ = self.commands.send(SftpCommand::ListDir(path));
+    }
+
+    /// Commit a pending navigation only after the worker has successfully
+    /// listed its destination.
+    pub fn confirm_navigation(&self, path: &str) {
+        let mut history = self.path_history.lock().unwrap();
+        let Some((current, destination)) = history.pending.take() else { return };
+        if destination != path {
+            history.pending = Some((current, destination));
+            return;
+        }
         if history.current.is_none() {
             history.current = Some(current);
         }
-        if history.current.as_deref() != Some(path.as_str()) {
-            if let Some(current) = history.current.replace(path.clone()) {
-                history.back.push(current);
+        if history.current.as_deref() != Some(path) {
+            if let Some(previous) = history.current.replace(destination) {
+                history.back.push(previous);
                 if history.back.len() > SFTP_PATH_HISTORY_LIMIT {
                     history.back.remove(0);
                 }
             }
             history.forward.clear();
         }
-        drop(history);
-        let _ = self.commands.send(SftpCommand::ListDir(path));
     }
 
     pub fn navigate_back(&self) -> Option<String> {
