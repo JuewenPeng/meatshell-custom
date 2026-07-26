@@ -443,7 +443,7 @@ export component AppWindow inherits Window {
     // macOS flag — Rust sets it so shortcuts switch to Cmd (⌘) there (#158).
     in-out property <bool> is-mac <=> Theme.is-mac;
     in property <bool> is-windows: false;
-    in-out property <string> renderer-mode: "software";
+    in-out property <string> renderer-mode: "auto";
     callback set-renderer-mode(string);                    // applies next launch (#280)
     // Wallpaper / immersive theming — Rust drives these from the wallpaper module.
     in-out property <image> wallpaper-img <=> Theme.wallpaper;
