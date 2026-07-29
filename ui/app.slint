@@ -436,6 +436,8 @@ export component AppWindow inherits Window {
     // true = Ctrl+C copies and Ctrl+Shift+C interrupts.
     in-out property <bool> terminal-ctrl-c-copy: false;
     callback set-terminal-ctrl-c-copy(bool);
+    in-out property <bool> terminal-selection-auto-copy: true;
+    callback set-terminal-selection-auto-copy(bool);
     in-out property <string> ui-font-family <=> Theme.ui-font-family;
     // Window focused & visible — Rust drives it from winit events; gates the
     // cursor blink so an idle background window stops repainting (#127).
@@ -785,6 +787,8 @@ export component AppWindow inherits Window {
     // --- SFTP callbacks ---------------------------------------------------
     // Navigate to a new remote directory (or ".." to go up).
     callback sftp-navigate(string /* tab-id */, string /* path */);
+    // Resolve a path bar entry as either a directory or a file to open.
+    callback sftp-open-path(string /* tab-id */, string /* path */);
     callback sftp-remember-list-position(string /* tab-id */, string /* path */, length /* viewport-y */);
     callback sftp-navigate-back(string /* tab-id */);
     callback sftp-navigate-forward(string /* tab-id */);
@@ -1667,6 +1671,7 @@ export component AppWindow inherits Window {
                     cycle-tab(reverse) => { root.cycle-tab(reverse); }
                     terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
                     sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
+                    sftp-open-path(path) => { root.sftp-open-path(term.id, path); }
                     sftp-remember-list-position(path, viewport-y) => { root.sftp-remember-list-position(term.id, path, viewport-y); }
                     sftp-navigate-back() => { root.sftp-navigate-back(term.id); }
                     sftp-navigate-forward() => { root.sftp-navigate-forward(term.id); }
@@ -3557,6 +3562,15 @@ export component AppWindow inherits Window {
                 Text { text: root.lang-en ? "Terminal" : "终端";
                        color: Theme.text-muted; font-size: Theme.fs-xs; }
                 CheckBox {
+                    height: 28px;
+                    text: root.lang-en
+                        ? "Copy selected text automatically"
+                        : "拖选文本后自动复制";
+                    checked: root.terminal-selection-auto-copy;
+                    toggled => { root.set-terminal-selection-auto-copy(self.checked); }
+                }
+                CheckBox {
+                    height: 28px;
                     text: root.lang-en
                         ? "Use Ctrl+C to copy selection (Ctrl+Shift+C interrupts)"
                         : "使用 Ctrl+C 复制选中内容（Ctrl+Shift+C 终止程序）";
