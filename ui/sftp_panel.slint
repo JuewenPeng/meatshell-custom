@@ -316,6 +316,8 @@ export component SftpPanel inherits Rectangle {
     // --- Callbacks ---------------------------------------------------------
     callback toggle-collapsed();    // minimise / restore the panel
     callback navigate(string);
+    // Resolve a path typed into the path bar: enter directories or open files.
+    callback open-path(string);
     callback remember-list-position(string, length);
     callback navigate-back();
     callback navigate-forward();
@@ -744,7 +746,7 @@ export component SftpPanel inherits Rectangle {
                                 path-input.paste();
                                 side-path-input.select-all();
                                 side-path-input.paste();
-                                root.navigate(root.side-docked ? side-path-input.text : path-input.text);
+                                root.open-path(root.side-docked ? side-path-input.text : path-input.text);
                             }
                         }
                     }
@@ -794,7 +796,7 @@ export component SftpPanel inherits Rectangle {
                         font-family: Theme.ui-font-family;
                         font-size: Theme.fs-sm;
                         read-only: !root.toolbar-enabled;
-                        accepted => { if (root.toolbar-enabled) { root.navigate(self.text); } }
+                        accepted => { if (root.toolbar-enabled) { root.open-path(self.text); } }
                     }
                 }
 
@@ -834,7 +836,7 @@ export component SftpPanel inherits Rectangle {
                     font-family: Theme.ui-font-family;
                     font-size: Theme.fs-sm;
                     read-only: !root.toolbar-enabled;
-                    accepted => { if (root.toolbar-enabled) { root.navigate(self.text); } }
+                    accepted => { if (root.toolbar-enabled) { root.open-path(self.text); } }
                 }
             }
 

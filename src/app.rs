@@ -1134,6 +1134,7 @@ fn open_window(
         window.set_panel_font(s.panel_font() as f32 / 100.0); // settings-panel font scale
         window.set_renderer_mode(s.renderer_mode().into());
         window.set_terminal_ctrl_c_copy(s.terminal_ctrl_c_copy());
+        window.set_terminal_selection_auto_copy(s.terminal_selection_auto_copy());
     }
 
     // Apply the saved immersive wallpaper (overrides dark/light when set; a
@@ -1474,6 +1475,20 @@ fn open_window(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_cursor_auto(automatic);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_terminal_selection_auto_copy(move |enabled: bool| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_terminal_selection_auto_copy(enabled);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_terminal_selection_auto_copy(enabled);
             }
         });
     }
@@ -9331,6 +9346,29 @@ fn wire_sftp_callbacks(
         });
     }
     {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_open_path(move |tab_id: SharedString, path: SharedString| {
+            let tab_id = tab_id.to_string();
+            let path = path.trim();
+            if path.is_empty() {
+                return;
+            }
+            let current = weak
+                .upgrade()
+                .and_then(|w| {
+                    let current = active_sftp_path(&w, &tab_id);
+                    (!current.is_empty()).then_some(current)
+                })
+                .unwrap_or_else(|| "/".to_string());
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(&tab_id) {
+                    h.open_path(current, path.to_string());
+                }
+            }
+        });
+    }
+    {
         let sftp_viewport_positions = sftp_viewport_positions.clone();
         window.on_sftp_remember_list_position(
             move |tab_id: SharedString, path: SharedString, viewport_y: f32| {
@@ -11522,8 +11560,12 @@ fn wire_key_input(
                 }
             })
             .flatten();
+            let auto_copy = weak
+                .upgrade()
+                .map(|w| w.get_terminal_selection_auto_copy())
+                .unwrap_or(true);
             match text {
-                Some(t) if !t.is_empty() => {
+                Some(t) if auto_copy && !t.is_empty() => {
                     // Auto-copy on release (select-to-copy, PuTTY style).
                     std::thread::spawn(move || clipboard_set_text(t));
                 }

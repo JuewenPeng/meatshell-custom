@@ -215,6 +215,9 @@ fn tree_children_from_entries(
 pub enum SftpCommand {
     /// List the contents of a remote directory.
     ListDir(String),
+    /// Resolve a path submitted in the path bar, entering directories and
+    /// opening regular files with the system default application.
+    OpenPath(String),
     /// Refresh the right-side directory listing and the current tree node without
     /// rebuilding unrelated expanded branches.
     RefreshDir(String),
@@ -316,6 +319,15 @@ impl SftpHandle {
         history.pending = (current != path).then_some((current, path.clone()));
         drop(history);
         let _ = self.commands.send(SftpCommand::ListDir(path));
+    }
+
+    pub fn open_path(&self, current: String, path: String) {
+        let mut history = self.path_history.lock().unwrap();
+        // A file must not become a directory-history entry. If it is a
+        // directory, the following ListDir confirms this pending navigation.
+        history.pending = (current != path).then_some((current, path.clone()));
+        drop(history);
+        let _ = self.commands.send(SftpCommand::OpenPath(path));
     }
 
     /// Commit a pending navigation only after the worker has successfully
@@ -1005,6 +1017,25 @@ async fn run_sftp(
         };
         match cmd {
             SftpCommand::Close => break,
+
+            SftpCommand::OpenPath(path) => {
+                match sftp.metadata(&path).await {
+                    Ok(metadata) => {
+                        let is_dir = (metadata.permissions.unwrap_or(0) & 0o170_000) == 0o040_000;
+                        let _ = self_tx.send(if is_dir {
+                            // Let the UI mark the directory transition before
+                            // its listing arrives, just like regular navigation.
+                            let _ = events.send(SessionEvent::CwdChanged(path.clone()));
+                            SftpCommand::ListDir(path)
+                        } else {
+                            SftpCommand::OpenTemp { remote: path, edit: false }
+                        });
+                    }
+                    Err(e) => {
+                        let _ = events.send(SessionEvent::SftpError(list_error_msg(&path, &e)));
+                    }
+                }
+            }
 
             SftpCommand::ListDir(path) => {
                 let _ = events.send(SessionEvent::SftpStatus(format!(
