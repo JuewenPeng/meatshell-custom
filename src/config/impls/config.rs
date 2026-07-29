@@ -350,6 +350,7 @@ fn fresh_config() -> ConfigFile {
         sidebar_dock: "left".to_string(),
         wallpaper_overlay: DEFAULT_WALLPAPER_OVERLAY,
         defaults_rev: DEFAULTS_REV,
+        terminal_selection_auto_copy: true,
         ..ConfigFile::default()
     }
 }
@@ -833,6 +834,10 @@ pub struct ConfigFile {
     /// traditional terminal mapping: Ctrl+C interrupts and Ctrl+Shift+C copies.
     #[serde(default)]
     pub terminal_ctrl_c_copy: bool,
+    /// Copy terminal text to the system clipboard when a mouse selection ends.
+    /// This defaults to true to preserve the established PuTTY-style behaviour.
+    #[serde(default = "default_true")]
+    pub terminal_selection_auto_copy: bool,
     /// Disable the startup "new version available" check (#184). Default false =
     /// keep checking (preserves existing behaviour for upgrading users); turning
     /// it on stops the GitHub releases query and the banner.
@@ -1569,6 +1574,13 @@ impl ConfigStore {
     }
     pub fn set_terminal_ctrl_c_copy(&mut self, enabled: bool) {
         self.cache.terminal_ctrl_c_copy = enabled;
+    }
+    /// Whether releasing a terminal mouse selection copies it automatically.
+    pub fn terminal_selection_auto_copy(&self) -> bool {
+        self.cache.terminal_selection_auto_copy
+    }
+    pub fn set_terminal_selection_auto_copy(&mut self, enabled: bool) {
+        self.cache.terminal_selection_auto_copy = enabled;
     }
     pub fn sftp_panel_width(&self) -> f32 {
         let w = self.cache.sftp_panel_width;
