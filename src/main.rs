@@ -7,6 +7,9 @@ mod allocator;
 
 #[global_allocator]
 static GLOBAL: allocator::Allocator = allocator::Allocator;
+// The app module retains a set of compatibility helpers and unit-test support
+// while the terminal implementation is split into focused submodules.
+#[allow(dead_code)]
 mod app;
 mod automation;
 mod cli;

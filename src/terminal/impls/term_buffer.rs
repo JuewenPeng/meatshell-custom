@@ -167,20 +167,6 @@ impl TermBuffer {
         true
     }
 
-    /// Extract the selected text from the combined buffer (whole selection,
-    /// even the parts currently scrolled out of view).
-    pub(crate) fn selection_has_extent(&self) -> bool {
-        if self.sel_ranges.is_empty() {
-            return matches!(
-                (self.sel_anchor, self.sel_focus),
-                (Some(anchor), Some(focus)) if anchor != focus
-            );
-        }
-        self.sel_ranges
-            .iter()
-            .any(|(anchor, focus)| anchor != focus)
-    }
-
     pub(crate) fn extract_selection_text(&self) -> String {
         let ranges = if self.sel_ranges.is_empty() {
             match (self.sel_anchor, self.sel_focus) {
