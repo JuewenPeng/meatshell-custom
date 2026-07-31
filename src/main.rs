@@ -3,6 +3,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// The app module retains a set of compatibility helpers and unit-test support
+// while the terminal implementation is split into focused submodules.
+#[allow(dead_code)]
 mod app;
 mod automation;
 mod cli;
