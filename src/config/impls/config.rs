@@ -1487,6 +1487,69 @@ impl ConfigStore {
         self.cache.quick_commands = cmds;
     }
 
+    pub fn quick_commands_as_sidebar(&self) -> bool {
+        self.cache.quick_commands_as_sidebar
+    }
+
+    pub fn set_quick_commands_as_sidebar(&mut self, enabled: bool) {
+        self.cache.quick_commands_as_sidebar = enabled;
+        if enabled && self.cache.quick_panel_dock.is_empty() {
+            self.cache.quick_panel_dock = "left".into();
+        }
+    }
+
+    pub fn quick_panel_collapsed(&self) -> bool {
+        self.cache.quick_panel_collapsed
+    }
+
+    pub fn set_quick_panel_collapsed(&mut self, collapsed: bool) {
+        self.cache.quick_panel_collapsed = collapsed;
+    }
+
+    pub fn quick_panel_width(&self) -> f32 {
+        let width = if self.cache.quick_panel_width <= 0.0 {
+            default_quick_panel_width()
+        } else {
+            self.cache.quick_panel_width
+        };
+        width.clamp(180.0, 560.0)
+    }
+
+    pub fn set_quick_panel_width(&mut self, width: f32) {
+        self.cache.quick_panel_width = width.clamp(180.0, 560.0);
+    }
+
+    pub fn quick_panel_height(&self) -> f32 {
+        let height = if self.cache.quick_panel_height <= 0.0 {
+            default_quick_panel_height()
+        } else {
+            self.cache.quick_panel_height
+        };
+        height.clamp(120.0, 420.0)
+    }
+
+    pub fn set_quick_panel_height(&mut self, height: f32) {
+        self.cache.quick_panel_height = height.clamp(120.0, 420.0);
+    }
+
+    pub fn quick_panel_dock(&self) -> &str {
+        match self.cache.quick_panel_dock.as_str() {
+            "right" => "right",
+            "top" => "top",
+            "bottom" => "bottom",
+            _ => "left",
+        }
+    }
+
+    pub fn set_quick_panel_dock(&mut self, dock: String) {
+        self.cache.quick_panel_dock = match dock.as_str() {
+            "right" => "right".into(),
+            "top" => "top".into(),
+            "bottom" => "bottom".into(),
+            _ => "left".into(),
+        };
+    }
+
     /// Explicit quick-command groups (#55) — parallels [`groups`](Self::groups).
     pub fn quick_groups(&self) -> &[String] {
         &self.cache.quick_groups
