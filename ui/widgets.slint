@@ -303,10 +303,14 @@ export component ToolStrip inherits Rectangle {
     in property <bool> show-second: false;
     in property <string> second-glyph;
     in property <bool> second-active: false;
+    in property <bool> show-third: false;
+    in property <string> third-glyph;
+    in property <bool> third-active: false;
     in property <string> tooltip;
     in property <bool> enabled: true;
     callback expand();
     callback expand-second();
+    callback expand-third();
     property <bool> horizontal: root.dock-edge == "top" || root.dock-edge == "bottom";
 
     background: Theme.bg-toolstrip;
@@ -371,6 +375,30 @@ export component ToolStrip inherits Rectangle {
         ta2 := TouchArea {
             mouse-cursor: pointer;
             clicked => { root.expand-second(); }
+        }
+    }
+    if root.show-third : Rectangle {
+        width: 30px;
+        height: 30px;
+        x: root.horizontal ? 72px : (parent.width - self.width) / 2;
+        y: root.horizontal ? (parent.height - self.height) / 2 : 72px;
+        border-radius: Theme.radius-sm;
+        background: root.third-active ? Theme.accent.with-alpha(0.18)
+            : ta3.has-hover ? Theme.bg-hover : transparent;
+        Text {
+            text: root.third-glyph;
+            font-family: "Material Icons";
+            font-size: 18px;
+            color: root.third-active ? Theme.accent
+                : ta3.has-hover ? Theme.text-primary : Theme.text-secondary;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+            height: parent.height;
+        }
+        ta3 := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.expand-third(); }
         }
     }
 }
