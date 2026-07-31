@@ -1922,6 +1922,7 @@ impl ConfigStore {
         &self.cache.groups
     }
 
+    #[allow(dead_code)]
     pub fn collapsed_session_groups(&self) -> Option<&[String]> {
         self.cache.collapsed_session_groups.as_deref()
     }
@@ -1929,6 +1930,7 @@ impl ConfigStore {
     /// Remember a Quick Connect folder's open/closed state. On the first
     /// interaction, materialise the default-collapsed state for every existing
     /// folder so expanding one folder does not accidentally expand the rest.
+    #[allow(dead_code)]
     pub fn set_session_group_collapsed(&mut self, name: &str, collapsed: bool) {
         if self.cache.collapsed_session_groups.is_none() {
             let mut groups = vec!["system".to_string()];
