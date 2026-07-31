@@ -1274,6 +1274,10 @@ export component AppWindow inherits Window {
                 : root.quick-panel-dock == "top" ? parent.activity-strip : 0px;
             width: parent.welcome-horizontal ? parent.shared-panel-size : parent.width;
             height: parent.welcome-horizontal ? parent.height : parent.shared-panel-size;
+            // On right/top/bottom docks the central content rectangle can
+            // geometrically overlap this shared slot; keep the active panel
+            // above it without changing the independent-dock layout.
+            z: 30;
             clip: true;
             QuickCommandPanel {
                 width: parent.width;
