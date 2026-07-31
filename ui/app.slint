@@ -1326,10 +1326,26 @@ export component AppWindow inherits Window {
                 }
                 dock-drag-end() => {
                     if (root.dock-target != "") {
-                        root.welcome-sidebar-dock = root.dock-target;
-                        if (root.sidebar-dock == root.dock-target) {
-                            root.sidebar-collapsed = true;
-                            root.set-sidebar-collapsed(true);
+                        if (dock-area.three-shared) {
+                            // A shared strip is one dock group: moving any of
+                            // its panels keeps all three panels on the target
+                            // edge instead of silently breaking the group.
+                            root.welcome-sidebar-dock = root.dock-target;
+                            root.sidebar-dock = root.dock-target;
+                            root.quick-panel-dock = root.dock-target;
+                            root.persist-sidebar-dock(root.sidebar-dock);
+                            root.persist-quick-panel-dock(root.quick-panel-dock);
+                        } else {
+                            root.welcome-sidebar-dock = root.dock-target;
+                            if (root.sidebar-dock == root.dock-target) {
+                                root.sidebar-collapsed = true;
+                                root.set-sidebar-collapsed(true);
+                            }
+                            if (root.quick-commands-as-sidebar
+                                    && root.quick-panel-dock == root.dock-target) {
+                                root.quick-panel-collapsed = true;
+                                root.persist-quick-panel-collapsed(true);
+                            }
                         }
                         root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
                     }
@@ -1411,8 +1427,26 @@ export component AppWindow inherits Window {
                 }
                 dock-drag-end => {
                     if (root.dock-target != "") {
-                        root.quick-panel-dock = root.dock-target;
-                        root.persist-quick-panel-dock(root.quick-panel-dock);
+                        if (dock-area.three-shared) {
+                            root.quick-panel-dock = root.dock-target;
+                            root.welcome-sidebar-dock = root.dock-target;
+                            root.sidebar-dock = root.dock-target;
+                            root.persist-quick-panel-dock(root.quick-panel-dock);
+                            root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
+                            root.persist-sidebar-dock(root.sidebar-dock);
+                        } else {
+                            root.quick-panel-dock = root.dock-target;
+                            if (root.sidebar-dock == root.dock-target) {
+                                root.sidebar-collapsed = true;
+                                root.set-sidebar-collapsed(true);
+                            }
+                            if (root.welcome-as-sidebar
+                                    && root.welcome-sidebar-dock == root.dock-target) {
+                                root.welcome-collapsed = true;
+                                root.set-welcome-collapsed(true);
+                            }
+                            root.persist-quick-panel-dock(root.quick-panel-dock);
+                        }
                     }
                     root.panel-dragging = false;
                 }
@@ -1740,14 +1774,24 @@ export component AppWindow inherits Window {
             }
             dock-drag-end() => {
                 if (root.dock-target != "") {
-                    root.sidebar-dock = root.dock-target;
-                    if (root.welcome-as-sidebar && root.welcome-sidebar-dock == root.dock-target) {
-                        root.welcome-collapsed = true;
-                        root.set-welcome-collapsed(true);
-                    }
-                    if (root.quick-commands-as-sidebar
-                            && root.quick-panel-dock == root.dock-target) {
-                        root.quick-panel-collapsed = true;
+                    if (dock-area.three-shared) {
+                        root.sidebar-dock = root.dock-target;
+                        root.welcome-sidebar-dock = root.dock-target;
+                        root.quick-panel-dock = root.dock-target;
+                        root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
+                        root.persist-quick-panel-dock(root.quick-panel-dock);
+                    } else {
+                        root.sidebar-dock = root.dock-target;
+                        if (root.welcome-as-sidebar
+                                && root.welcome-sidebar-dock == root.dock-target) {
+                            root.welcome-collapsed = true;
+                            root.set-welcome-collapsed(true);
+                        }
+                        if (root.quick-commands-as-sidebar
+                                && root.quick-panel-dock == root.dock-target) {
+                            root.quick-panel-collapsed = true;
+                            root.persist-quick-panel-collapsed(true);
+                        }
                     }
                     root.persist-sidebar-dock(root.sidebar-dock);
                 }
