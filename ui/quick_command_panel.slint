@@ -1,0 +1,180 @@
+import { Theme } from "theme.slint";
+import { QuickCmd } from "terminal_view.slint";
+
+export component QuickCommandPanel inherits Rectangle {
+    in property <[QuickCmd]> commands;
+    in property <bool> lang-en: false;
+    in property <string> dock-edge: "left";
+    callback run-command(string, bool);
+    callback toggle-group(string);
+    callback manage();
+    callback collapse();
+    callback dock-drag-move(length, length);
+    callback dock-drag-end();
+
+    background: Theme.bg-panel;
+    clip: true;
+    property <bool> dragging: false;
+    property <string> collapse-icon:
+        root.dock-edge == "right" ? "\u{E5CC}"
+        : root.dock-edge == "top" ? "\u{E5CE}"
+        : root.dock-edge == "bottom" ? "\u{E5CF}"
+        : "\u{E5CB}";
+
+    VerticalLayout {
+        padding: 10px;
+        padding-top: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            height: 24px;
+            spacing: 6px;
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 24px;
+                Text {
+                    x: 8px;
+                    width: parent.width - 8px;
+                    height: parent.height;
+                    text: root.lang-en ? "Quick commands" : "快捷命令";
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-lg;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                drag-ta := TouchArea {
+                    mouse-cursor: move;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                            root.dragging = true;
+                        } else if (e.kind == PointerEventKind.up && root.dragging) {
+                            root.dragging = false;
+                            root.dock-drag-end();
+                        }
+                    }
+                    moved => {
+                        if (root.dragging) {
+                            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                                self.absolute-position.y + self.mouse-y);
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                width: 24px;
+                height: 24px;
+                border-radius: Theme.radius-sm;
+                background: collapse-ta.has-hover ? Theme.bg-hover : transparent;
+                collapse-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.collapse(); }
+                }
+                Text {
+                    text: root.collapse-icon;
+                    font-family: "Material Icons";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border-subtle; }
+        if root.commands.length == 0 : Rectangle {
+            vertical-stretch: 1;
+            Text {
+                text: root.lang-en ? "No quick commands yet" : "暂无快捷命令";
+                color: Theme.text-muted;
+                font-size: Theme.fs-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        if root.commands.length > 0 : Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: max(self.height, command-list.preferred-height);
+            command-list := VerticalLayout {
+                spacing: 2px;
+                for q in root.commands : VerticalLayout {
+                    if q.group-header != "" : Rectangle {
+                        height: 25px;
+                        border-radius: Theme.radius-sm;
+                        background: group-ta.has-hover ? Theme.bg-hover : transparent;
+                        group-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-group(q.group); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 5px;
+                            Text {
+                                text: q.collapsed ? "\u{E5CC}" : "\u{E5CF}";
+                                font-family: "Material Icons";
+                                color: Theme.text-muted;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: q.group;
+                                color: Theme.text-muted;
+                                font-size: Theme.fs-xs;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                    if !q.collapsed && q.orig-index >= 0 : Rectangle {
+                        height: 30px;
+                        border-radius: Theme.radius-sm;
+                        background: command-ta.has-hover ? Theme.bg-hover : transparent;
+                        command-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.run-command(q.command, q.send-enter); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            Text {
+                                text: q.name;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-sm;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: q.command;
+                                color: Theme.text-muted;
+                                font-size: Theme.fs-xs;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 28px;
+            border-radius: Theme.radius-sm;
+            background: manage-ta.has-hover ? Theme.bg-hover : transparent;
+            manage-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.manage(); }
+            }
+            Text {
+                text: root.lang-en ? "Manage..." : "管理...";
+                color: Theme.accent;
+                font-size: Theme.fs-sm;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
