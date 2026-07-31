@@ -926,6 +926,11 @@ pub fn run() -> Result<()> {
         window.set_renderer_mode(s.renderer_mode().into());
         window.set_terminal_ctrl_c_copy(s.terminal_ctrl_c_copy());
         window.set_terminal_selection_auto_copy(s.terminal_selection_auto_copy());
+        window.set_quick_commands_as_sidebar(s.quick_commands_as_sidebar());
+        window.set_quick_panel_collapsed(s.quick_panel_collapsed());
+        window.set_quick_panel_width(s.quick_panel_width());
+        window.set_quick_panel_height(s.quick_panel_height());
+        window.set_quick_panel_dock(s.quick_panel_dock().into());
     }
 
     // Apply the saved immersive wallpaper (overrides dark/light when set; a
@@ -1023,6 +1028,10 @@ pub fn run() -> Result<()> {
         let sidebar_dock = s.sidebar_dock();
         let welcome_as_sidebar = s.welcome_as_sidebar();
         let welcome_sidebar_dock = s.welcome_sidebar_dock();
+        let quick_shared = s.quick_commands_as_sidebar()
+            && welcome_as_sidebar
+            && s.quick_panel_dock() == welcome_sidebar_dock
+            && sidebar_dock == welcome_sidebar_dock;
         let mut sidebar_collapsed = collapse_sidebar;
         let welcome_collapsed = s.welcome_collapsed().unwrap_or(false);
         if welcome_as_sidebar
@@ -1046,6 +1055,11 @@ pub fn run() -> Result<()> {
         window.set_welcome_sidebar_dock(welcome_sidebar_dock.into());
         window.set_welcome_collapsed(welcome_collapsed);
         window.set_sidebar_collapsed(sidebar_collapsed);
+        if quick_shared {
+            // A shared dock has one visible panel at a time. Keep Quick Connect
+            // as the initial panel and expose the other panels through the strip.
+            window.set_quick_panel_collapsed(true);
+        }
         resource_monitor_enabled.store(!sidebar_collapsed, Ordering::Relaxed);
         window.set_wallpaper_overlay(s.wallpaper_overlay());
         window.set_update_check_enabled(s.update_check_enabled()); // #184
@@ -1266,6 +1280,61 @@ pub fn run() -> Result<()> {
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_cursor_auto(automatic);
+            }
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_persist_quick_panel_collapsed(move |collapsed| {
+            let mut s = store.borrow_mut();
+            s.set_quick_panel_collapsed(collapsed);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_persist_quick_panel_width(move |width| {
+            let mut s = store.borrow_mut();
+            s.set_quick_panel_width(width);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_persist_quick_panel_height(move |height| {
+            let mut s = store.borrow_mut();
+            s.set_quick_panel_height(height);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_persist_quick_panel_dock(move |dock| {
+            let mut s = store.borrow_mut();
+            s.set_quick_panel_dock(dock.to_string());
+            let _ = s.save();
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_quick_commands_as_sidebar(move |enabled: bool| {
+            let dock = {
+                let mut s = store.borrow_mut();
+                s.set_quick_commands_as_sidebar(enabled);
+                if enabled {
+                    s.set_quick_panel_collapsed(false);
+                }
+                let dock = s.quick_panel_dock().to_string();
+                let _ = s.save();
+                dock
+            };
+            if let Some(w) = weak.upgrade() {
+                w.set_quick_commands_as_sidebar(enabled);
+                if enabled {
+                    w.set_quick_panel_dock(dock.into());
+                    w.set_quick_panel_collapsed(false);
+                }
             }
         });
     }
