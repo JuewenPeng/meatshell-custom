@@ -224,32 +224,78 @@ fn visible_tab_ids(win: &AppWindow) -> HashSet<String> {
     out
 }
 
+struct TabRenderTicket {
+    gate: Arc<TabRenderGate>,
+    generation: u64,
+}
+
+fn register_tab_render_request(
+    tab_id: &str,
+    gates: &RenderGates,
+) -> Option<(Arc<TabRenderGate>, TabRenderTicket, bool)> {
+    let gate = {
+        let map = gates.lock().unwrap();
+        map.get(tab_id).cloned()
+    }?;
+    let (generation, should_schedule) = gate.request()?;
+    let ticket = TabRenderTicket {
+        gate: gate.clone(),
+        generation,
+    };
+    Some((gate, ticket, should_schedule))
+}
+
 fn request_tab_render(
     weak: slint::Weak<AppWindow>,
     tab_id: &str,
     bufs: &TermBuffers,
     gates: &RenderGates,
-) {
-    let gate = {
-        let m = gates.lock().unwrap();
-        m.get(tab_id).cloned()
-    };
-    let Some(gate) = gate else { return };
-    gate.pending.store(true, Ordering::Release);
-    if gate.scheduled.swap(true, Ordering::AcqRel) {
-        return;
+) -> Option<TabRenderTicket> {
+    let (gate, ticket, should_schedule) = register_tab_render_request(tab_id, gates)?;
+    if !should_schedule {
+        return Some(ticket);
     }
 
     let weak2 = weak.clone();
     let tid = tab_id.to_string();
     let bufs2 = bufs.clone();
-    let gates2 = gates.clone();
+    let gate2 = gate.clone();
     // Always bounce through the event loop from pump / worker threads.
     // Never call invoke_from_event_loop from inside a UI callback — that
     // deadlocks Slint (opening a second tab then froze the whole app).
-    let _ = slint::invoke_from_event_loop(move || {
-        run_coalesced_tab_render(&weak2, &tid, &bufs2, &gates2);
-    });
+    if slint::invoke_from_event_loop(move || {
+        run_coalesced_tab_render(&weak2, &tid, &bufs2, gate2);
+    })
+    .is_err()
+    {
+        gate.close();
+    }
+    Some(ticket)
+}
+
+/// UI-thread variant for synthetic Output events. It shares the same gate but
+/// enters the throttle directly because invoking Slint from its own callback
+/// can deadlock.
+fn request_tab_render_from_ui(
+    weak: slint::Weak<AppWindow>,
+    tab_id: &str,
+    bufs: &TermBuffers,
+    gates: &RenderGates,
+) {
+    let Some((gate, _, should_schedule)) = register_tab_render_request(tab_id, gates) else {
+        return;
+    };
+    if should_schedule {
+        run_coalesced_tab_render(&weak, tab_id, bufs, gate);
+    }
+}
+
+fn wait_for_ui_flush(ticket: Option<TabRenderTicket>) {
+    if let Some(ticket) = ticket {
+        let _ = ticket
+            .gate
+            .wait_for(ticket.generation, std::time::Duration::from_millis(50));
+    }
 }
 
 /// UI-thread entry: honour the throttle, then render. Timer must be created
@@ -258,29 +304,19 @@ fn run_coalesced_tab_render(
     weak: &slint::Weak<AppWindow>,
     tab_id: &str,
     bufs: &TermBuffers,
-    gates: &RenderGates,
+    gate: Arc<TabRenderGate>,
 ) {
-    let gate = {
-        let m = gates.lock().unwrap();
-        m.get(tab_id).cloned()
-    };
-    let Some(gate) = gate else { return };
-
-    let delay = {
-        let last = *gate.last_render.lock().unwrap();
-        RENDER_MIN_INTERVAL.saturating_sub(last.elapsed())
-    };
+    let delay = gate.flush_delay(RENDER_MIN_INTERVAL);
 
     let weak2 = weak.clone();
     let tid = tab_id.to_string();
     let bufs2 = bufs.clone();
-    let gates2 = gates.clone();
 
     if delay.is_zero() {
-        do_tab_render_flush(&weak2, &tid, &bufs2, &gates2);
+        do_tab_render_flush(&weak2, &tid, &bufs2, gate);
     } else {
         slint::Timer::single_shot(delay, move || {
-            do_tab_render_flush(&weak2, &tid, &bufs2, &gates2);
+            do_tab_render_flush(&weak2, &tid, &bufs2, gate);
         });
     }
 }
@@ -291,26 +327,30 @@ fn do_tab_render_flush(
     weak: &slint::Weak<AppWindow>,
     tab_id: &str,
     bufs: &TermBuffers,
-    gates: &RenderGates,
+    gate: Arc<TabRenderGate>,
 ) {
-    let gate = {
-        let m = gates.lock().unwrap();
-        m.get(tab_id).cloned()
+    let Some(through) = gate.begin_flush() else {
+        return;
     };
-    let Some(gate) = gate else { return };
-    gate.scheduled.store(false, Ordering::Release);
 
-    if let Some(win) = weak.upgrade() {
+    let visible = if let Some(win) = weak.upgrade() {
         if visible_tab_ids(&win).contains(tab_id) {
             rebuild_tab_display(&win, bufs, tab_id);
-            *gate.last_render.lock().unwrap() = std::time::Instant::now();
+            true
+        } else {
+            false
         }
-    }
+    } else {
+        false
+    };
 
-    if gate.pending.swap(false, Ordering::AcqRel) {
-        if !gate.scheduled.swap(true, Ordering::AcqRel) {
-            run_coalesced_tab_render(weak, tab_id, bufs, gates);
-        }
+    if gate.finish_flush(through, visible) {
+        let weak2 = weak.clone();
+        let tid = tab_id.to_string();
+        let bufs2 = bufs.clone();
+        slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+            run_coalesced_tab_render(&weak2, &tid, &bufs2, gate);
+        });
     }
 }
 
@@ -5704,12 +5744,13 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
                 }
 
                 if had_output {
-                    request_tab_render(
+                    let ticket = request_tab_render(
                         weak_inner.clone(),
                         &tab_id_pump,
                         &bufs_thread,
                         &render_gates_pump,
                     );
+                    wait_for_ui_flush(ticket);
                 }
 
                 if ui_only.is_empty() {
@@ -7792,7 +7833,7 @@ fn apply_session_event_to_window(
             // Synthetic Output (disconnect hint, editor error, …) — rare, already
             // on the UI thread. Live shell output is ingested on the pump thread.
             ingest_terminal_output(bufs, tab_id, chunk.as_bytes());
-            run_coalesced_tab_render(&win.as_weak(), tab_id, bufs, gates);
+            request_tab_render_from_ui(win.as_weak(), tab_id, bufs, gates);
         }
         SessionEvent::Connected => {
             update_tab(&|t| t.connected = true);
