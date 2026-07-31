@@ -3,4 +3,4 @@ mod session;
 #[path = "struct/types.rs"]
 mod types;
 
-pub(crate) use types::{ConnectCtx, PendingCred, PendingHostKey, PendingMfa};
+pub(crate) use types::{PendingCred, PendingHostKey, PendingMfa};
