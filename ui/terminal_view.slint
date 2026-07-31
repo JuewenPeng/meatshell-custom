@@ -167,6 +167,7 @@ export component TerminalView inherits Rectangle {
     // Command bar (#55): quick commands + input box + history (all shared/global,
     // fed from Rust); send-to-all is a per-tab toggle.
     in property <[QuickCmd]> quick-commands;
+    in property <bool> quick-commands-sidebar: false;
     in property <[string]> command-history;   // oldest first (newest last, #113)
     in property <[string]> history-view;       // filtered dropdown, newest first (#101, #331)
     property <bool> send-to-all: false;
@@ -1058,7 +1059,7 @@ export component TerminalView inherits Rectangle {
                 spacing: 6px;
 
                 // Quick-command toggle.
-                Rectangle {
+                if !root.quick-commands-sidebar : Rectangle {
                     width: qc-row.preferred-width + 16px;
                     border-radius: Theme.radius-sm;
                     background: qc-ta.has-hover || root.quick-open ? Theme.bg-hover : Theme.bg-elevated;
