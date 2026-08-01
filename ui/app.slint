@@ -20,7 +20,7 @@ import { TabBar, TabInfo } from "tabs.slint";
 import { Welcome, SessionInfo } from "welcome.slint";
 import { SessionDialog, SessionDraft, PortFwd } from "session_dialog.slint";
 import { ConfirmDialog } from "confirm_dialog.slint";
-import { AutoScrollTextInput, LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, ToolStrip } from "widgets.slint";
+import { AutoScrollTextInput, LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, ToolStrip, DockGroupStrip } from "widgets.slint";
 import { TerminalView, TermSpan, TermMatch, QuickCmd } from "terminal_view.slint";
 import { QuickCommandPanel } from "quick_command_panel.slint";
 import { SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
@@ -327,6 +327,8 @@ export component AppWindow inherits Window {
     property <bool> panel-dragging;
     property <float> drag-nx;   // cursor x within the dock area, 0..1
     property <float> drag-ny;   // cursor y within the dock area, 0..1
+    // Shared visual thickness for every detachable-panel resize handle.
+    in property <length> dock-splitter-width: 4px;
     property <string> dock-target:
         !root.panel-dragging ? ""
         : root.drag-nx < 0.22 ? "left"
@@ -337,32 +339,8 @@ export component AppWindow inherits Window {
     callback persist-sidebar-dock(string);
     // The top-right toolbar icons float over the tab row; when the sidebar docks
     // top/right it covers that corner, so shift the icons to stay over the tabs.
-    property <length> toolbar-x-off:
-        (root.sidebar-dock == "right"
-            ? (root.sidebar-collapsed ? 36px : root.sidebar-width)
-            : 0px)
-        + ((root.welcome-as-sidebar && root.welcome-sidebar-dock == "right")
-            ? root.welcome-sidebar-taken
-                + (root.quick-commands-merged && !root.welcome-sidebar-horizontal
-                    ? root.quick-panel-height : 0px)
-            : 0px)
-        + ((root.quick-commands-as-sidebar && !root.quick-commands-merged
-                && root.quick-panel-dock == "right")
-            ? (root.quick-panel-collapsed ? 40px : root.quick-panel-width)
-            : 0px);
-    property <length> toolbar-y-off:
-        (root.sidebar-dock == "top"
-            ? (root.sidebar-collapsed ? 36px : root.sidebar-height)
-            : 0px)
-        + ((root.welcome-as-sidebar && root.welcome-sidebar-dock == "top")
-            ? root.welcome-sidebar-taken
-                + (root.quick-commands-merged && !root.welcome-sidebar-horizontal
-                    ? root.quick-panel-height : 0px)
-            : 0px)
-        + ((root.quick-commands-as-sidebar && !root.quick-commands-merged
-                && root.quick-panel-dock == "top")
-            ? (root.quick-panel-collapsed ? 36px : root.quick-panel-height)
-            : 0px);
+    property <length> toolbar-x-off: dock-area.right-taken;
+    property <length> toolbar-y-off: dock-area.top-taken;
     property <length> tab-row-y: root.custom-titlebar ? 39px : root.titlebar-inset;
     property <length> toolbar-y:
         (root.custom-titlebar ? 43px : 5px + root.titlebar-inset) + root.toolbar-y-off;
@@ -564,6 +542,63 @@ export component AppWindow inherits Window {
     // Welcome sidebar collapsed to the edge icon strip (IDEA-style), persisted.
     in-out property <bool> welcome-collapsed: false;
     callback set-welcome-collapsed(bool);          // apply + persist
+
+    // Select one panel in an edge group. The group owns visibility for every
+    // panel assigned to that edge; panels on other edges remain untouched.
+    public function activate-dock-group(edge: string, kind: int) {
+        if (kind == 0) {
+            root.welcome-collapsed = false;
+            root.set-welcome-collapsed(false);
+        } else if (kind == 1) {
+            root.sidebar-collapsed = false;
+            root.set-sidebar-collapsed(false);
+        } else {
+            root.quick-panel-collapsed = false;
+            root.persist-quick-panel-collapsed(false);
+        }
+        if (kind != 0 && root.welcome-as-sidebar
+                && root.welcome-sidebar-dock == edge) {
+            root.welcome-collapsed = true;
+            root.set-welcome-collapsed(true);
+        }
+        if (kind != 1 && root.sidebar-dock == edge) {
+            root.sidebar-collapsed = true;
+            root.set-sidebar-collapsed(true);
+        }
+        if (kind != 2 && root.quick-commands-as-sidebar
+                && root.quick-panel-dock == edge) {
+            root.quick-panel-collapsed = true;
+            root.persist-quick-panel-collapsed(true);
+        }
+    }
+
+    public function toggle-dock-group(edge: string, kind: int) {
+        if ((edge == "left" && ((kind == 0 && dock-area.left-active == 0)
+                || (kind == 1 && dock-area.left-active == 1)
+                || (kind == 2 && dock-area.left-active == 2)))
+            || (edge == "right" && ((kind == 0 && dock-area.right-active == 0)
+                || (kind == 1 && dock-area.right-active == 1)
+                || (kind == 2 && dock-area.right-active == 2)))
+            || (edge == "top" && ((kind == 0 && dock-area.top-active == 0)
+                || (kind == 1 && dock-area.top-active == 1)
+                || (kind == 2 && dock-area.top-active == 2)))
+            || (edge == "bottom" && ((kind == 0 && dock-area.bottom-active == 0)
+                || (kind == 1 && dock-area.bottom-active == 1)
+                || (kind == 2 && dock-area.bottom-active == 2)))) {
+            if (kind == 0) {
+                root.welcome-collapsed = true;
+                root.set-welcome-collapsed(true);
+            } else if (kind == 1) {
+                root.sidebar-collapsed = true;
+                root.set-sidebar-collapsed(true);
+            } else {
+                root.quick-panel-collapsed = true;
+                root.persist-quick-panel-collapsed(true);
+            }
+        } else {
+            root.activate-dock-group(edge, kind);
+        }
+    }
     in-out property <bool> collapse-sftp-default: false;
     callback set-collapse-sftp-default(bool);      // apply + persist
     in-out property <bool> sftp-collapsed: false;       // (legacy global; per-tab now)
@@ -1007,12 +1042,151 @@ export component AppWindow inherits Window {
         // Collapsed-only (M5): the icon strip shows only while collapsed; the
         // panel itself (welcome-w) only while expanded — one or the other.
         property <bool> shared-tools:
-            root.welcome-as-sidebar
-            && root.welcome-sidebar-dock == root.sidebar-dock;
+            false;
         property <bool> three-shared:
             dock-area.shared-tools
             && root.quick-commands-as-sidebar
             && root.quick-panel-dock == root.welcome-sidebar-dock;
+
+        // Canonical dock groups. Every edge owns one group, and each panel is
+        // assigned to exactly one group by its persisted dock edge. A group
+        // reserves a strip when it has multiple panels (or when its only panel
+        // is collapsed), plus the largest active-panel extent on that edge.
+        property <bool> left-welcome: root.welcome-as-sidebar && root.welcome-sidebar-dock == "left";
+        property <bool> left-resource: root.sidebar-dock == "left";
+        property <bool> left-quick: root.quick-commands-as-sidebar && root.quick-panel-dock == "left";
+        property <int> left-count:
+            (dock-area.left-welcome ? 1 : 0)
+            + (dock-area.left-resource ? 1 : 0)
+            + (dock-area.left-quick ? 1 : 0);
+        property <int> left-active:
+            dock-area.left-welcome && !root.welcome-collapsed ? 0
+            : dock-area.left-resource && !root.sidebar-collapsed ? 1
+            : dock-area.left-quick && !root.quick-panel-collapsed ? 2 : -1;
+        property <length> left-panel-size:
+            max(max(dock-area.left-welcome ? root.welcome-sidebar-width : 0px,
+                    dock-area.left-resource ? root.sidebar-width : 0px),
+                dock-area.left-quick ? root.quick-panel-width : 0px);
+        property <length> left-strip:
+            dock-area.left-count > 0
+                ? (dock-area.left-count > 1 || dock-area.left-active < 0 ? 40px : 0px)
+                : 0px;
+        property <length> left-taken:
+            dock-area.left-count > 0
+                ? dock-area.left-strip
+                    + (dock-area.left-active >= 0 ? dock-area.left-panel-size : 0px)
+                : 0px;
+
+        property <bool> right-welcome: root.welcome-as-sidebar && root.welcome-sidebar-dock == "right";
+        property <bool> right-resource: root.sidebar-dock == "right";
+        property <bool> right-quick: root.quick-commands-as-sidebar && root.quick-panel-dock == "right";
+        property <int> right-count:
+            (dock-area.right-welcome ? 1 : 0)
+            + (dock-area.right-resource ? 1 : 0)
+            + (dock-area.right-quick ? 1 : 0);
+        property <int> right-active:
+            dock-area.right-welcome && !root.welcome-collapsed ? 0
+            : dock-area.right-resource && !root.sidebar-collapsed ? 1
+            : dock-area.right-quick && !root.quick-panel-collapsed ? 2 : -1;
+        property <length> right-panel-size:
+            max(max(dock-area.right-welcome ? root.welcome-sidebar-width : 0px,
+                    dock-area.right-resource ? root.sidebar-width : 0px),
+                dock-area.right-quick ? root.quick-panel-width : 0px);
+        property <length> right-strip:
+            dock-area.right-count > 0
+                ? (dock-area.right-count > 1 || dock-area.right-active < 0 ? 40px : 0px)
+                : 0px;
+        property <length> right-taken:
+            dock-area.right-count > 0
+                ? dock-area.right-strip
+                    + (dock-area.right-active >= 0 ? dock-area.right-panel-size : 0px)
+                : 0px;
+
+        property <bool> top-welcome: root.welcome-as-sidebar && root.welcome-sidebar-dock == "top";
+        property <bool> top-resource: root.sidebar-dock == "top";
+        property <bool> top-quick: root.quick-commands-as-sidebar && root.quick-panel-dock == "top";
+        property <int> top-count:
+            (dock-area.top-welcome ? 1 : 0)
+            + (dock-area.top-resource ? 1 : 0)
+            + (dock-area.top-quick ? 1 : 0);
+        property <int> top-active:
+            dock-area.top-welcome && !root.welcome-collapsed ? 0
+            : dock-area.top-resource && !root.sidebar-collapsed ? 1
+            : dock-area.top-quick && !root.quick-panel-collapsed ? 2 : -1;
+        property <length> top-panel-size:
+            max(max(dock-area.top-welcome ? root.welcome-sidebar-width : 0px,
+                    dock-area.top-resource ? root.sidebar-height : 0px),
+                dock-area.top-quick ? root.quick-panel-height : 0px);
+        property <length> top-strip:
+            dock-area.top-count > 0
+                ? (dock-area.top-count > 1 || dock-area.top-active < 0 ? 36px : 0px)
+                : 0px;
+        property <length> top-taken:
+            dock-area.top-count > 0
+                ? dock-area.top-strip
+                    + (dock-area.top-active >= 0 ? dock-area.top-panel-size : 0px)
+                : 0px;
+
+        property <bool> bottom-welcome: root.welcome-as-sidebar && root.welcome-sidebar-dock == "bottom";
+        property <bool> bottom-resource: root.sidebar-dock == "bottom";
+        property <bool> bottom-quick: root.quick-commands-as-sidebar && root.quick-panel-dock == "bottom";
+        property <int> bottom-count:
+            (dock-area.bottom-welcome ? 1 : 0)
+            + (dock-area.bottom-resource ? 1 : 0)
+            + (dock-area.bottom-quick ? 1 : 0);
+        property <int> bottom-active:
+            dock-area.bottom-welcome && !root.welcome-collapsed ? 0
+            : dock-area.bottom-resource && !root.sidebar-collapsed ? 1
+            : dock-area.bottom-quick && !root.quick-panel-collapsed ? 2 : -1;
+        property <length> bottom-panel-size:
+            max(max(dock-area.bottom-welcome ? root.welcome-sidebar-width : 0px,
+                    dock-area.bottom-resource ? root.sidebar-height : 0px),
+                dock-area.bottom-quick ? root.quick-panel-height : 0px);
+        property <length> bottom-strip:
+            dock-area.bottom-count > 0
+                ? (dock-area.bottom-count > 1 || dock-area.bottom-active < 0 ? 36px : 0px)
+                : 0px;
+        property <length> bottom-taken:
+            dock-area.bottom-count > 0
+                ? dock-area.bottom-strip
+                    + (dock-area.bottom-active >= 0 ? dock-area.bottom-panel-size : 0px)
+                : 0px;
+
+        property <length> dock-left-taken: dock-area.left-taken;
+        property <length> dock-right-taken: dock-area.right-taken;
+        property <length> dock-top-taken: dock-area.top-taken;
+        property <length> dock-bottom-taken: dock-area.bottom-taken;
+        property <bool> welcome-active:
+            (dock-area.left-active == 0 && dock-area.left-welcome)
+            || (dock-area.right-active == 0 && dock-area.right-welcome)
+            || (dock-area.top-active == 0 && dock-area.top-welcome)
+            || (dock-area.bottom-active == 0 && dock-area.bottom-welcome);
+        property <bool> sidebar-active:
+            (dock-area.left-active == 1 && dock-area.left-resource)
+            || (dock-area.right-active == 1 && dock-area.right-resource)
+            || (dock-area.top-active == 1 && dock-area.top-resource)
+            || (dock-area.bottom-active == 1 && dock-area.bottom-resource);
+        property <bool> quick-active:
+            (dock-area.left-active == 2 && dock-area.left-quick)
+            || (dock-area.right-active == 2 && dock-area.right-quick)
+            || (dock-area.top-active == 2 && dock-area.top-quick)
+            || (dock-area.bottom-active == 2 && dock-area.bottom-quick);
+        property <length> welcome-group-size:
+            root.welcome-sidebar-dock == "left" ? dock-area.left-panel-size
+            : root.welcome-sidebar-dock == "right" ? dock-area.right-panel-size
+            : root.welcome-sidebar-dock == "top" ? dock-area.top-panel-size
+            : dock-area.bottom-panel-size;
+        property <length> sidebar-group-size:
+            root.sidebar-dock == "left" ? dock-area.left-panel-size
+            : root.sidebar-dock == "right" ? dock-area.right-panel-size
+            : root.sidebar-dock == "top" ? dock-area.top-panel-size
+            : dock-area.bottom-panel-size;
+        property <length> quick-group-size:
+            root.quick-panel-dock == "left" ? dock-area.left-panel-size
+            : root.quick-panel-dock == "right" ? dock-area.right-panel-size
+            : root.quick-panel-dock == "top" ? dock-area.top-panel-size
+            : dock-area.bottom-panel-size;
+
         property <length> collapsed-strip-size:
             root.welcome-sidebar-horizontal ? 40px : 36px;
         property <length> activity-strip: dock-area.shared-tools ? collapsed-strip-size : 0px;
@@ -1040,8 +1214,6 @@ export component AppWindow inherits Window {
         property <length> welcome-sp: 0px;
         property <bool> quick-merge-welcome: root.quick-commands-merged;
         property <length> quick-merged-size: 0px;
-        property <length> welcome-group-size:
-            dock-area.welcome-size + dock-area.quick-merged-size;
         property <length> welcome-resize-quick: dock-area.quick-merged-size;
         property <length> welcome-taken:
             welcome-strip + welcome-size + sidebar-outside-strip
@@ -1079,8 +1251,57 @@ export component AppWindow inherits Window {
                 : dock-area.welcome-horizontal ? dock-area.height : dock-area.height - dock-area.welcome-taken;
         property <bool> quick-panel-resizing;
 
+        DockGroupStrip {
+            visible: dock-area.left-strip > 0px;
+            x: 0px; y: 0px;
+            width: dock-area.left-strip; height: parent.height;
+            dock-edge: "left";
+            has-welcome: dock-area.left-welcome;
+            has-resource: dock-area.left-resource;
+            has-quick: dock-area.left-quick;
+            active-kind: dock-area.left-active;
+            activate(kind) => { root.activate-dock-group("left", kind); }
+            toggle(kind) => { root.toggle-dock-group("left", kind); }
+        }
+        DockGroupStrip {
+            visible: dock-area.right-strip > 0px;
+            x: parent.width - dock-area.right-strip; y: 0px;
+            width: dock-area.right-strip; height: parent.height;
+            dock-edge: "right";
+            has-welcome: dock-area.right-welcome;
+            has-resource: dock-area.right-resource;
+            has-quick: dock-area.right-quick;
+            active-kind: dock-area.right-active;
+            activate(kind) => { root.activate-dock-group("right", kind); }
+            toggle(kind) => { root.toggle-dock-group("right", kind); }
+        }
+        DockGroupStrip {
+            visible: dock-area.top-strip > 0px;
+            x: 0px; y: 0px;
+            width: parent.width; height: dock-area.top-strip;
+            dock-edge: "top";
+            has-welcome: dock-area.top-welcome;
+            has-resource: dock-area.top-resource;
+            has-quick: dock-area.top-quick;
+            active-kind: dock-area.top-active;
+            activate(kind) => { root.activate-dock-group("top", kind); }
+            toggle(kind) => { root.toggle-dock-group("top", kind); }
+        }
+        DockGroupStrip {
+            visible: dock-area.bottom-strip > 0px;
+            x: 0px; y: parent.height - dock-area.bottom-strip;
+            width: parent.width; height: dock-area.bottom-strip;
+            dock-edge: "bottom";
+            has-welcome: dock-area.bottom-welcome;
+            has-resource: dock-area.bottom-resource;
+            has-quick: dock-area.bottom-quick;
+            active-kind: dock-area.bottom-active;
+            activate(kind) => { root.activate-dock-group("bottom", kind); }
+            toggle(kind) => { root.toggle-dock-group("bottom", kind); }
+        }
+
         // Collapsed welcome → a thin left icon strip (click the icon to re-open).
-        if dock-area.shared-tools : ToolStrip {
+        if false : ToolStrip {
             x: root.welcome-sidebar-dock == "right" ? parent.width - parent.activity-strip : 0px;
             y: root.welcome-sidebar-dock == "bottom" ? parent.height - parent.activity-strip : 0px;
             width: parent.welcome-horizontal ? parent.activity-strip : parent.width;
@@ -1146,7 +1367,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        if !dock-area.shared-tools && root.welcome-as-sidebar && root.welcome-collapsed : ToolStrip {
+        if false : ToolStrip {
             x: root.welcome-sidebar-dock == "right" ? parent.width - parent.welcome-strip : 0px;
             y: root.welcome-sidebar-dock == "bottom" ? parent.height - parent.welcome-strip : 0px;
             width: parent.welcome-horizontal ? parent.welcome-strip : parent.width;
@@ -1171,7 +1392,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        if dock-area.sidebar-strip-outside : ToolStrip {
+        if false : ToolStrip {
             x: root.welcome-sidebar-dock == "right" ? parent.width - parent.sidebar-outside-strip : 0px;
             y: root.welcome-sidebar-dock == "bottom" ? parent.height - parent.sidebar-outside-strip : 0px;
             width: parent.welcome-horizontal ? parent.sidebar-outside-strip : parent.width;
@@ -1188,17 +1409,13 @@ export component AppWindow inherits Window {
 
         // Welcome / session list, to the right of the icon strip. Hidden when
         // collapsed — its icon stays in the strip; clicking it re-opens.
-        if root.welcome-as-sidebar && !root.welcome-collapsed : Rectangle {
-            x: dock-area.shared-tools && root.welcome-sidebar-dock == "right" ? parent.width - parent.activity-strip - parent.welcome-group-size
-             : dock-area.shared-tools && root.welcome-sidebar-dock == "left" ? parent.activity-strip
-             : root.welcome-sidebar-dock == "right" ? parent.width - parent.sidebar-outside-strip - parent.welcome-group-size
-             : root.welcome-sidebar-dock == "left" ? parent.sidebar-outside-strip
-             : 0px;
-            y: dock-area.shared-tools && root.welcome-sidebar-dock == "bottom" ? parent.height - parent.activity-strip - parent.welcome-group-size
-             : dock-area.shared-tools && root.welcome-sidebar-dock == "top" ? parent.activity-strip
-             : root.welcome-sidebar-dock == "bottom" ? parent.height - parent.sidebar-outside-strip - parent.welcome-group-size
-             : root.welcome-sidebar-dock == "top" ? parent.sidebar-outside-strip
-             : 0px;
+        if dock-area.welcome-active : Rectangle {
+            x: root.welcome-sidebar-dock == "right"
+                ? parent.width - dock-area.right-strip - parent.welcome-group-size
+                : root.welcome-sidebar-dock == "left" ? dock-area.left-strip : 0px;
+            y: root.welcome-sidebar-dock == "bottom"
+                ? parent.height - dock-area.bottom-strip - parent.welcome-group-size
+                : root.welcome-sidebar-dock == "top" ? dock-area.top-strip : 0px;
             width: parent.welcome-horizontal ? parent.welcome-group-size : parent.width;
             height: parent.welcome-horizontal ? parent.height : parent.welcome-group-size;
             clip: true;
@@ -1227,10 +1444,6 @@ export component AppWindow inherits Window {
                 dock-drag-end() => {
                     if (root.dock-target != "") {
                         root.welcome-sidebar-dock = root.dock-target;
-                        if (root.sidebar-dock == root.dock-target) {
-                            root.sidebar-collapsed = true;
-                            root.set-sidebar-collapsed(true);
-                        }
                         root.persist-welcome-sidebar-dock(root.welcome-sidebar-dock);
                     }
                     root.panel-dragging = false;
@@ -1265,7 +1478,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        if dock-area.three-shared && !root.quick-panel-collapsed : Rectangle {
+        if false : Rectangle {
             x: root.quick-panel-dock == "right"
                 ? parent.width - parent.activity-strip - parent.shared-panel-size
                 : root.quick-panel-dock == "left" ? parent.activity-strip : 0px;
@@ -1324,19 +1537,17 @@ export component AppWindow inherits Window {
         }
 
         // Drag the welcome sidebar's right edge to resize it (v0.5 M3b).
-        if root.welcome-as-sidebar && !root.welcome-collapsed : Rectangle {
-            x: dock-area.shared-tools && root.welcome-sidebar-dock == "right" ? parent.width - parent.activity-strip - parent.welcome-group-size - 2px
-             : dock-area.shared-tools && root.welcome-sidebar-dock == "left" ? parent.activity-strip + parent.welcome-group-size - 2px
-             : root.welcome-sidebar-dock == "left" ? parent.sidebar-outside-strip + parent.welcome-group-size - 2px
-             : root.welcome-sidebar-dock == "right" ? parent.width - parent.sidebar-outside-strip - parent.welcome-group-size - 2px
-             : 0px;
-            y: dock-area.shared-tools && root.welcome-sidebar-dock == "top" ? parent.activity-strip + parent.welcome-group-size - 2px
-             : dock-area.shared-tools && root.welcome-sidebar-dock == "bottom" ? parent.height - parent.activity-strip - parent.welcome-group-size - 2px
-             : root.welcome-sidebar-dock == "top" ? parent.sidebar-outside-strip + parent.welcome-group-size - 2px
-             : root.welcome-sidebar-dock == "bottom" ? parent.height - parent.sidebar-outside-strip - parent.welcome-group-size - 2px
-             : 0px;
-            width: parent.welcome-horizontal ? 4px : parent.width;
-            height: parent.welcome-horizontal ? parent.height : 4px;
+        if dock-area.welcome-active : Rectangle {
+            x: root.welcome-sidebar-dock == "right"
+                ? parent.width - dock-area.right-strip - parent.welcome-group-size - 2px
+                : root.welcome-sidebar-dock == "left"
+                    ? dock-area.left-strip + parent.welcome-group-size - 2px : 0px;
+            y: root.welcome-sidebar-dock == "bottom"
+                ? parent.height - dock-area.bottom-strip - parent.welcome-group-size - 2px
+                : root.welcome-sidebar-dock == "top"
+                    ? dock-area.top-strip + parent.welcome-group-size - 2px : 0px;
+            width: parent.welcome-horizontal ? root.dock-splitter-width : parent.width;
+            height: parent.welcome-horizontal ? parent.height : root.dock-splitter-width;
             z: 20;
             property <bool> hover-lit;
             property <bool> hover-pending;
@@ -1378,7 +1589,8 @@ export component AppWindow inherits Window {
                     } else if (ev.kind == PointerEventKind.up) {
                         dock-area.welcome-sidebar-dragging = false;
                         root.persist-welcome-sidebar-width(root.welcome-sidebar-width / 1px);
-                        if (dock-area.shared-tools) {
+                        if (root.welcome-as-sidebar
+                                && root.welcome-sidebar-dock == root.sidebar-dock) {
                             root.persist-sidebar-width(root.sidebar-width / 1px);
                         }
                     }
@@ -1389,35 +1601,28 @@ export component AppWindow inherits Window {
                             root.welcome-sidebar-width = clamp(
                                 root.welcome-sidebar-dock == "right"
                                     ? dock-area.absolute-position.x + dock-area.width
-                                        - (dock-area.shared-tools ? dock-area.activity-strip : 0px)
+                                        - dock-area.right-strip
                                         - (self.absolute-position.x + self.mouse-x)
-                                    : dock-area.shared-tools && root.welcome-sidebar-dock == "left"
-                                        ? self.absolute-position.x + self.mouse-x
-                                            - dock-area.absolute-position.x
-                                            - dock-area.activity-strip
                                     : self.absolute-position.x + self.mouse-x
-                                        - dock-area.absolute-position.x,
+                                        - dock-area.absolute-position.x
+                                        - dock-area.left-strip,
                                 180px, 560px);
-                            if (dock-area.shared-tools) {
+                            if (root.welcome-as-sidebar
+                                    && root.welcome-sidebar-dock == root.sidebar-dock) {
                                 root.sidebar-width = root.welcome-sidebar-width;
                             }
                         } else {
                             root.welcome-sidebar-width = clamp(
                                 root.welcome-sidebar-dock == "bottom"
                                     ? dock-area.absolute-position.y + dock-area.height
-                                        - (dock-area.shared-tools ? dock-area.activity-strip : 0px)
-                                    - (self.absolute-position.y + self.mouse-y)
-                                        - dock-area.welcome-resize-quick
-                                    : dock-area.shared-tools && root.welcome-sidebar-dock == "top"
-                                        ? self.absolute-position.y + self.mouse-y
-                                            - dock-area.absolute-position.y
-                                            - dock-area.activity-strip
-                                            - dock-area.welcome-resize-quick
+                                        - dock-area.bottom-strip
+                                        - (self.absolute-position.y + self.mouse-y)
                                     : self.absolute-position.y + self.mouse-y
                                         - dock-area.absolute-position.y
-                                        - dock-area.welcome-resize-quick,
+                                        - dock-area.top-strip,
                                 120px, 420px);
-                            if (dock-area.shared-tools) {
+                            if (root.welcome-as-sidebar
+                                    && root.welcome-sidebar-dock == root.sidebar-dock) {
                                 root.sidebar-height = root.welcome-sidebar-width;
                             }
                         }
@@ -1428,8 +1633,7 @@ export component AppWindow inherits Window {
 
         // Everything except the welcome strip/sidebar — the resource panel,
         // splitter and the central tab/pane content — sits to the right of them.
-        if root.quick-commands-as-sidebar && !dock-area.quick-merge-welcome
-                && root.quick-panel-collapsed : ToolStrip {
+        if false : ToolStrip {
             x: root.quick-panel-dock == "right"
                 ? dock-area.legacy-x + dock-area.legacy-width - dock-area.quick-size
                 : dock-area.legacy-x;
@@ -1446,16 +1650,15 @@ export component AppWindow inherits Window {
             }
         }
 
-        if root.quick-commands-as-sidebar && !dock-area.quick-merge-welcome
-                && !root.quick-panel-collapsed : Rectangle {
+        if dock-area.quick-active : Rectangle {
             x: root.quick-panel-dock == "right"
-                ? dock-area.legacy-x + dock-area.legacy-width - dock-area.quick-size
-                : dock-area.legacy-x;
+                ? parent.width - dock-area.right-strip - dock-area.quick-group-size
+                : root.quick-panel-dock == "left" ? dock-area.left-strip : 0px;
             y: root.quick-panel-dock == "bottom"
-                ? dock-area.legacy-y + dock-area.legacy-height - dock-area.quick-size
-                : dock-area.legacy-y;
-            width: dock-area.quick-horizontal ? dock-area.quick-size : dock-area.legacy-width;
-            height: dock-area.quick-horizontal ? dock-area.legacy-height : dock-area.quick-size;
+                ? parent.height - dock-area.bottom-strip - dock-area.quick-group-size
+                : root.quick-panel-dock == "top" ? dock-area.top-strip : 0px;
+            width: dock-area.quick-horizontal ? dock-area.quick-group-size : parent.width;
+            height: dock-area.quick-horizontal ? parent.height : dock-area.quick-group-size;
             clip: true;
             QuickCommandPanel {
                 width: parent.width;
@@ -1488,15 +1691,6 @@ export component AppWindow inherits Window {
                 dock-drag-end => {
                     if (root.dock-target != "") {
                         root.quick-panel-dock = root.dock-target;
-                        if (root.sidebar-dock == root.dock-target) {
-                            root.sidebar-collapsed = true;
-                            root.set-sidebar-collapsed(true);
-                        }
-                        if (root.welcome-as-sidebar
-                                && root.welcome-sidebar-dock == root.dock-target) {
-                            root.welcome-collapsed = true;
-                            root.set-welcome-collapsed(true);
-                        }
                         root.persist-quick-panel-dock(root.quick-panel-dock);
                     }
                     root.panel-dragging = false;
@@ -1504,25 +1698,39 @@ export component AppWindow inherits Window {
             }
         }
 
-        if root.quick-commands-as-sidebar && !dock-area.quick-merge-welcome
-                && !root.quick-panel-collapsed : Rectangle {
+        if dock-area.quick-active : Rectangle {
             x: root.quick-panel-dock == "left"
-                ? dock-area.legacy-x + dock-area.quick-size - 2px
+                ? dock-area.left-strip + dock-area.quick-group-size - 2px
                 : root.quick-panel-dock == "right"
-                    ? dock-area.legacy-x + dock-area.legacy-width - dock-area.quick-size - 2px
-                    : dock-area.legacy-x;
+                    ? parent.width - dock-area.right-strip - dock-area.quick-group-size - 2px
+                    : 0px;
             y: root.quick-panel-dock == "top"
-                ? dock-area.legacy-y + dock-area.quick-size - 2px
+                ? dock-area.top-strip + dock-area.quick-group-size - 2px
                 : root.quick-panel-dock == "bottom"
-                    ? dock-area.legacy-y + dock-area.legacy-height - dock-area.quick-size - 2px
-                    : dock-area.legacy-y;
-            width: dock-area.quick-horizontal ? 4px : dock-area.legacy-width;
-            height: dock-area.quick-horizontal ? dock-area.legacy-height : 4px;
+                    ? parent.height - dock-area.bottom-strip - dock-area.quick-group-size - 2px
+                    : 0px;
+            width: dock-area.quick-horizontal ? root.dock-splitter-width : parent.width;
+            height: dock-area.quick-horizontal ? parent.height : root.dock-splitter-width;
             z: 25;
-            background: quick-split-ta.has-hover || dock-area.quick-panel-resizing
-                ? Theme.accent : Theme.border-subtle;
+            property <bool> quick-split-hover;
+            background: transparent;
+            Rectangle {
+                width: dock-area.quick-horizontal
+                    ? ((parent.quick-split-hover || dock-area.quick-panel-resizing)
+                        ? parent.width : 1px)
+                    : parent.width;
+                height: dock-area.quick-horizontal
+                    ? parent.height
+                    : ((parent.quick-split-hover || dock-area.quick-panel-resizing)
+                        ? parent.height : 1px);
+                x: dock-area.quick-horizontal ? (parent.width - self.width) / 2 : 0px;
+                y: dock-area.quick-horizontal ? 0px : (parent.height - self.height) / 2;
+                background: parent.quick-split-hover || dock-area.quick-panel-resizing
+                    ? Theme.accent : Theme.border-subtle;
+            }
             quick-split-ta := TouchArea {
                 mouse-cursor: dock-area.quick-horizontal ? ew-resize : ns-resize;
+                changed has-hover => { parent.quick-split-hover = self.has-hover; }
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.down) {
                         dock-area.quick-panel-resizing = true;
@@ -1540,20 +1748,20 @@ export component AppWindow inherits Window {
                         if (dock-area.quick-horizontal) {
                             root.quick-panel-width = clamp(
                                 root.quick-panel-dock == "right"
-                                    ? dock-area.absolute-position.x + dock-area.legacy-x
-                                        + dock-area.legacy-width
+                                    ? dock-area.absolute-position.x + dock-area.width
+                                        - dock-area.right-strip
                                         - (self.absolute-position.x + self.mouse-x)
                                     : self.absolute-position.x + self.mouse-x
-                                        - dock-area.absolute-position.x - dock-area.legacy-x,
+                                        - dock-area.absolute-position.x - dock-area.left-strip,
                                 180px, 560px);
                         } else {
                             root.quick-panel-height = clamp(
                                 root.quick-panel-dock == "bottom"
-                                    ? dock-area.absolute-position.y + dock-area.legacy-y
-                                        + dock-area.legacy-height
+                                    ? dock-area.absolute-position.y + dock-area.height
+                                        - dock-area.bottom-strip
                                         - (self.absolute-position.y + self.mouse-y)
                                     : self.absolute-position.y + self.mouse-y
-                                        - dock-area.absolute-position.y - dock-area.legacy-y,
+                                        - dock-area.absolute-position.y - dock-area.top-strip,
                                 120px, 420px);
                         }
                     }
@@ -1562,27 +1770,15 @@ export component AppWindow inherits Window {
         }
 
         rest := Rectangle {
-        x: dock-area.legacy-x
-            + (root.quick-commands-as-sidebar && root.quick-panel-dock == "left"
-                ? dock-area.quick-taken : 0px);
-        y: dock-area.legacy-y
-            + (root.quick-commands-as-sidebar && root.quick-panel-dock == "top"
-                ? dock-area.quick-taken : 0px);
-        width: dock-area.legacy-width
-            - (root.quick-commands-as-sidebar && dock-area.quick-horizontal
-                ? dock-area.quick-taken : 0px);
-        height: dock-area.legacy-height
-            - (root.quick-commands-as-sidebar && !dock-area.quick-horizontal
-                ? dock-area.quick-taken : 0px);
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
         // Sidebar extent along its docked axis. When collapsed it shrinks to the
         // 36px ToolStrip icon bar (M5) instead of 0 + a floating button; the 4px
         // splitter is gone while collapsed.
-        property <length> sb-w: root.sidebar-collapsed
-            ? (dock-area.shared-tools ? 0px : (root.sidebar-horizontal ? 40px : 36px))
-            : (dock-area.shared-tools ? dock-area.shared-panel-size : root.sidebar-width);
-        property <length> sb-h: root.sidebar-collapsed
-            ? (dock-area.shared-tools ? 0px : (root.sidebar-horizontal ? 40px : 36px))
-            : (dock-area.shared-tools ? dock-area.shared-panel-size : root.sidebar-height);
+        property <length> sb-w: dock-area.sidebar-group-size;
+        property <length> sb-h: dock-area.sidebar-group-size;
         property <length> sp: 0px;
         // The collapsed bar (sb-h) already reserves the bottom strip now.
         property <length> bottom-strip-h: 0px;
@@ -1591,13 +1787,15 @@ export component AppWindow inherits Window {
         // Only shown while expanded; collapsing swaps it for the ToolStrip icon
         // bar below (mirrors the welcome sidebar), so no clipped widgets bleed
         // through the 36px strip (#resource-collapse).
-        if !root.sidebar-collapsed : Rectangle {
-            x: root.sidebar-dock == "right" ? parent.width - parent.sb-w
-             : 0px;
-            y: root.sidebar-dock == "bottom" ? parent.height - parent.sb-h
-             : 0px;
-            width: root.sidebar-horizontal ? parent.sb-w : parent.width;
-            height: root.sidebar-horizontal ? parent.height : parent.sb-h;
+        if dock-area.sidebar-active : Rectangle {
+            x: root.sidebar-dock == "right"
+                ? parent.width - dock-area.right-strip - dock-area.sidebar-group-size
+                : root.sidebar-dock == "left" ? dock-area.left-strip : 0px;
+            y: root.sidebar-dock == "bottom"
+                ? parent.height - dock-area.bottom-strip - dock-area.sidebar-group-size
+                : root.sidebar-dock == "top" ? dock-area.top-strip : 0px;
+            width: root.sidebar-horizontal ? dock-area.sidebar-group-size : parent.width;
+            height: root.sidebar-horizontal ? parent.height : dock-area.sidebar-group-size;
             clip: true;
             Sidebar {
             width: parent.width;
@@ -1645,14 +1843,6 @@ export component AppWindow inherits Window {
             dock-drag-end() => {
                 if (root.dock-target != "") {
                     root.sidebar-dock = root.dock-target;
-                    if (root.welcome-as-sidebar && root.welcome-sidebar-dock == root.dock-target) {
-                        root.welcome-collapsed = true;
-                        root.set-welcome-collapsed(true);
-                    }
-                    if (root.quick-commands-as-sidebar
-                            && root.quick-panel-dock == root.dock-target) {
-                        root.quick-panel-collapsed = true;
-                    }
                     root.persist-sidebar-dock(root.sidebar-dock);
                 }
                 root.panel-dragging = false;
@@ -1666,7 +1856,7 @@ export component AppWindow inherits Window {
 
         // Collapsed resource panel → a ToolStrip icon bar at the same docked edge
         // (M5), in place of the old floating expand button.
-        if !dock-area.shared-tools && root.sidebar-collapsed && !dock-area.combine-collapsed-tools && !dock-area.sidebar-strip-outside : ToolStrip {
+        if false : ToolStrip {
             x: root.sidebar-dock == "right" ? parent.width - parent.sb-w : 0px;
             y: root.sidebar-dock == "bottom" ? parent.height - parent.sb-h : 0px;
             width: root.sidebar-horizontal ? parent.sb-w : parent.width;
@@ -1686,17 +1876,17 @@ export component AppWindow inherits Window {
         // Splitter — drag to resize the sidebar. Orientation + which dimension it
         // adjusts follow the dock edge. Hidden while collapsed.
         Rectangle {
-            visible: !root.sidebar-collapsed;
+            visible: dock-area.sidebar-active;
             // Horizontal docks → a vertical 4px bar at the sidebar's inner edge;
             // vertical docks → a horizontal 4px bar.
-            x: root.sidebar-dock == "left"   ? parent.sb-w - 2px
-             : root.sidebar-dock == "right"  ? parent.width - parent.sb-w - 2px
+            x: root.sidebar-dock == "left"   ? dock-area.left-strip + parent.sb-w - 2px
+             : root.sidebar-dock == "right"  ? parent.width - dock-area.right-strip - parent.sb-w - 2px
              : 0px;
-            y: root.sidebar-dock == "top"    ? parent.sb-h - 2px
-             : root.sidebar-dock == "bottom" ? parent.height - parent.sb-h - 2px
+            y: root.sidebar-dock == "top"    ? dock-area.top-strip + parent.sb-h - 2px
+             : root.sidebar-dock == "bottom" ? parent.height - dock-area.bottom-strip - parent.sb-h - 2px
              : 0px;
-            width:  root.sidebar-horizontal ? 4px : parent.width;
-            height: root.sidebar-horizontal ? parent.height : 4px;
+            width:  root.sidebar-horizontal ? root.dock-splitter-width : parent.width;
+            height: root.sidebar-horizontal ? parent.height : root.dock-splitter-width;
             z: 20;
             property <length> resize-area-x: parent.absolute-position.x;
             property <length> resize-area-y: parent.absolute-position.y;
@@ -1744,7 +1934,8 @@ export component AppWindow inherits Window {
                     } else if (ev.kind == PointerEventKind.up) {
                         root.sidebar-dragging = false;
                         root.persist-sidebar-width(root.sidebar-width / 1px);
-                        if (dock-area.shared-tools) {
+                        if (root.welcome-as-sidebar
+                                && root.welcome-sidebar-dock == root.sidebar-dock) {
                             root.persist-welcome-sidebar-width(root.welcome-sidebar-width / 1px);
                         }
                     }
@@ -1764,7 +1955,8 @@ export component AppWindow inherits Window {
                                     : (self.absolute-position.x + self.mouse-x - root.sidebar-drag-offset-x)
                                         - parent.resize-area-x,
                                 180px, 560px);
-                            if (dock-area.shared-tools) {
+                            if (root.welcome-as-sidebar
+                                    && root.welcome-sidebar-dock == root.sidebar-dock) {
                                 root.welcome-sidebar-width = root.sidebar-width;
                             }
                         } else {
@@ -1775,7 +1967,8 @@ export component AppWindow inherits Window {
                                     : (self.absolute-position.y + self.mouse-y - root.sidebar-drag-offset-y)
                                         - parent.resize-area-y,
                                 120px, 420px);
-                            if (dock-area.shared-tools) {
+                            if (root.welcome-as-sidebar
+                                    && root.welcome-sidebar-dock == root.sidebar-dock) {
                                 root.welcome-sidebar-width = root.sidebar-height;
                             }
                         }
@@ -1789,10 +1982,10 @@ export component AppWindow inherits Window {
         // panel can never bleed (visually or for clicks) onto a panel docked on
         // the bottom or right (#dock).
         central := Rectangle {
-            x: root.sidebar-dock == "left" ? parent.sb-w + parent.sp : 0px;
-            y: root.sidebar-dock == "top"  ? parent.sb-h + parent.sp : 0px;
-            width:  root.sidebar-horizontal ? parent.width - parent.sb-w - parent.sp : parent.width;
-            height: root.sidebar-horizontal ? parent.height : parent.height - parent.sb-h - parent.sp - parent.bottom-strip-h;
+            x: dock-area.dock-left-taken;
+            y: dock-area.dock-top-taken;
+            width: max(0px, parent.width - dock-area.dock-left-taken - dock-area.dock-right-taken);
+            height: max(0px, parent.height - dock-area.dock-top-taken - dock-area.dock-bottom-taken);
             clip: true;
             // Split-pane area (v0.5): panes tile this rect; each pane has its own
             // tab strip + active terminal / welcome. Rust flattens the split tree
