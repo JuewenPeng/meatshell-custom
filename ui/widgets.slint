@@ -403,6 +403,56 @@ export component ToolStrip inherits Rectangle {
     }
 }
 
+// A dock-edge strip whose buttons are derived from the panels assigned to that
+// edge.  Keeping the ordering and activation mapping here means every edge
+// uses the same group semantics instead of each panel growing its own special
+// case.  Panel kinds: 0 = welcome, 1 = resource, 2 = quick commands.
+export component DockGroupStrip inherits Rectangle {
+    in property <string> dock-edge;
+    in property <bool> has-welcome: false;
+    in property <bool> has-resource: false;
+    in property <bool> has-quick: false;
+    in property <int> active-kind: -1;
+    callback activate(int);
+    callback toggle(int);
+
+    property <int> panel-count:
+        (root.has-welcome ? 1 : 0)
+        + (root.has-resource ? 1 : 0)
+        + (root.has-quick ? 1 : 0);
+    property <int> first-kind: root.has-welcome ? 0 : (root.has-resource ? 1 : 2);
+    property <int> second-kind:
+        root.has-welcome && root.has-resource ? 1 : 2;
+    property <int> third-kind: 2;
+    property <bool> horizontal: root.dock-edge == "top" || root.dock-edge == "bottom";
+
+    ToolStrip {
+        width: parent.width;
+        height: parent.height;
+        dock-edge: root.dock-edge;
+        glyph: root.first-kind == 0 ? "\u{E88A}" : (root.first-kind == 1 ? "\u{E871}" : "\u{E3E7}");
+        active: root.active-kind == root.first-kind;
+        show-second: root.panel-count > 1;
+        second-glyph: root.second-kind == 0 ? "\u{E88A}" : (root.second-kind == 1 ? "\u{E871}" : "\u{E3E7}");
+        second-active: root.active-kind == root.second-kind;
+        show-third: root.panel-count > 2;
+        third-glyph: "\u{E3E7}";
+        third-active: root.active-kind == root.third-kind;
+        expand => {
+            if (root.active-kind == root.first-kind) { root.toggle(root.first-kind); }
+            else { root.activate(root.first-kind); }
+        }
+        expand-second => {
+            if (root.active-kind == root.second-kind) { root.toggle(root.second-kind); }
+            else { root.activate(root.second-kind); }
+        }
+        expand-third => {
+            if (root.active-kind == root.third-kind) { root.toggle(root.third-kind); }
+            else { root.activate(root.third-kind); }
+        }
+    }
+}
+
 export component DockExpandButton inherits Rectangle {
     in property <string> dock-edge;   // left | right | top | bottom
     // For top/bottom docks, hug the right corner instead of the left. SFTP uses
