@@ -10,40 +10,31 @@ the tens-of-MB range of a native binary.
 
 ## Custom Version Notes
 
-This branch is based on the original meatshell project with several custom changes, including feature enhancements, interaction improvements, and bug fixes. The rest of this README is kept as close to the upstream version as possible.
+This branch is based on the original [meatshell](https://github.com/jeff141/meatshell) project, with custom feature enhancements, interaction improvements, and bug fixes. The rest of this README is kept as close to the upstream version as possible.
 
 ### Changes and Improvements
 
-- SSH connections support X11 forwarding.
-- Added a terminal `Ctrl+C` copy preference, allowing users to choose between copy and interrupt behavior.
-- Session entries can be reordered by drag and drop within the same group.
-- The Quick Connect and Resource Status panels can dock to the left, right, top, or bottom; when both panels are expanded on the same edge, their edge icons are shown side by side so either panel can be switched to or collapsed at any time.
-- SFTP supports moving files / folders from the context menu or toolbar, with a visual target-directory picker; multiple selected files / folders can be moved in one batch.
-- The SFTP directory tree supports context menus, resizable width, and `Load all` for large directories; the move dialog can automatically locate the current path.
-- The SFTP file list supports Windows-style multi-selection with `Ctrl`, `Shift`, and `Ctrl+A`, and shows the selected item count in the status bar.
-- The SFTP context menu separates `Download` and `Archive download`, and supports batch download / move / delete for multiple selected files or folders.
-- Large SFTP directories use paged initial display plus `Load all`; the file list, directory tree, and move-dialog tree all use virtualized lists to reduce the cost of opening and scrolling huge folders.
-- Expanding or collapsing directories in the SFTP move dialog is independent from the main directory tree, so choosing a target directory does not change the main panel's tree state.
-- SFTP directory listings are cached within the session, keeping up to 64 recently visited directories; refreshes and file operations update the cache.
-- Temporary downloads for SFTP preview / external editing can be cancelled; successful transfers automatically close the download window and clear completed records.
-- New / edit session dialogs and SFTP dialogs can be closed quickly with `Esc`; move, rename, permission, and related dialogs can be repositioned by dragging.
-- Improved the default focus and cursor position in the SFTP rename dialog.
-- Improved cursor-follow behavior for path, rename, move, new-session, and related text fields; when content exceeds the input width, the visible range scrolls to the cursor, and long paths show their ending by default.
-- Fixed the startup behavior of the default-collapse setting to avoid conflicts with the saved panel state.
-- Improved SFTP file-list refresh behavior to reduce unexpected scroll-position changes.
-- Improved SFTP path synchronization when following `cd` inside tmux, with a quick toggle in the top toolbar.
-- SFTP toolbar buttons now show hover tooltips for clearer button meaning.
-- Added English / Chinese switching for custom SFTP UI text.
-- The SFTP file list now has sortable column headers for name, size, type, modified time, permissions, and user/group, while keeping folders and files grouped separately.
-- SFTP file types now use a file-manager-style display, recognizing common source, config, log, image, audio, video, archive, executable, and dotfiles, with English / Chinese switching.
-- SFTP file-list columns can be resized by dragging their headers; when the panel is docked left or right, header labels align left and overflowing headers, rows, and toolbar controls are clipped to the panel boundary.
-- Improved SFTP header dragging so columns that reached their minimum width follow the mouse immediately when dragged back, without accumulating out-of-bounds distance.
-- When the SFTP panel is collapsed, unavailable path fields and file-operation buttons are hidden while expand / collapse controls remain available.
-- SFTP panel drag-to-dock is limited to the drag handle left of the path bar, avoiding accidental drags from file-list or directory-tree whitespace.
-- The SFTP panel now has `Files` and `Port Forwarding` tabs. Connected sessions can create runtime local `-L` and dynamic `-D` (SOCKS5) forwards, view starting / running / failed state, stop forwards, and clear failed records.
-- SFTP directory-tree refreshes preserve the manually chosen scroll position; navigating to a folder outside the visible range expands and places the selected folder near the upper part of the tree.
-- The SFTP content area supports mouse-button back / forward navigation. Each session keeps up to 20 path-only history entries; normal navigation clears forward history, while refresh does not create history.
-- During large-directory loading, consecutive queued directory navigation and refresh requests are coalesced so only the latest view request runs after the current operation finishes.
+The following are additions, interaction improvements, and fixes in this branch compared with `upstream/main`:
+
+- Added the Jiangnan theme and expanded theme tokens; SFTP zebra rows, hover/selected states, and destructive actions now follow the active theme.
+- Quick Connect, Resource Status, and Quick Commands use one four-edge docking system. Panels on the same edge share a dock group and can be switched or collapsed through the edge icons, with consistent widths and splitters.
+- Quick Commands can be shown as an independent dock, with persistent settings, command groups, and broadcast execution; the Welcome and Resource Status panels can also be docked independently.
+- Added remote NVIDIA multi-GPU VRAM monitoring (used / total), a System Information window, bilingual labels, and visibility-aware resource sampling that pauses while the panel is hidden.
+- Added X11 forwarding for SSH connections; local PowerShell and CMD sessions use dedicated startup handling and disable controls that do not apply to local shells.
+- Added optional terminal output highlighting with Log / DevOps presets and custom rules, plus Windows / macOS renderer selection.
+- Added preferences for terminal `Ctrl+C` behavior, selection auto-copy, automatic cursor color, cursor opacity, and the unfocused cursor appearance.
+- Refined terminal cursor behavior: typing or navigation keys keep it visible and restart the blink cycle; selection, tmux, and wide-character positioning are handled more consistently.
+- Session tabs support same-group drag reordering, horizontal wheel browsing, a draggable tab scrollbar, a title-width cap, and an always-available new-tab page.
+- Added SFTP keyboard operations (arrow keys, Backspace, Enter, and Delete), opening files from the path field, delete confirmation with Esc cancellation, and rejection of invalid paths in history.
+- SFTP supports Windows-style multi-selection, batch download / move / delete, archive download, visual move-target selection, and directory-tree context menus.
+- SFTP file lists can sort by name, size, type, modified time, permissions, and user/group, and retain the active sort and selection across navigation, back/forward, refresh, and reconnect.
+- Each session keeps up to 50 SFTP path-history entries and restores directory-tree expansion, selected entries, and scroll positions; the session directory cache keeps up to 64 recent directories.
+- Large SFTP directories use paging, virtualized lists, and request coalescing; directory trees support `Load all` and `Collapse` without blocking repeated navigation.
+- Added `Files` and `Port Forwarding` SFTP tabs with runtime local `-L` and dynamic `-D` SOCKS5 forwarding, including start, stop, failure, and cleanup states.
+- Side-docked SFTP toolbars adapt by shrinking and clipping controls in priority order; the path field, parent/refresh controls, and collapse button remain correctly positioned, and all toolbar buttons have hover tooltips.
+- Added tmux `cd` path following, optional session-synchronized uploads, and bilingual SFTP file-type and interface text.
+- New / edit session and SFTP dialogs support Esc-to-close and drag repositioning; text fields follow the caret and show the end of long paths by default.
+- Bounded terminal scrollback and emoji image caches to prevent long-running sessions or high-volume output from retaining unbounded memory.
 
 ## Screenshots
 
