@@ -353,6 +353,8 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+const TWEMOJI_CACHE_CAP: usize = 512;
+
 fn twemoji_image(grapheme: &str) -> Option<slint::Image> {
     TWEMOJI_CACHE.with(|cache| {
         if let Some(image) = cache.borrow().get(grapheme) {
@@ -382,9 +384,15 @@ fn twemoji_image(grapheme: &str) -> Option<slint::Image> {
                 pixels.make_mut_bytes().copy_from_slice(rgba.as_raw());
                 slint::Image::from_rgba8(pixels)
             });
-        cache
-            .borrow_mut()
-            .insert(grapheme.to_string(), image.clone());
+        let mut cache = cache.borrow_mut();
+        // Grapheme clusters can be supplied by remote output and are not
+        // limited to the finite set of bundled emoji.  Bound this cache so a
+        // long-running session cannot retain an unbounded number of distinct
+        // strings/images; entries are cheap to rebuild on demand.
+        if cache.len() >= TWEMOJI_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(grapheme.to_string(), image.clone());
         image
     })
 }
