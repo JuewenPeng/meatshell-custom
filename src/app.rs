@@ -7143,7 +7143,13 @@ fn apply_session_event_to_window(
                     st.user = current_user;
                 }
                 st.gpus = gpus;
-                st.procs = procs;
+                // Process sampling runs on its own channel. Resource samples
+                // intentionally carry an empty process vector, so do not
+                // erase the last process snapshot while waiting for the next
+                // ProcessStats event.
+                if !procs.is_empty() {
+                    st.procs = procs;
+                }
                 if let Some(sys) = sys {
                     st.sys = sys;
                 }
