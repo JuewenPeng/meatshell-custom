@@ -5,7 +5,12 @@ use crate::terminal::{HistSpan, Line};
 /// How much terminal byte history is retained for resize reflow.
 pub(crate) const RAW_CAP: usize = 2 * 1024 * 1024;
 /// Per-session rendered scrollback cap.
-pub(crate) const MAX_HISTORY: usize = 100_000;
+///
+/// Each retained row owns its text plus the coloured spans used by the UI.
+/// Keeping 100,000 rows could therefore consume hundreds of megabytes for a
+/// busy terminal (and multiplied again when several tabs are open).  Match the
+/// vt100 parser's scrollback size so the rendered cache stays bounded too.
+pub(crate) const MAX_HISTORY: usize = 5_000;
 
 pub(crate) fn cell_prefix(chars: &[char]) -> Vec<usize> {
     let mut prefix = Vec::with_capacity(chars.len() + 1);
