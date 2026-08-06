@@ -3388,6 +3388,7 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
         group: group.into(),
         group_header: group.into(),
         collapsed: false,
+        builtin: false,
     };
 
     let mut rows: Vec<SessionInfo> = Vec::new();
@@ -3403,6 +3404,7 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
             group: "system".into(),
             group_header: if i == 0 { "system".into() } else { "".into() },
             collapsed: true,
+            builtin: true,
         });
     }
     for group in &display_groups {
@@ -3438,6 +3440,7 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
                         "".into()
                     },
                     collapsed: false,
+                    builtin: false,
                 });
             }
         }
@@ -4658,6 +4661,7 @@ fn wire_session_callbacks(
                     view_offset: 0,
                     displayed_text: Vec::new(),
                     csi_state: CsiState::Normal,
+                    csi_pending: Vec::new(),
                     raw: std::collections::VecDeque::new(),
                 })),
             );
