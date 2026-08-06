@@ -10,7 +10,14 @@ readme = "README.md"
 rust-version = "1.75"
 
 [dependencies]
-slint = { version = "1.8", features = ["compat-1-2"] }
+slint = { version = "1.8", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+    "raw-window-handle-06",
+    "compat-1-2",
+] }
 # ICU4X (pulled in by Slint's text layout) spams stderr with raw `eprintln!`
 # ("ICU4X data error: No segmentation model for language: ja") because its
 # `log` shim falls back to eprintln when the `logging` feature is off. Turning
