@@ -206,7 +206,7 @@ else {
 Run-Git @('tag', '-a', $Tag, '-m', "Release $Tag")
 
 if ($Push) {
-    Run-Git @('push', 'origin', 'HEAD')
+    Run-Git @('push', 'origin', 'HEAD', '--force')
     Run-Git @('push', 'origin', $Tag)
     Write-Host "Released $Tag and pushed branch + tag."
 }
