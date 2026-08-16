@@ -578,7 +578,9 @@ export component Sidebar inherits Rectangle {
         }
         Rectangle { height: 1px; background: Theme.border-subtle; }
         StatsBlock {
-            resource-title: root.resource-title; proc-available: root.proc-available;
+            resource-title: root.resource-title;
+            system-info-available: root.system-info-available;
+            proc-available: root.proc-available;
             cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
             mem-detail: root.mem-detail; swap-detail: root.swap-detail;
             gpus: root.gpus;
