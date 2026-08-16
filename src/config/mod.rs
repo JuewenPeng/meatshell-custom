@@ -4,4 +4,3 @@ mod structs;
 mod config;
 
 pub(crate) use config::*;
-pub(crate) use structs::*;
