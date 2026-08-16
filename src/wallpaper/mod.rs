@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 #[path = "struct/wallpaper.rs"]
 mod wallpaper_types;
 #[path = "impls/wallpaper.rs"]

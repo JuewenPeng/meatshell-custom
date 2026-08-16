@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 mod config_file;
 mod config_store;
 mod quick_command;
