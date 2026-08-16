@@ -96,7 +96,8 @@ use crate::terminal::{
     CompiledOutputRule, CsiState, HistSpan, Line, OutputHighlightPreset, RenderGates, TabRenderGate,
     TermBuffer, TermBufferHandle, TermBuffers,
 };
-use crate::resource::system::{format_bytes_per_sec, format_mem, SystemSampler, SystemSnapshot};
+use crate::resource::system::{format_bytes_per_sec, format_mem};
+use crate::resource::{SystemSampler, SystemSnapshot};
 use crate::ui::*;
 use crate::webdav::WebDavAcceptAnyCertVerifier;
 
