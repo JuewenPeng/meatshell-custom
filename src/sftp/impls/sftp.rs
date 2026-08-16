@@ -1910,7 +1910,7 @@ async fn run_sftp(
                 tokio::spawn(async move {
                     // Sanitize the remote-controlled name before it becomes a local
                     // file path that we later hand to the OS "open" call.
-                    let filename = sanitize_filename(&base_name(&remote));
+                    let filename = unique_temp_filename(&sanitize_filename(&base_name(&remote)));
                     let tmp_dir = std::env::temp_dir().join("meatshell");
                     let _ = tokio::fs::create_dir_all(&tmp_dir).await;
                     let local = tmp_dir.join(&filename);
@@ -2378,6 +2378,21 @@ fn sanitize_filename(name: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Give externally opened files a unique local name while retaining the
+/// original extension. Different remote directories often contain files with
+/// the same name, and a shared temp directory would otherwise make concurrent
+/// previews/editors overwrite one another.
+fn unique_temp_filename(name: &str) -> String {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let suffix = &suffix[..8];
+    if let Some(dot) = name.rfind('.') {
+        if dot > 0 && dot + 1 < name.len() {
+            return format!("{}-{}.{}", &name[..dot], suffix, &name[dot + 1..]);
+        }
+    }
+    format!("{}-{}", name, suffix)
 }
 
 /// Watch a downloaded temp file and re-upload it to the remote whenever it
