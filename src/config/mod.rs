@@ -6,4 +6,3 @@ mod config;
 mod finalshell;
 
 pub(crate) use config::*;
-pub(crate) use structs::*;

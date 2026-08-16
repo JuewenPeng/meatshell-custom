@@ -3,4 +3,4 @@ mod session;
 #[path = "struct/prompts.rs"]
 mod prompts;
 
-pub(crate) use prompts::{ConnectCtx, PendingCred, PendingHostKey, PendingMfa};
+pub(crate) use prompts::{PendingCred, PendingHostKey, PendingMfa};

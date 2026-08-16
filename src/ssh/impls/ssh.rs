@@ -3407,7 +3407,7 @@ pub(crate) async fn verify_host_key(
     key: &PublicKey,
     events: &UnboundedSender<SessionEvent>,
 ) -> bool {
-    use crate::ssh::known_hosts::HostKeyStatus;
+    use crate::ssh::structs::HostKeyStatus;
     match crate::ssh::known_hosts::verify(host, port, key) {
         HostKeyStatus::Match => true,
         status => {
