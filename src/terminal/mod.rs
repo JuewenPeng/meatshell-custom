@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 #[path = "struct/state.rs"]
 mod state;
 
@@ -53,3 +55,4 @@ pub(crate) use state::{
     BuiltScreen, CompiledOutputRule, CsiState, HistSpan, Line, OutputHighlightPreset, RenderGates,
     TabRenderGate, TermBuffer, TermBufferHandle, TermBuffers,
 };
+ 

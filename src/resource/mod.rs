@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 #[path = "impls/system.rs"]
 pub(crate) mod system;
 #[path = "struct/system.rs"]
