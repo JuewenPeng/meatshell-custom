@@ -2131,22 +2131,6 @@ async fn run_session(
                         });
                         emit_tunnel_update(&runtime_forwards, &events);
                     }
-                    Some(SessionCommand::SetResourceMonitor(enabled)) => {
-                        if !enabled {
-                            if let Some(mon) = mon_channel.take() {
-                                let _ = mon.eof().await;
-                            }
-                            mon_buf.clear();
-                        } else if mon_channel.is_none() && !session.disable_shell_integration {
-                            match handle.channel_open_session().await {
-                                Ok(mon) => match mon.exec(true, MON_CMD).await {
-                                    Ok(()) => mon_channel = Some(mon),
-                                    Err(e) => tracing::warn!("monitor restart exec failed: {e}"),
-                                },
-                                Err(e) => tracing::warn!("monitor restart channel open failed: {e}"),
-                            }
-                        }
-                    }
                     Some(SessionCommand::Close) | None => {
                         let _ = channel.eof().await;
                         break;
