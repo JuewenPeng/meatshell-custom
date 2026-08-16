@@ -2034,7 +2034,7 @@ async fn run_session(
                     Some(SessionCommand::Resize(cols, rows)) => {
                         let _ = channel.window_change(cols, rows, 0, 0).await;
                     }
-                    Some(SessionCommand::SetResourceMonitoring(enabled)) => {
+                    Some(SessionCommand::SetResourceMonitor(enabled)) => {
                         if enabled == resource_monitoring || session.disable_shell_integration {
                             continue;
                         }
