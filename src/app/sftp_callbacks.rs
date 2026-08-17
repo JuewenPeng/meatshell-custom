@@ -141,7 +141,7 @@ pub(super) fn wire_sftp_callbacks(
                         } else if let Some(conflict) =
                             choose_download_conflict(&remote_path, &preset)
                         {
-                            h.download(remote_path, preset, conflict);
+                            h.download_with_conflict(remote_path, preset, conflict);
                         }
                         // Pop the transfers panel so progress is visible (user
                         // request: any download opens the download popup).
@@ -164,7 +164,7 @@ pub(super) fn wire_sftp_callbacks(
                             } else if let Some(conflict) =
                                 choose_download_conflict(&remote_path, &local_dir)
                             {
-                                h.download(remote_path, local_dir, conflict);
+                                h.download_with_conflict(remote_path, local_dir, conflict);
                             }
                         }
                     }
@@ -431,7 +431,7 @@ pub(super) fn wire_sftp_callbacks(
                             if let Some(conflict) =
                                 choose_download_conflict(&paths[0], &preset)
                             {
-                                h.download(paths[0].clone(), preset.clone(), conflict);
+                                h.download_with_conflict(paths[0].clone(), preset.clone(), conflict);
                             }
                         } else {
                             h.download_archive(remote_dir.clone(), names.clone(), preset.clone());
@@ -452,7 +452,7 @@ pub(super) fn wire_sftp_callbacks(
                                     if let Some(conflict) =
                                         choose_download_conflict(&paths[0], &dir)
                                     {
-                                        h.download(paths[0].clone(), dir.clone(), conflict);
+                                        h.download_with_conflict(paths[0].clone(), dir.clone(), conflict);
                                     }
                                 } else {
                                     h.download_archive(

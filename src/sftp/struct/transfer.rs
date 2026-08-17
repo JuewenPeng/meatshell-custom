@@ -14,13 +14,23 @@ use tokio::task::JoinHandle;
 pub enum SftpCommand {
     /// List the contents of a remote directory.
     ListDir(String),
+    OpenPath(String),
     /// Refresh button: re-list the directory *and* re-sync the whole expanded
     /// left tree, so external/own changes (deleted/created dirs) show up without
     /// a reconnect (#189). Plain navigation uses `ListDir` to avoid the extra
     /// per-click tree round-trips.
     RefreshDir(String),
+    LoadMore,
+    LoadAll,
+    LoadMoreTree(String),
+    LoadMoreMoveTree(String),
     /// Toggle a directory node in the tree (expand if collapsed, collapse if expanded).
     ToggleTreeNode(String),
+    ToggleMoveTreeNode(String),
+    ProbeTreeNode(String),
+    RevealTreePath(String),
+    RestoreTreeExpanded(Vec<String>),
+    RevealMoveTreePath(String),
     /// Download a remote file to a local directory.
     Download {
         remote: String,
@@ -42,11 +52,9 @@ pub enum SftpCommand {
         local: PathBuf,
         remote_dir: String,
         cleanup_after: Option<PathBuf>,
+        remote_name: Option<String>,
     },
-    /// Re-upload an externally edited temp file to its exact original path.
-    /// The local name may include a host prefix, so deriving the remote name
-    /// from it would overwrite the wrong file (#318).
-    UploadEdited { local: PathBuf, remote: String },
+    MoveMany { moves: Vec<(String, String)> },
     /// Copy remote entries from this session into another SFTP session.
     CopyTo {
         remotes: Vec<String>,
@@ -84,8 +92,17 @@ pub enum DownloadConflict {
 /// Handle retained by the UI to drive a running SFTP worker.
 pub struct SftpHandle {
     pub commands: UnboundedSender<SftpCommand>,
+    pub(crate) path_history: Mutex<PathHistory>,
     #[allow(dead_code)]
     pub join: JoinHandle<()>,
+}
+
+#[derive(Default)]
+pub(crate) struct PathHistory {
+    pub(crate) current: Option<String>,
+    pub(crate) back: Vec<String>,
+    pub(crate) forward: Vec<String>,
+    pub(crate) pending: Option<(String, String)>,
 }
 
 pub(crate) type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;

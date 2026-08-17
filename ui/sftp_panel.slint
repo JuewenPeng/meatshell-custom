@@ -809,7 +809,9 @@ export component SftpPanel inherits Rectangle {
 
                 // Reserve the absolute collapse control at the right edge.
                 Rectangle {
-                    width: 24px;
+                    // Bottom-docked SFTP uses the command-bar toggle beside
+                    // Send, so its path field can use this space to the edge.
+                    width: root.dock-edge == "bottom" ? 0px : 24px;
                 }
 
             }
@@ -875,6 +877,7 @@ export component SftpPanel inherits Rectangle {
             }
 
             Rectangle {
+                visible: root.dock-edge != "bottom";
                 x: parent.width - 6px - 24px;
                 y: 5px; width: 24px; height: 22px;
                 border-radius: Theme.radius-sm;
