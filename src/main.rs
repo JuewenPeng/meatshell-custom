@@ -7,9 +7,10 @@
 // while the terminal implementation is split into focused submodules.
 #[allow(dead_code)]
 mod app;
+#[allow(dead_code, unused_imports)]
 mod automation;
-mod cli;
 mod config;
+mod cli;
 mod i18n;
 mod layout;
 mod logging;
@@ -26,14 +27,13 @@ mod webdav;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if mcp::is_serve_command(&args) {
-        return mcp::run_stdio();
-    }
     if cli::is_cli_command(&args) {
         return cli::run(&args);
     }
-
-    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+    if mcp::is_serve_command(&args) {
+        return mcp::run_stdio();
+    }
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!("meatshell {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
