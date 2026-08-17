@@ -1631,6 +1631,7 @@ pub async fn test_session_auth(
 }
 
 /// Result of a non-interactive SSH command used by automation frontends.
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CommandExecution {
     pub stdout: String,
@@ -1646,6 +1647,7 @@ pub struct CommandExecution {
 /// The caller must only pass a session after enforcing its own permission
 /// policy. Missing credentials and unknown/changed host keys fail closed because
 /// this headless path has no UI in which to ask the user.
+#[allow(dead_code)]
 pub async fn execute_command(
     session: Session,
     jump: Option<Session>,
@@ -1733,6 +1735,7 @@ pub async fn execute_command(
     Ok(result)
 }
 
+#[allow(dead_code)]
 fn append_bounded(target: &mut Vec<u8>, data: &[u8], limit: usize, truncated: &mut bool) {
     let remaining = limit.saturating_sub(target.len());
     let take = remaining.min(data.len());
@@ -2079,7 +2082,6 @@ async fn run_session(
     } else {
         let proc_flag = mon_flag.clone();
         let sys_flag = mon_flag.clone();
-        let mon_flag = mon_flag.clone();
         let mon_handle = handle.clone();
         let resources_enabled = resource_monitor_enabled;
         tokio::spawn(async move {

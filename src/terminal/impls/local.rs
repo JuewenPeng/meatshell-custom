@@ -62,7 +62,7 @@ async fn run_local(
     initial_cols: u32,
     initial_rows: u32,
 ) -> Result<()> {
-    let (program, args) = local_program(&session.host);
+    let (program, args) = local_program(&session);
     let label = if session.name.trim().is_empty() {
         program.clone()
     } else {
@@ -181,8 +181,8 @@ async fn run_local(
     Ok(())
 }
 
-fn local_program(kind: &str) -> (String, Vec<String>) {
-    match kind {
+fn local_program(session: &Session) -> (String, Vec<String>) {
+    match session.host.as_str() {
         #[cfg(windows)]
         "cmd" => (
             "cmd.exe".to_string(),
@@ -219,11 +219,14 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_shells_start_in_utf8_mode() {
-        let (_, ps_args) = local_program("powershell");
+        let mut session = Session::new_empty();
+        session.host = "powershell".to_string();
+        let (_, ps_args) = local_program(&session);
         assert!(ps_args.iter().any(|arg| arg.contains("OutputEncoding")));
         assert!(ps_args.iter().any(|arg| arg.contains("InputEncoding")));
 
-        let (_, cmd_args) = local_program("cmd");
+        session.host = "cmd".to_string();
+        let (_, cmd_args) = local_program(&session);
         assert!(cmd_args.iter().any(|arg| arg.contains("chcp 65001")));
     }
 }
