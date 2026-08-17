@@ -726,6 +726,9 @@ pub struct ConfigFile {
     /// Stored inverted so existing configurations retain the current default.
     #[serde(default)]
     pub sftp_no_zebra_rows: bool,
+    /// Hide auxiliary panels and edge strips so the terminal fills the window.
+    #[serde(default)]
+    pub zen_mode: bool,
     /// Always prompt for the save location on each download instead of using the
     /// preset download dir. Defaults to false (#87).
     #[serde(default)]
@@ -1642,6 +1645,14 @@ impl ConfigStore {
 
     pub fn set_collapse_sidebar_default(&mut self, v: bool) {
         self.cache.collapse_sidebar_default = v;
+    }
+
+    pub fn zen_mode(&self) -> bool {
+        self.cache.zen_mode
+    }
+
+    pub fn set_zen_mode(&mut self, v: bool) {
+        self.cache.zen_mode = v;
     }
 
     /// Persisted sidebar width in logical px. Falls back to the default when the
