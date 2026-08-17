@@ -846,6 +846,15 @@ pub struct ConfigFile {
     /// it on stops the GitHub releases query and the banner.
     #[serde(default)]
     pub update_check_disabled: bool,
+    /// Enable the local stdio MCP server and its optional capabilities.
+    #[serde(default = "default_true")]
+    pub mcp_enabled: bool,
+    #[serde(default = "default_true")]
+    pub mcp_use_saved_credentials: bool,
+    #[serde(default = "default_true")]
+    pub mcp_allow_commands: bool,
+    #[serde(default = "default_true")]
+    pub mcp_allow_file_transfers: bool,
     /// One-time default-layout migration marker (#new-user-defaults). 0 = config
     /// predates the migration. `migrate_defaults` bumps it to `DEFAULTS_REV` after
     /// pushing the new look (default wallpaper / welcome-as-sidebar / right-docked
@@ -1739,27 +1748,35 @@ impl ConfigStore {
     pub fn set_update_check_enabled(&mut self, enabled: bool) {
         self.cache.update_check_disabled = !enabled;
     }
+    #[allow(dead_code)]
     pub fn mcp_enabled(&self) -> bool {
         self.cache.mcp_enabled
     }
+    #[allow(dead_code)]
     pub fn set_mcp_enabled(&mut self, enabled: bool) {
         self.cache.mcp_enabled = enabled;
     }
+    #[allow(dead_code)]
     pub fn mcp_use_saved_credentials(&self) -> bool {
         self.cache.mcp_use_saved_credentials
     }
+    #[allow(dead_code)]
     pub fn set_mcp_use_saved_credentials(&mut self, enabled: bool) {
         self.cache.mcp_use_saved_credentials = enabled;
     }
+    #[allow(dead_code)]
     pub fn mcp_allow_commands(&self) -> bool {
         self.cache.mcp_allow_commands
     }
+    #[allow(dead_code)]
     pub fn set_mcp_allow_commands(&mut self, enabled: bool) {
         self.cache.mcp_allow_commands = enabled;
     }
+    #[allow(dead_code)]
     pub fn mcp_allow_file_transfers(&self) -> bool {
         self.cache.mcp_allow_file_transfers
     }
+    #[allow(dead_code)]
     pub fn set_mcp_allow_file_transfers(&mut self, enabled: bool) {
         self.cache.mcp_allow_file_transfers = enabled;
     }
