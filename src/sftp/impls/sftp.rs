@@ -28,11 +28,11 @@ use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use ssh_key::{HashAlg, PublicKey};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::task::JoinHandle;
 
 use crate::config::{AuthMethod, Session};
 use crate::i18n::t;
 use crate::ssh::{format_mtime, format_size, RemoteEntry, RemoteTreeNode, SessionEvent};
+use super::transfer::{DownloadConflict, PathHistory, SftpCommand, SftpHandle};
 
 const SFTP_TREE_CHILD_LIMIT: usize = 30;
 const SFTP_TREE_LOAD_MORE_NAME: &str = "加载全部...";
@@ -210,103 +210,6 @@ fn tree_children_from_entries(
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Commands sent to the SFTP worker task from the UI thread.
-#[derive(Debug)]
-pub enum SftpCommand {
-    /// List the contents of a remote directory.
-    ListDir(String),
-    /// Resolve a path submitted in the path bar, entering directories and
-    /// opening regular files with the system default application.
-    OpenPath(String),
-    /// Refresh the right-side directory listing and the current tree node without
-    /// rebuilding unrelated expanded branches.
-    RefreshDir(String),
-    /// Show the next page of the current large directory in the UI.
-    LoadMore,
-    /// Show every cached entry in the current large directory.
-    LoadAll,
-    /// Show more child directories for one left-tree node.
-    LoadMoreTree(String),
-    /// Show all child directories for one move-target tree node.
-    LoadMoreMoveTree(String),
-    /// Toggle a directory node in the tree (expand if collapsed, collapse if expanded).
-    ToggleTreeNode(String),
-    /// Toggle a directory node in the move-target tree only.
-    ToggleMoveTreeNode(String),
-    /// Load a directory node's children into the tree cache without expanding it.
-    ProbeTreeNode(String),
-    /// Expand enough parent directories to make this path visible in the flat tree.
-    RevealTreePath(String),
-    /// Replace the visible directory-tree expansion state after an in-place reconnect.
-    RestoreTreeExpanded(Vec<String>),
-    /// Expand enough parent directories in the move-target tree only.
-    RevealMoveTreePath(String),
-    /// Download a remote file to a local directory.
-    Download { remote: String, local_dir: String },
-    /// Multi-select download (#100): tar the named entries under `remote_dir`
-    /// into one archive on the remote, download it, then delete the temp.
-    DownloadArchive {
-        remote_dir: String,
-        names: Vec<String>,
-        local_dir: String,
-    },
-    /// Cancel an in-progress transfer by its id (#100). The partial local file
-    /// (and any remote temp archive) are cleaned up.
-    CancelTransfer(String),
-    /// Upload a local file into a remote directory.
-    Upload {
-        local: PathBuf,
-        remote_dir: String,
-        cleanup_after: Option<PathBuf>,
-    },
-    /// Copy remote entries from this session into another SFTP session.
-    CopyTo {
-        remotes: Vec<String>,
-        target: UnboundedSender<SftpCommand>,
-        target_dir: String,
-    },
-    /// Delete a remote file (falls back to removing an empty directory).
-    Delete(String),
-    /// Download a file to a temp dir and open it with the OS default app
-    /// ("Open/Edit externally", #81). When `edit` is set, watch the temp copy
-    /// and re-upload on every change.
-    OpenTemp { remote: String, edit: bool },
-    /// Rename / move a remote file or directory (#69).
-    Rename { from: String, to: String },
-    /// Move multiple remote files/directories in one batch.
-    MoveMany { moves: Vec<(String, String)> },
-    /// Change a remote path's permission bits (POSIX mode, e.g. 0o755) (#69).
-    Chmod { path: String, mode: u32 },
-    /// Create an empty remote directory (#69).
-    MkDir(String),
-    /// Create an empty remote file (#69).
-    TouchFile(String),
-    /// Read a remote file's text for the built-in viewer/editor (#70).
-    ReadText { remote: String, edit: bool },
-    /// Overwrite a remote file with text from the built-in editor (#70).
-    WriteText { remote: String, content: String },
-    /// Gracefully shut down the SFTP worker.
-    Close,
-}
-
-/// Handle retained by the UI to drive a running SFTP worker.
-pub struct SftpHandle {
-    pub commands: UnboundedSender<SftpCommand>,
-    path_history: Mutex<PathHistory>,
-    #[allow(dead_code)]
-    pub join: JoinHandle<()>,
-}
-
-#[derive(Default)]
-struct PathHistory {
-    current: Option<String>,
-    back: Vec<String>,
-    forward: Vec<String>,
-    /// A manually entered/tree-selected destination awaiting a successful
-    /// directory listing. Invalid paths must never enter browser history.
-    pending: Option<(String, String)>,
-}
-
 const SFTP_PATH_HISTORY_LIMIT: usize = 50;
 
 impl SftpHandle {
@@ -402,9 +305,22 @@ impl SftpHandle {
         let _ = self.commands.send(SftpCommand::RevealMoveTreePath(path));
     }
     pub fn download(&self, remote: String, local_dir: String) {
+        self.download_with_conflict(remote, local_dir, DownloadConflict::Replace);
+    }
+
+    pub fn download_with_conflict(
+        &self,
+        remote: String,
+        local_dir: String,
+        conflict: DownloadConflict,
+    ) {
         let _ = self
             .commands
-            .send(SftpCommand::Download { remote, local_dir });
+            .send(SftpCommand::Download {
+                remote,
+                local_dir,
+                conflict,
+            });
     }
     pub fn download_archive(&self, remote_dir: String, names: Vec<String>, local_dir: String) {
         let _ = self.commands.send(SftpCommand::DownloadArchive {
@@ -421,6 +337,19 @@ impl SftpHandle {
             local,
             remote_dir,
             cleanup_after: None,
+            remote_name: None,
+        });
+    }
+
+    /// Re-upload an externally edited temporary file to its original path.
+    #[allow(dead_code)]
+    pub fn upload_edited(&self, local: PathBuf, remote: String) {
+        let remote_dir = parent_dir(&remote);
+        let _ = self.commands.send(SftpCommand::Upload {
+            local,
+            remote_dir,
+            cleanup_after: None,
+            remote_name: Some(remote),
         });
     }
     pub fn copy_to(
@@ -1267,7 +1196,11 @@ async fn run_sftp(
                 }
             }
 
-            SftpCommand::Download { remote, local_dir } => {
+            SftpCommand::Download {
+                remote,
+                local_dir,
+                conflict,
+            } => {
                 // Run on its own task so the command loop stays free to list /
                 // switch directories during the transfer (#116-2).
                 let sftp = sftp.clone();
@@ -1350,8 +1283,11 @@ async fn run_sftp(
                         // name with traversal, shell-special chars or a Windows reserved
                         // device name to write outside the chosen dir or hit a device.
                         let filename = sanitize_filename(&base_name(&remote));
-                        let local_path =
-                            format!("{}/{}", local_dir.trim_end_matches('/'), filename);
+                        let base_path = format!("{}/{}", local_dir.trim_end_matches('/'), filename);
+                        let local_path = match conflict {
+                            DownloadConflict::Replace => base_path,
+                            DownloadConflict::KeepBoth => unique_local_path(&base_path),
+                        };
                         let id = file_id.clone();
                         let _ = events.send(SessionEvent::SftpStatus(format!(
                             "{} {}...",
@@ -1437,6 +1373,7 @@ async fn run_sftp(
                 local,
                 remote_dir,
                 cleanup_after,
+                remote_name,
             } => {
                 // Run on its own task so the command loop stays free to list /
                 // switch directories during the transfer (#116-2).
@@ -1514,11 +1451,11 @@ async fn run_sftp(
                             }
                         }
                     } else {
-                        let filename = match local_file_name_utf8(&local) {
-                            Ok(name) => name,
-                            Err(e) => {
+                        let filename = match remote_name.clone().or_else(|| local_file_name_utf8(&local).ok()) {
+                            Some(name) => name,
+                            None => {
                                 let _ = events.send(SessionEvent::SftpStatus(format!(
-                                    "{}: {e}",
+                                    "{}",
                                     t("上传失败", "Upload failed")
                                 )));
                                 if let Some(path) = cleanup_after.as_deref() {
@@ -1625,6 +1562,7 @@ async fn run_sftp(
                                     local,
                                     remote_dir: target_dir.clone(),
                                     cleanup_after: Some(cleanup_root),
+                                    remote_name: None,
                                 });
                             }
                             Err(e) => {
@@ -2380,6 +2318,23 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
+fn unique_local_path(path: &str) -> String {
+    if !std::path::Path::new(path).exists() {
+        return path.to_string();
+    }
+    let p = std::path::Path::new(path);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = p.extension().and_then(|s| s.to_str()).map(|s| format!(".{s}")).unwrap_or_default();
+    let parent = p.parent().and_then(|s| s.to_str()).unwrap_or("");
+    for n in 1..10000 {
+        let candidate = format!("{parent}/{stem} ({n}){ext}");
+        if !std::path::Path::new(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{parent}/{stem}-{}{}", Uuid::new_v4().simple(), ext)
+}
+
 /// Give externally opened files a unique local name while retaining the
 /// original extension. Different remote directories often contain files with
 /// the same name, and a shared temp directory would otherwise make concurrent
@@ -2423,6 +2378,7 @@ fn spawn_edit_watcher(
                     local: PathBuf::from(&local),
                     remote_dir: remote_dir.clone(),
                     cleanup_after: None,
+                    remote_name: Some(remote.clone()),
                 });
                 let _ = events.send(SessionEvent::SftpStatus(format!(
                     "{}: {}",

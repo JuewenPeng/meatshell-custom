@@ -599,68 +599,16 @@ export component Sidebar inherits Rectangle {
     }
 
     // --- Horizontal row (docked top/bottom) --------------------------------
-    if root.lay-horizontal : HorizontalLayout {
-        padding: 10px;
-        padding-top: 12px;
-        spacing: 10px;
-        // Status + server-resources share one container, stacked vertically:
-        // the status sits as a compact two-row header *above* the CPU/Mem/Swap,
-        // both left-aligned. `alignment: start` keeps them at the top instead of
-        // stretching to fill the panel height.
-        VerticalLayout {
-            alignment: start;
-            spacing: 8px;
-            min-width: 200px;
-            StatusBlock {
-                horizontal-stretch: 1;
-                available-width: 200px;
-                conn-state: root.conn-state;
-                connection-state: root.connection-state;
-                collapse-icon: root.collapse-icon;
-                dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
-                dock-drag-end() => { root.dock-drag-end(); }
-                collapse() => { root.toggle-collapse(); }
-            }
-            HorizontalLayout {
-                height: 24px;
-                padding-left: 8px;
-                padding-right: 8px;
-                Text {
-                    text: @tr("Show terminal status bar");
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-xs;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    overflow: elide;
-                }
-                StatusSwitch {
-                    on: root.show-terminal-status-bar;
-                    toggled(v) => { root.set-show-terminal-status-bar(v); }
-                }
-            }
-            StatsBlock {
-                resource-title: root.resource-title;
-                system-info-available: root.system-info-available;
-                proc-available: root.proc-available;
-                cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
-                mem-detail: root.mem-detail; swap-detail: root.swap-detail;
-                gpus: root.gpus;
-                show-system-info() => { root.show-system-info(); }
-                show-processes() => { root.show-processes(); }
-            }
-        }
-    }
-
-    // --- Horizontal row (docked top/bottom) --------------------------------
     if root.lay-horizontal : Rectangle {
-        x: 10px;
-        y: 10px;
-        width: parent.width - 20px;
-        height: parent.height - 20px;
-        background: Theme.bg-panel;
-        border-radius: Theme.radius-md;
-        border-width: 1px;
-        border-color: Theme.border-subtle;
+        // The dock container already supplies the panel background and edge;
+        // this wrapper only lays out the horizontal contents.  Keeping it
+        // transparent avoids a second framed panel inside top/bottom docks.
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        background: transparent;
+        border-width: 0px;
         clip: true;
 
         HorizontalLayout {

@@ -87,7 +87,7 @@ use crate::config::{
 use crate::i18n::t;
 use crate::layout::{LogicalRect, TerminalWheelHit};
 use crate::session::{PendingCred, PendingHostKey, PendingMfa};
-use crate::sftp::{spawn_sftp, SftpHandle};
+use crate::sftp::{spawn_sftp, SftpHandles, SftpLastCwd};
 use crate::ssh::{
     format_mtime, format_size, spawn_session, test_session_auth, ProcInfo, SessionCommand,
     SessionEvent, SessionHandle, SystemDetails,
@@ -125,14 +125,12 @@ struct LocalGpuInfo {
     memory: String,
 }
 
-type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
 /// Per-tab flag: once the user explicitly navigates via the SFTP tree or
 /// toolbar, stop auto-syncing to the terminal's `cd` path.
 /// Per-tab last cwd the SFTP panel followed (from OSC 7). Used to ignore the
 /// OSC 7 every prompt re-emits at an unchanged directory; manual SFTP
 /// navigation REMOVES the entry so the very next OSC 7 — same directory or
 /// not — snaps the panel back to the shell's cwd (cd-follow never goes stale).
-type SftpLastCwd = Arc<Mutex<HashMap<String, String>>>;
 /// Per-session, per-directory file-list scroll offsets. A single saved offset
 /// is insufficient when navigating through several nested directories.
 type SftpViewportPositions = Arc<Mutex<HashMap<String, HashMap<String, f32>>>>;
@@ -1067,6 +1065,7 @@ pub fn run() -> Result<()> {
         let collapse_sidebar = s.collapse_sidebar_default();
         let collapse_sftp = s.collapse_sftp_default();
         let sidebar_dock = s.sidebar_dock();
+        let zen_mode = s.zen_mode();
         let welcome_as_sidebar = s.welcome_as_sidebar();
         let welcome_sidebar_dock = s.welcome_sidebar_dock();
         let quick_shared = s.quick_commands_as_sidebar()
@@ -1083,6 +1082,7 @@ pub fn run() -> Result<()> {
             sidebar_collapsed = true;
         }
         window.set_collapse_sidebar_default(collapse_sidebar);
+        window.set_zen_mode(zen_mode);
         window.set_collapse_sftp_default(collapse_sftp);
         // Restore the persisted panel docking layout (#dock).
         window.set_sidebar_width(s.sidebar_width());
@@ -1101,7 +1101,7 @@ pub fn run() -> Result<()> {
             // as the initial panel and expose the other panels through the strip.
             window.set_quick_panel_collapsed(true);
         }
-        resource_monitor_enabled.store(!sidebar_collapsed, Ordering::Relaxed);
+        resource_monitor_enabled.store(!sidebar_collapsed && !zen_mode, Ordering::Relaxed);
         window.set_wallpaper_overlay(s.wallpaper_overlay());
         window.set_update_check_enabled(s.update_check_enabled()); // #184
         if collapse_sftp {
@@ -1121,6 +1121,27 @@ pub fn run() -> Result<()> {
             let mut s = store.borrow_mut();
             s.set_collapse_sidebar_default(v);
             let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        let handles = handles.clone();
+        let weak = window.as_weak();
+        let resource_monitor_enabled = resource_monitor_enabled.clone();
+        window.on_set_zen_mode(move |v| {
+            {
+                let mut s = store.borrow_mut();
+                s.set_zen_mode(v);
+                let _ = s.save();
+            }
+            let monitor = weak
+                .upgrade()
+                .map(|w| !v && !w.get_sidebar_collapsed())
+                .unwrap_or(!v);
+            resource_monitor_enabled.store(monitor, Ordering::Relaxed);
+            for handle in handles.borrow().values() {
+                handle.set_resource_monitor(monitor);
+            }
         });
     }
     {
