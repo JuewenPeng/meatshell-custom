@@ -542,6 +542,14 @@ export component AppWindow inherits Window {
     callback set-welcome-as-sidebar(bool);         // apply + persist
     in-out property <bool> update-check-enabled: true;   // startup new-version check (#184)
     callback set-update-check-enabled(bool);       // apply + persist
+    in-out property <bool> mcp-enabled: true;
+    in-out property <bool> mcp-use-saved-credentials: true;
+    in-out property <bool> mcp-allow-commands: true;
+    in-out property <bool> mcp-allow-file-transfers: true;
+    callback set-mcp-permissions(bool, bool, bool, bool);
+    callback add-wsl-profile(string, string, string);
+    callback remove-wsl-profile(string);
+    callback pick-wsl-directory();
     // Drag-resizable width of that welcome sidebar (logical px), persisted.
     in-out property <length> welcome-sidebar-width: 240px;
     callback persist-welcome-sidebar-width(float);

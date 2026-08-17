@@ -249,8 +249,23 @@ export component TerminalView inherits Rectangle {
     property <bool> sftp-move-open: false;
     property <bool> sftp-move-focus-pending: false;
     property <bool> sftp-move-scroll-pending: false;
-    changed sftp-move-open => { root.sftp-move-focus-pending = root.sftp-move-open; }
-    changed sftp-move-tree-nodes => { root.sftp-move-scroll-pending = root.sftp-move-open; }
+    // Only the first tree update after opening the dialog should reveal the
+    // current target. Subsequent updates (for example, clicking "Load all")
+    // must preserve the user's scroll position instead of jumping to a parent.
+    property <bool> sftp-move-initial-scroll-pending: false;
+    changed sftp-move-open => {
+        root.sftp-move-focus-pending = root.sftp-move-open;
+        if (root.sftp-move-open) {
+            root.sftp-move-initial-scroll-pending = true;
+        } else {
+            root.sftp-move-initial-scroll-pending = false;
+        }
+    }
+    changed sftp-move-tree-nodes => {
+        if (root.sftp-move-open && root.sftp-move-initial-scroll-pending) {
+            root.sftp-move-scroll-pending = true;
+        }
+    }
     property <string> sftp-move-source;
     property <string> sftp-move-name;
     property <string> sftp-move-target;
@@ -1798,7 +1813,6 @@ export component TerminalView inherits Rectangle {
                 root.sftp-move-name = name;
                 root.sftp-move-batch = false;
                 root.sftp-move-target = root.sftp-path;
-                root.sftp-move-scroll-pending = true;
                 root.sftp-move-tree-reveal(root.sftp-move-target);
                 root.sftp-move-open = true;
             }
@@ -1809,7 +1823,6 @@ export component TerminalView inherits Rectangle {
                     : "已选择 " + root.sftp-selected-count + " 个项目";
                 root.sftp-move-batch = true;
                 root.sftp-move-target = root.sftp-path;
-                root.sftp-move-scroll-pending = true;
                 root.sftp-move-tree-reveal(root.sftp-move-target);
                 root.sftp-move-open = true;
             }
@@ -1848,6 +1861,7 @@ export component TerminalView inherits Rectangle {
                             file-move-list.height / 2 - root.sftp-move-tree-focus-index * 28px - 14px);
                     }
                     root.sftp-move-scroll-pending = false;
+                    root.sftp-move-initial-scroll-pending = false;
                 }
             }
 
