@@ -40,6 +40,10 @@ const SFTP_TREE_LOAD_MORE_MARKER: &str = "__MEATSHELL_TREE_LOAD_MORE__";
 const SFTP_TREE_COLLAPSE_NAME: &str = "⏫收起";
 const SFTP_TREE_COLLAPSE_MARKER: &str = "__MEATSHELL_TREE_COLLAPSE__";
 const SFTP_DIR_LIST_CACHE_CAP: usize = 64;
+// Limit file-level uploads per SFTP connection. The picker can return hundreds
+// of files, but opening one channel per file at once exceeds common server
+// MaxSessions/MaxOpenChannels limits and causes most uploads to fail.
+const MAX_CONCURRENT_UPLOADS: usize = 4;
 
 #[derive(Default)]
 struct DirListCache {
@@ -838,6 +842,9 @@ async fn run_sftp(
     // exit (#100 cancel download).
     let cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    // Upload commands are queued behind this semaphore. Each task still uses
+    // the pipelined transfer implementation once it acquires a slot.
+    let upload_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS));
 
     let mut current_list_path = String::new();
     let mut current_list_entries: Vec<RemoteEntry> = Vec::new();
@@ -1381,6 +1388,7 @@ async fn run_sftp(
                 let handle = handle.clone();
                 let events = events.clone();
                 let list_cache = list_cache.clone();
+                let upload_slots = upload_slots.clone();
                 // Register a cancel flag up-front under the file id so a
                 // CancelTransfer arriving mid-upload can flip it (#100).
                 let up_id = Uuid::new_v4().to_string();
@@ -1391,6 +1399,25 @@ async fn run_sftp(
                     .insert(up_id.clone(), cancel.clone());
                 let cancels_done = cancels.clone();
                 tokio::spawn(async move {
+                    let Ok(_upload_slot) = upload_slots.acquire_owned().await else {
+                        cancels_done.lock().unwrap().remove(&up_id);
+                        return;
+                    };
+                    // A queued transfer can be cancelled before it gets a
+                    // channel; avoid opening a remote file in that case.
+                    if cancel.load(Ordering::Relaxed) {
+                        let _ = events.send(SessionEvent::SftpTransfer {
+                            id: up_id.clone(),
+                            name: local_file_name_utf8(&local).unwrap_or_default(),
+                            is_upload: true,
+                            transferred: 0,
+                            total: 0,
+                            state: 4,
+                            msg: t("已取消", "Cancelled").to_string(),
+                        });
+                        cancels_done.lock().unwrap().remove(&up_id);
+                        return;
+                    }
                     // A directory source → recursively upload the whole tree (#50).
                     let is_dir = tokio::fs::metadata(&local)
                         .await
