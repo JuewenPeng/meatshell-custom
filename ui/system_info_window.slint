@@ -41,26 +41,9 @@ component CellText inherits Text {
     color: root.muted ? Theme.text-muted : Theme.text-primary;
     font-size: Theme.fs-xs;
     font-family: Theme.font-mono;
-    // Long values (mount paths, CPU breakdown lines, wide headers) wrap into a
-    // second line instead of being elided; rows grow to fit via preferred-height.
     wrap: char-wrap;
     horizontal-alignment: center;
     vertical-alignment: center;
-}
-
-component CellBox inherits Rectangle {
-    in property <string> text;
-    in property <bool> muted: false;
-    in property <float> weight: 1.0;
-    horizontal-stretch: root.weight;
-    clip: true;
-
-    CellText {
-        text: root.text;
-        muted: root.muted;
-        width: parent.width;
-        height: parent.height;
-    }
 }
 
 // Explicit column geometry keeps headers and data aligned regardless of each
@@ -79,11 +62,12 @@ component TableCells inherits Rectangle {
     in property <float> c4w: 0.2;
     in property <float> c5w: 0.2;
 
-    CellBox { x: 0px; width: parent.width * root.c1w; height: parent.height; text: root.c1; muted: root.muted; }
-    CellBox { x: parent.width * root.c1w; width: parent.width * root.c2w; height: parent.height; text: root.c2; muted: root.muted; }
-    CellBox { x: parent.width * (root.c1w + root.c2w); width: parent.width * root.c3w; height: parent.height; text: root.c3; muted: root.muted; }
-    CellBox { x: parent.width * (root.c1w + root.c2w + root.c3w); width: parent.width * root.c4w; height: parent.height; text: root.c4; muted: root.muted; }
-    CellBox { x: parent.width * (root.c1w + root.c2w + root.c3w + root.c4w); width: parent.width * root.c5w; height: parent.height; text: root.c5; muted: root.muted; }
+    c1-cell := CellText { x: 0px; width: parent.width * root.c1w; height: parent.height; text: root.c1; muted: root.muted; }
+    c2-cell := CellText { x: parent.width * root.c1w; width: parent.width * root.c2w; height: parent.height; text: root.c2; muted: root.muted; }
+    c3-cell := CellText { x: parent.width * (root.c1w + root.c2w); width: parent.width * root.c3w; height: parent.height; text: root.c3; muted: root.muted; }
+    c4-cell := CellText { x: parent.width * (root.c1w + root.c2w + root.c3w); width: parent.width * root.c4w; height: parent.height; text: root.c4; muted: root.muted; }
+    c5-cell := CellText { x: parent.width * (root.c1w + root.c2w + root.c3w + root.c4w); width: parent.width * root.c5w; height: parent.height; text: root.c5; muted: root.muted; }
+    preferred-height: max(c1-cell.preferred-height, c2-cell.preferred-height, c3-cell.preferred-height, c4-cell.preferred-height, c5-cell.preferred-height);
 }
 
 component PairCells inherits Rectangle {
@@ -92,10 +76,11 @@ component PairCells inherits Rectangle {
     in property <string> c3;
     in property <string> c4;
 
-    CellBox { x: 0px; width: parent.width * 0.16; height: parent.height; text: root.c1; muted: true; }
-    CellBox { x: parent.width * 0.16; width: parent.width * 0.34; height: parent.height; text: root.c2; }
-    CellBox { x: parent.width * 0.50; width: parent.width * 0.16; height: parent.height; text: root.c3; muted: true; }
-    CellBox { x: parent.width * 0.66; width: parent.width * 0.34; height: parent.height; text: root.c4; }
+    c1-cell := CellText { x: 0px; width: parent.width * 0.16; height: parent.height; text: root.c1; muted: true; }
+    c2-cell := CellText { x: parent.width * 0.16; width: parent.width * 0.34; height: parent.height; text: root.c2; }
+    c3-cell := CellText { x: parent.width * 0.50; width: parent.width * 0.16; height: parent.height; text: root.c3; muted: true; }
+    c4-cell := CellText { x: parent.width * 0.66; width: parent.width * 0.34; height: parent.height; text: root.c4; }
+    preferred-height: max(c1-cell.preferred-height, c2-cell.preferred-height, c3-cell.preferred-height, c4-cell.preferred-height);
 }
 
 component PairGrid inherits InfoCard {
@@ -130,18 +115,18 @@ component PairGrid inherits InfoCard {
                 }
             }
             for r in root.rows : Rectangle {
-                height: max(34px, c1.preferred-height, c2.preferred-height, c3.preferred-height, c4.preferred-height);
+                pair-cells := PairCells {
+                    width: parent.width;
+                    height: parent.height;
+                    c1: r.c1; c2: r.c2; c3: r.c3; c4: r.c4;
+                }
+                height: max(34px, pair-cells.preferred-height);
                 Rectangle {
                     x: 0;
                     y: parent.height - 1px;
                     width: parent.width;
                     height: 1px;
                     background: Theme.border-subtle.with-alpha(0.65);
-                }
-                PairCells {
-                    width: parent.width;
-                    height: parent.height;
-                    c1: r.c1; c2: r.c2; c3: r.c3; c4: r.c4;
                 }
             }
         }
@@ -178,19 +163,19 @@ component TableCard inherits InfoCard {
             }
         }
         Rectangle {
-            height: max(30px, h1.preferred-height, h2.preferred-height, h3.preferred-height, h4.preferred-height, h5.preferred-height);
+            header-cells := TableCells {
+                x: 14px; width: parent.width - 28px; height: parent.height;
+                c1: root.h1; c2: root.h2; c3: root.h3; c4: root.h4; c5: root.h5;
+                muted: true;
+                c1w: root.c1w; c2w: root.c2w; c3w: root.c3w; c4w: root.c4w; c5w: root.c5w;
+            }
+            height: max(30px, header-cells.preferred-height);
             background: Theme.bg-root.with-alpha(0.28);
             Rectangle {
                 y: parent.height - 1px;
                 width: parent.width;
                 height: 1px;
                 background: Theme.border-subtle;
-            }
-            TableCells {
-                x: 14px; width: parent.width - 28px; height: parent.height;
-                c1: root.h1; c2: root.h2; c3: root.h3; c4: root.h4; c5: root.h5;
-                muted: true;
-                c1w: root.c1w; c2w: root.c2w; c3w: root.c3w; c4w: root.c4w; c5w: root.c5w;
             }
         }
         if root.rows.length == 0 : Rectangle {
@@ -204,7 +189,12 @@ component TableCard inherits InfoCard {
             }
         }
         for r in root.rows : Rectangle {
-            height: max(34px, c1.preferred-height, c2.preferred-height, c3.preferred-height, c4.preferred-height, c5.preferred-height);
+            row-cells := TableCells {
+                x: 14px; width: parent.width - 28px; height: parent.height;
+                c1: r.c1; c2: r.c2; c3: r.c3; c4: r.c4; c5: r.c5;
+                c1w: root.c1w; c2w: root.c2w; c3w: root.c3w; c4w: root.c4w; c5w: root.c5w;
+            }
+            height: max(34px, row-cells.preferred-height);
             background: row-ta.has-hover ? Theme.bg-hover : transparent;
             Rectangle {
                 width: parent.width;
@@ -213,11 +203,6 @@ component TableCard inherits InfoCard {
                 background: Theme.border-subtle.with-alpha(0.48);
             }
             row-ta := TouchArea {}
-            TableCells {
-                x: 14px; width: parent.width - 28px; height: parent.height;
-                c1: r.c1; c2: r.c2; c3: r.c3; c4: r.c4; c5: r.c5;
-                c1w: root.c1w; c2w: root.c2w; c3w: root.c3w; c4w: root.c4w; c5w: root.c5w;
-            }
         }
     }
 }

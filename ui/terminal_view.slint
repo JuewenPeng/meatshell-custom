@@ -169,29 +169,30 @@ export component TerminalView inherits Rectangle {
     // fed from Rust); send-to-all is a per-tab toggle.
     in property <[QuickCmd]> quick-commands;
     in property <bool> quick-commands-sidebar: false;
+    in property <bool> cmd-bar-hidden: false;
     in property <[string]> command-history;   // oldest first (newest last, #113)
     in property <[string]> history-view;       // filtered dropdown, newest first (#101, #331)
     property <bool> send-to-all: false;
-    in property <bool> cmd-bar-hidden: false;  // toolbar toggle hides the whole bar
-    // Effective terminal font size in px: per-session zoom override when > 0,
-    // else the window/global size (Theme.term-font-size).
-    in property <float> term-font-size-px: Theme.term-font-size / 1px;
     property <bool> quick-open: false;         // quick-command popup visibility
     property <int> pending-qcmd-edit-index: -1; // defer quick-command edit outside PopupWindow click event
     property <bool> pending-qcmd-manage: false; // defer manage dialog outside quick panel click event
+    // Request channel used by a docked quick-command panel to fill the active
+    // terminal input without sending a command. The token is monotonic; the
+    // target id prevents another terminal from replaying an old request.
+    in property <string> quick-command-fill-target: "";
+    in property <string> quick-command-fill-text: "";
+    in property <bool> quick-command-fill-send-enter: false;
+    in property <int> quick-command-fill-token: 0;
+    property <int> handled-quick-command-fill-token: 0;
     property <bool> history-open: false;       // history dropdown visibility
     property <bool> history-scroll-pending: false;
-    property <int> history-cursor: -1;         // ↑/↓ recall index (-1 = live input)
-    // The history dropdown is created by the key-press / click handlers while
-    // Slint is still dispatching the event. Focusing its search TextInput
-    // synchronously in `init` can re-enter the Windows IME/accessibility
-    // plumbing and read the popup's half-built layout, panicking with
-    // "Recursion detected" (#349 / #343-style). Defer focus to next tick.
     property <bool> history-search-focus-pending: false;
+    property <int> history-cursor: -1;         // ↑/↓ recall index (-1 = live input)
     // Keyboard-driven selection in the open history dropdown (#140): ↑/↓ move it,
     // Enter runs history-view[history-selected].
     property <int> history-selected: 0;
     callback run-command(string /* cmd */, bool /* to-all */);
+    callback quick-command-fill-consumed();
     callback manage-quick-commands();          // open the add/edit/delete dialog
     callback toggle-quick-group(string /* group */);  // collapse/expand a group (#55)
     // Right-click management on the popup, mirroring the welcome session list (#55).
@@ -209,13 +210,6 @@ export component TerminalView inherits Rectangle {
 
     callback send-key(string, bool, bool, bool);
     callback cycle-tab(bool /* reverse */);
-    // Ctrl+Shift+N (⌘⇧N on macOS) — open a new application window (#multi-window).
-    callback new-window-key();
-    // Font zoom: Ctrl+= / Ctrl+- / Ctrl+0 (⌘ on macOS). Direction:
-    // 1 = larger, -1 = smaller, 0 = reset to default.
-    callback zoom-key(int /* direction */, bool /* window-wide */);
-    // Ctrl+Alt+Z (⌘⌥Z on macOS) — toggle zen (focus) mode.
-    callback zen-key();
     callback terminal-resize(float, float);
     callback sftp-navigate(string);
     callback sftp-open-path(string);
@@ -300,7 +294,7 @@ export component TerminalView inherits Rectangle {
     callback copy-terminal-text();
     callback clear-terminal();              // wipe this session's screen buffer
     callback find-query-changed(string);    // recompute search highlights
-    callback terminal-scroll(float);         // scroll history by fractional lines (+ = up); Rust keeps the sub-line remainder so momentum decays smoothly
+    callback terminal-scroll(int);          // scroll history by N lines (+ = up)
     // Wheel inside an alt-screen app (tmux/less/vim): forward to the program so it
     // scrolls, instead of doing nothing (#170). dir = +1 up / -1 down; col/row =
     // mouse cell. Rust sends a mouse-wheel event if the app tracks the mouse, else
@@ -325,6 +319,28 @@ export component TerminalView inherits Rectangle {
     // construction (on new TerminalView instantiation) finishes before focus
     // changes — avoids RefCell re-entry panic in WinitWindowAdapter (#AccessKit).
     property <bool> focus-pending: false;
+
+    // A docked quick-command panel can populate this terminal's command box
+    // without sending anything. Only the targeted tab consumes the request;
+    // clearing the target prevents replay when the active tab changes later.
+    changed quick-command-fill-token => {
+        if (root.quick-command-fill-token != root.handled-quick-command-fill-token) {
+            root.handled-quick-command-fill-token = root.quick-command-fill-token;
+            if (root.quick-command-fill-target == root.tab-id) {
+                if (root.quick-command-fill-send-enter) {
+                    // Match the author's QuickDockPanel path: execution is
+                    // handled by the active terminal, preserving its
+                    // send-to-all setting.
+                    root.run-command(root.quick-command-fill-text, root.send-to-all);
+                    root.focus-pending = true;
+                } else {
+                    cmd-input.text = root.quick-command-fill-text;
+                    cmd-input.focus-input();
+                }
+                root.quick-command-fill-consumed();
+            }
+        }
+    }
 
     background: Theme.term-bg;
     forward-focus: ime-input;
@@ -351,7 +367,7 @@ export component TerminalView inherits Rectangle {
     cell-probe := Text {
         text: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM"; // exactly 50×M
         font-family: Theme.term-font-family;
-        font-size: root.term-font-size-px * 1px;
+        font-size: Theme.term-font-size;
         font-weight: Theme.term-font-bold ? 700 : 400;
         // Keep it in layout but invisible: opacity:0 forces full font loading.
         opacity: 0;
@@ -384,8 +400,29 @@ export component TerminalView inherits Rectangle {
 
     init => { if (root.has-real-size) { root.terminal-resize(root.term-cols, root.term-rows); } }
 
-    // Bottom-pinning / alt-screen alignment is handled declaratively by
-    // scroll-clip.view-y; nothing to sync imperatively here anymore.
+    changed spans => {
+        // Bash: keep the latest output pinned to the bottom.
+        // Alt-screen (nano/vim/htop/btop): the program owns a fixed full screen,
+        // so the viewport must stay top-aligned (viewport-y = 0).  Scrolling to
+        // the bottom would push the title bar + content off the top, leaving only
+        // the program's status bar — exactly the "nano shows nothing" symptom.
+        if (!root.is-alt-screen) {
+            flickable.viewport-y = flickable.height - flickable.viewport-height;
+        } else {
+            flickable.viewport-y = 0;
+        }
+    }
+    changed is-alt-screen => {
+        // Reset scroll on every mode switch (entering/leaving nano, vim, btop…).
+        // Snapping to top on alt-screen entry ensures the full-screen program's
+        // frame is shown from row 0, not from wherever history left off.
+        if (root.is-alt-screen) {
+            flickable.viewport-y = 0;
+        } else {
+            // Return to normal mode: pin to the most recent output.
+            flickable.viewport-y = flickable.height - flickable.viewport-height;
+        }
+    }
     // Reset the history filter whenever the dropdown opens; the search box itself
     // is recreated empty because the `if` subtree is destroyed on close (#101).
     changed history-open => {
@@ -457,15 +494,18 @@ export component TerminalView inherits Rectangle {
         // the resource-panel dock area in app.slint (#dock).
         dock-region := Rectangle {
         vertical-stretch: 1;
-        // Collapsed → shrink to the 36px ToolStrip icon bar at the docked edge
-        // (M5), click its icon to re-expand. The 4px splitter is gone collapsed.
+        // Collapsed side docks shrink to the 36/40px icon strip. A bottom dock
+        // keeps its 34px SFTP toolbar visible so the path bar and expand control
+        // remain available in the same row.
         property <length> sf-w: root.zen-mode ? 0px
-            : root.sftp-collapsed ? (root.sftp-horizontal ? 40px : 36px) : root.sftp-panel-width;
+            : root.sftp-collapsed ? 34px : root.sftp-panel-width;
         property <length> sf-h: root.zen-mode ? 0px
             : root.sftp-collapsed
-            ? (root.sftp-dock == "bottom" ? 0px : (root.sftp-horizontal ? 40px : 36px))
+            ? 34px
             : root.sftp-panel-height;
-        property <length> sp:   root.zen-mode ? 0px : (root.sftp-collapsed ? 0px : 4px);
+        // The splitter is centered on the panel boundary, like the detachable
+        // control-panel splitters; no additional layout gap is needed.
+        property <length> sp: 0px;
         // The collapsed bar (sf-h) already reserves the bottom strip now.
         property <length> bottom-strip-h: 0px;
 
@@ -523,41 +563,23 @@ export component TerminalView inherits Rectangle {
             VerticalLayout {
                 spacing: 0;
 
-                // Plain clipped container instead of a Flickable.  Two reasons:
-                //
-                // 1. Cursor flicker: Slint resets the mouse-cursor to default at
-                //    the start of *every* mouse event and re-derives it from the
-                //    items actually visited.  A Flickable intercepts wheel
-                //    events in bursts (gesture start + an 800ms capture window,
-                //    items/flickable.rs handle_mouse_filter) without visiting
-                //    children, so nobody claimed the cursor and the pointer
-                //    flipped arrow↔I-beam while the capture window opened and
-                //    lapsed.  Without the Flickable, every wheel lands on
-                //    body-touch-overlay below, which always claims I-beam.
-                // 2. Scroll ownership: the captured wheel also scrolled
-                //    viewport-y natively (flick physics included), fighting the
-                //    Rust-managed view_offset and the `changed spans` snap-back.
-                //    All scrolling already flows through terminal-scroll /
-                //    terminal-scroll-to, so the Flickable only ever added drift.
-                scroll-clip := Rectangle {
+                flickable := Flickable {
                     vertical-stretch: 1;
-                    clip: true;
-
-                    // Content height of the grid viewport.  Alt-screen: lock to
-                    // exactly the visible height so full-screen programs (nano/
-                    // vim) render top-aligned with no internal scroll.  Bash:
-                    // grow with the content so we can scroll back through history.
-                    property <length> content-h: root.is-alt-screen
+                    // Non-interactive: a Flickable steals fast drags from child
+                    // TouchAreas for its own flick gesture, which broke quick
+                    // drag-selection (slow drags worked, fast ones selected
+                    // nothing). We scroll via the wheel (scroll-event below →
+                    // terminal-scroll) and pin programmatically, so we don't need
+                    // the Flickable's own drag-scrolling (#119-followup).
+                    interactive: false;
+                    viewport-width: self.width;
+                    // Alt-screen: lock the viewport to exactly the visible height
+                    // so the full-screen program (nano/vim) renders top-aligned
+                    // with no internal scroll.  Bash: let the viewport grow with
+                    // the content so we can scroll back through history.
+                    viewport-height: root.is-alt-screen
                         ? self.height
                         : max(self.height, 8px + root.rows-used * root.cell-h + 8px);
-                    // Vertical placement of the content inside the clip: newest
-                    // output pinned to the bottom edge (negative), alt-screen
-                    // top-aligned (0).  Replaces the old imperative
-                    // `flickable.viewport-y = height - viewport-height` sync —
-                    // as a binding it can no longer drift between rebuilds.
-                    property <length> view-y: root.is-alt-screen
-                        ? 0px
-                        : self.height - self.content-h;
 
                     // The terminal grid.  Each coloured run is placed with
                     // absolute coordinates derived from its (row, col) and the
@@ -565,9 +587,9 @@ export component TerminalView inherits Rectangle {
                     // which keeps the model flat (a single `for`).
                     Rectangle {
                         x: 10px;
-                        y: 8px + parent.view-y;
+                        y: 8px;
                         width: parent.width - 20px;
-                        height: parent.content-h - 8px;
+                        height: flickable.viewport-height - 8px;
 
                         // Click-to-focus over the whole terminal body.  Without
                         // this, clicking anywhere in the output area blurs the
@@ -629,10 +651,10 @@ export component TerminalView inherits Rectangle {
                                         // captures the pointer while pressed, so dragging
                                         // past the edge still scrolls to extend across
                                         // more than one screen.
-                                        root.vis-y = self.mouse-y + 8px + scroll-clip.view-y;
+                                        root.vis-y = self.mouse-y + 8px + flickable.viewport-y;
                                         if (root.vis-y < 0) {
                                             root.autoscroll-dir = -1;       // past top → older
-                                        } else if (root.vis-y > scroll-clip.height) {
+                                        } else if (root.vis-y > flickable.height) {
                                             root.autoscroll-dir = 1;        // past bottom → newer
                                         } else {
                                             root.autoscroll-dir = 0;
@@ -652,13 +674,7 @@ export component TerminalView inherits Rectangle {
                                 } else {
                                     // Normal screen: scroll our own scrollback history
                                     // (~3 lines per notch).
-                                    // Raw pixel delta → fractional lines. The
-                                    // magnitude matters: macOS momentum events
-                                    // decay to sub-pixel steps, and quantizing
-                                    // each to a fixed ±3 lines turned the tail
-                                    // into an exaggerated staircase with a hard
-                                    // stop. Rust accumulates the fractions.
-                                    root.terminal-scroll(ev.delta-y / root.cell-h);
+                                    root.terminal-scroll(ev.delta-y > 0 ? 3 : -3);
                                 }
                                 accept
                             }
@@ -693,7 +709,8 @@ export component TerminalView inherits Rectangle {
                             width: root.cursor-style == "bar" ? max(2px, root.cell-w / 8) : root.cell-w;
                             height: root.cursor-style == "underline" ? max(2px, root.cell-h / 8) : root.cell-h;
                             background: root.cursor-color.with-alpha(root.cursor-opacity);
-                            visible: ime-input.has-focus
+                            visible: root.cursor-row >= 0
+                                && ime-input.has-focus
                                 && (key-capture.cursor-blink || key-capture.cursor-input-hold
                                     || !Theme.window-focused);
                         }
@@ -707,7 +724,7 @@ export component TerminalView inherits Rectangle {
                             border-width: 1px;
                             border-color: root.cursor-color.with-alpha(root.cursor-opacity);
                             background: transparent;
-                            visible: !ime-input.has-focus;
+                            visible: root.cursor-row >= 0 && !ime-input.has-focus;
                         }
 
                         // Each span = a background fill (transparent for the
@@ -735,7 +752,7 @@ export component TerminalView inherits Rectangle {
                                 // terminal font lacks CJK glyphs and Slint tofu's
                                 // *isolated* CJK punctuation (、。,) on fallback (#54).
                                 font-family: span.cjk ? Theme.ui-font-family : Theme.term-font-family;
-                                font-size: root.term-font-size-px * 1px;
+                                font-size: Theme.term-font-size;
                                 font-weight: (Theme.term-font-bold || span.bold) ? 700 : 400;
                             }
                             if span.emoji : Image {
@@ -792,10 +809,10 @@ export component TerminalView inherits Rectangle {
                                         floor(self.mouse-y / root.cell-h),
                                         floor(self.mouse-x / root.cell-w));
                                     if (!root.is-alt-screen) {
-                                        root.vis-y = self.mouse-y + 8px + scroll-clip.view-y;
+                                        root.vis-y = self.mouse-y + 8px + flickable.viewport-y;
                                         if (root.vis-y < 0) {
                                             root.autoscroll-dir = -1;
-                                        } else if (root.vis-y > scroll-clip.height) {
+                                        } else if (root.vis-y > flickable.height) {
                                             root.autoscroll-dir = 1;
                                         } else {
                                             root.autoscroll-dir = 0;
@@ -810,13 +827,7 @@ export component TerminalView inherits Rectangle {
                                         floor(self.mouse-x / root.cell-w),
                                         floor(self.mouse-y / root.cell-h));
                                 } else {
-                                    // Raw pixel delta → fractional lines. The
-                                    // magnitude matters: macOS momentum events
-                                    // decay to sub-pixel steps, and quantizing
-                                    // each to a fixed ±3 lines turned the tail
-                                    // into an exaggerated staircase with a hard
-                                    // stop. Rust accumulates the fractions.
-                                    root.terminal-scroll(ev.delta-y / root.cell-h);
+                                    root.terminal-scroll(ev.delta-y > 0 ? 3 : -3);
                                 }
                                 accept
                             }
@@ -879,16 +890,6 @@ export component TerminalView inherits Rectangle {
                 // participating in layout or exposing a second I-beam hit area.
                 // Following the VT cursor also places native IME candidate UI near
                 // the actual insertion point.
-                // While scrolled back through history the live cursor is hidden
-                // (cursor-row < 0): park the anchor far off-window then, never
-                // clamp it with max(0, …). Clamping pinned this focused TextInput
-                // onto the terminal's top-left cell, and since a hovered TextInput
-                // forces the I-beam pointer (i-slint-core items/text.rs), wheel-
-                // scrolling flickered the mouse cursor between arrow and text as
-                // frames re-hit-tested under it. The park offset must dwarf any
-                // parent origin: key-capture sits ~24-48px from the window top, so
-                // a small offset like -32px still landed on the visible terminal's
-                // top-left corner.
                 x: root.cursor-row >= 0
                     ? 10px + max(0, root.cursor-col) * root.cell-w
                     : -1000px;
@@ -1000,10 +1001,10 @@ export component TerminalView inherits Rectangle {
             // alternate screen). Driven by scroll-max/scroll-offset; click or drag
             // the track to jump to an absolute position.
             if root.scroll-max > 0 && !root.is-alt-screen : Rectangle {
-                x: scroll-clip.x + scroll-clip.width - 10px;
-                y: scroll-clip.y + 4px;
+                x: flickable.x + flickable.width - 10px;
+                y: flickable.y + 4px;
                 width: 8px;
-                height: scroll-clip.height - 8px;
+                height: flickable.height - 8px;
                 track-ta := TouchArea {
                     moved => {
                         if (self.pressed) {
@@ -1102,7 +1103,8 @@ export component TerminalView inherits Rectangle {
 
         // --- Command bar (#55): quick commands + input box + history ---------
         cmd-bar := Rectangle {
-            height: 36px;
+            visible: !root.cmd-bar-hidden;
+            height: root.cmd-bar-hidden ? 0px : 36px;
             background: Theme.bg-panel-alt;
             border-width: 0;
 
@@ -1117,26 +1119,6 @@ export component TerminalView inherits Rectangle {
                 padding-left: 8px; padding-right: 8px;
                 padding-top: 5px; padding-bottom: 5px;
                 spacing: 6px;
-
-                // Bottom-docked SFTP uses the command bar for its collapse /
-                // expand control. Keep it at the leading edge of this row.
-                if root.sftp-available && !root.zen-mode && root.sftp-dock == "bottom" : Rectangle {
-                    width: 28px;
-                    border-radius: Theme.radius-sm;
-                    background: sftp-toggle-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
-                    sftp-toggle-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.set-sftp-collapsed(!root.sftp-collapsed); }
-                    }
-                    Text {
-                        text: root.sftp-collapsed ? "\u{E5CE}" : "\u{E5CF}";
-                        font-family: "Material Icons";
-                        color: Theme.text-secondary;
-                        font-size: Theme.fs-md;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
 
                 // Quick-command toggle.
                 if !root.quick-commands-sidebar : Rectangle {
@@ -1228,12 +1210,10 @@ export component TerminalView inherits Rectangle {
                     }
                     if cmd-input.text == "" : Text {
                         x: 8px;
-                        width: parent.width - 16px;
                         height: parent.height;
                         text: @tr("Type a command, Enter to send");
                         color: Theme.text-muted;
                         font-size: Theme.fs-md;
-                        horizontal-alignment: left;
                         vertical-alignment: center;
                     }
                 }
@@ -1616,13 +1596,12 @@ export component TerminalView inherits Rectangle {
                         background: Theme.bg-root;
                         border-width: 1px;
                         border-color: hist-search.has-focus ? Theme.accent : Theme.border-subtle;
-                        // Defer focus to the next event-loop tick (see init below).
                         history-search-focus-timer := Timer {
                             interval: 0ms;
                             running: root.history-search-focus-pending;
                             triggered => {
                                 root.history-search-focus-pending = false;
-                                if (root.history-open) { hist-search.focus(); }
+                                if (root.history-open) { hist-search.focus-input(); }
                             }
                         }
                         HorizontalLayout {
@@ -1638,7 +1617,7 @@ export component TerminalView inherits Rectangle {
                                     font-family: Theme.ui-font-family;
                                     font-size: Theme.fs-sm;
                                     // Auto-focus so Ctrl+R lands you typing (#140).
-                                    auto-focus: true;
+                                    init => { root.history-search-focus-pending = true; }
                                     edited => {
                                         root.search-history(self.text);
                                         root.history-selected = max(0, root.history-view.length - 1);
@@ -1694,19 +1673,41 @@ export component TerminalView inherits Rectangle {
 
         // --- SFTP resize splitter (orientation follows the dock edge) -------
         Rectangle {
-            visible: root.sftp-available && !root.zen-mode && !root.sftp-collapsed;   // hidden in focus mode or when collapsed
-            x: root.sftp-dock == "left"   ? parent.sf-w
-             : root.sftp-dock == "right"  ? parent.width - parent.sf-w - 4px
+            visible: root.sftp-available && !root.zen-mode;   // retained as a passive divider while collapsed
+            x: root.sftp-dock == "left"   ? parent.sf-w - 2px
+             : root.sftp-dock == "right"  ? parent.width - parent.sf-w - 2px
              : 0px;
-            y: root.sftp-dock == "top"    ? parent.sf-h
-             : root.sftp-dock == "bottom" ? parent.height - parent.sf-h - 4px
+            y: root.sftp-dock == "top"    ? parent.sf-h - 2px
+             : root.sftp-dock == "bottom" ? parent.height - parent.sf-h - 2px
              : 0px;
             width:  root.sftp-horizontal ? 4px : parent.width;
             height: root.sftp-horizontal ? parent.height : 4px;
+            // Keep the edge-aligned divider visible above the SFTP toolbar.
+            z: 120;
             property <bool> hover-lit;
             property <bool> hover-pending;
-            background: self.hover-lit || root.sftp-dragging
-                ? Theme.accent : Theme.border-subtle;
+            // Do not paint a separate background for the hit area. The panel
+            // and terminal backgrounds show through, matching other dock
+            // splitters and avoiding a visible gap around the 1px line.
+            background: transparent;
+            Rectangle {
+                width: root.sftp-horizontal
+                    ? ((!root.sftp-collapsed && (parent.hover-lit || root.sftp-dragging))
+                        ? parent.width : 1px)
+                    : parent.width;
+                height: root.sftp-horizontal
+                    ? parent.height
+                    : ((!root.sftp-collapsed && (parent.hover-lit || root.sftp-dragging))
+                        ? parent.height : 1px);
+                // Center the visible line in the splitter, whose center is the
+                // actual SFTP/terminal boundary.
+                x: root.sftp-horizontal ? (parent.width - self.width) / 2 : 0px;
+                y: root.sftp-horizontal ? 0px : (parent.height - self.height) / 2;
+                background: root.sftp-collapsed
+                    ? Theme.border-subtle
+                    : (parent.hover-lit || root.sftp-dragging
+                        ? Theme.accent : Theme.border-subtle);
+            }
             divider-hover-timer := Timer {
                 interval: 180ms;
                 running: parent.hover-pending;
@@ -1722,9 +1723,10 @@ export component TerminalView inherits Rectangle {
                 y: root.sftp-horizontal ? 0px : -4px;
                 width:  root.sftp-horizontal ? 12px : parent.width;
                 height: root.sftp-horizontal ? parent.height : 12px;
-                mouse-cursor: root.sftp-horizontal ? ew-resize : ns-resize;
+                mouse-cursor: root.sftp-collapsed ? default
+                    : (root.sftp-horizontal ? ew-resize : ns-resize);
                 changed has-hover => {
-                    if (self.has-hover) {
+                    if (!root.sftp-collapsed && self.has-hover) {
                         parent.hover-pending = true;
                     } else {
                         parent.hover-pending = false;
@@ -1732,7 +1734,7 @@ export component TerminalView inherits Rectangle {
                     }
                 }
                 pointer-event(ev) => {
-                    if (ev.kind == PointerEventKind.down) {
+                    if (!root.sftp-collapsed && ev.kind == PointerEventKind.down) {
                         root.sftp-dragging = true;
                         root.set-sftp-collapsed(false);
                     } else if (ev.kind == PointerEventKind.up) {
@@ -1768,7 +1770,9 @@ export component TerminalView inherits Rectangle {
 
         // --- SFTP panel — positioned on the docked edge ---------------------
         if root.sftp-available : SftpPanel {
-            visible: !root.zen-mode && !root.sftp-collapsed;
+            // Bottom-docked collapsed SFTP keeps its toolbar/path row visible;
+            // side/top collapsed docks use the external compact strip instead.
+            visible: !root.zen-mode && (!root.sftp-collapsed || root.sftp-dock == "bottom");
             zebra-rows: root.sftp-zebra-rows;
             x: root.sftp-dock == "right"  ? parent.width - parent.sf-w : 0px;
             y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
@@ -2152,6 +2156,9 @@ export component TerminalView inherits Rectangle {
             height: root.sftp-horizontal ? parent.height : parent.sf-h;
             dock-edge: root.sftp-dock;
             glyph: "\u{E2C7}";   // folder — SFTP
+            icon-width: 24px;
+            icon-height: 24px;
+            strip-background: Theme.bg-panel-alt;
             tooltip: root.sftp-available ? "SFTP" : @tr("SFTP not available");
             enabled: root.sftp-available;
             expand => {
@@ -2160,13 +2167,15 @@ export component TerminalView inherits Rectangle {
                 }
             }
         }
-        if root.sftp-available && !root.zen-mode && root.sftp-collapsed && !root.sftp-horizontal
-                && root.sftp-dock != "bottom" : DockExpandButton {
-            x: root.sftp-dock == "bottom" ? 0px : 0px;
-            y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
+        // Top-docked collapsed SFTP keeps the ToolStrip icon at the left and
+        // a small conventional expand button at the right edge.
+        if root.sftp-collapsed && !root.zen-mode && root.sftp-dock == "top" : DockExpandButton {
+            x: 0px;
+            y: 0px;
             width: parent.width;
             height: parent.sf-h;
-            dock-edge: root.sftp-dock;
+            z: 5;
+            dock-edge: "top";
             hug-right: true;
             flat: true;
             expand => { root.set-sftp-collapsed(false); }

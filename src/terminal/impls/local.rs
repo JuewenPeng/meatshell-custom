@@ -16,10 +16,6 @@ use crate::config::Session;
 use crate::i18n::t;
 use crate::ssh::{SessionCommand, SessionEvent, SessionHandle};
 
-#[cfg(windows)]
-const WSL_LOGIN_SHELL: &str = "shell=$(getent passwd \"$(id -un)\" 2>/dev/null | cut -d: -f7); \
-     [ -x \"$shell\" ] || shell=${SHELL:-/bin/sh}; exec \"$shell\" -l";
-
 pub fn spawn_local_session(
     runtime: &tokio::runtime::Handle,
     tab_id: String,
@@ -193,7 +189,21 @@ fn local_program(session: &Session) -> (String, Vec<String>) {
             ],
         ),
         #[cfg(windows)]
-        "wsl" => ("wsl.exe".to_string(), Vec::new()),
+        "wsl" => {
+            let mut args = Vec::new();
+            if !session.local_distribution.trim().is_empty() {
+                args.push("--distribution".to_string());
+                args.push(session.local_distribution.trim().to_string());
+            }
+            let directory = if session.local_working_dir.trim().is_empty() {
+                "~"
+            } else {
+                session.local_working_dir.trim()
+            };
+            args.push("--cd".to_string());
+            args.push(directory.to_string());
+            ("wsl.exe".to_string(), args)
+        }
         #[cfg(windows)]
         "powershell" | _ => (
             "powershell.exe".to_string(),
@@ -215,6 +225,7 @@ fn local_program(session: &Session) -> (String, Vec<String>) {
 #[cfg(all(test, windows))]
 mod tests {
     use super::local_program;
+    use crate::config::Session;
 
     #[cfg(windows)]
     #[test]
