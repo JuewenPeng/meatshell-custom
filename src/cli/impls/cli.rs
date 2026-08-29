@@ -1,6 +1,10 @@
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
+pub(crate) fn is_cli_command(args: &[String]) -> bool {
+    args.get(1).is_some_and(|value| value == "cli")
+}
+
 pub(crate) fn run(args: &[String]) -> Result<()> {
     let command = args.get(2).map(String::as_str).unwrap_or("help");
     if command == "help" {

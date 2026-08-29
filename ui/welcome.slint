@@ -34,24 +34,7 @@ component SessionRow inherits Rectangle {
     // Full session list — group-header is non-empty once per group, so the
     // "move to group" submenu can iterate it to list each group exactly once.
     in property <[SessionInfo]> all-sessions;
-    // Drag is only allowed outside search (visible indices would not match
-    // stored order) and never on built-in system rows.
-    in property <bool> reorder-enabled: false;
-    // Shared list-level drag state (see Welcome): which session is being
-    // dragged. The lifted card follows the dragged session's DATA, not the
-    // component holding the pointer grab — rows swap contents under the grab
-    // on every hop.
-    in property <bool> drag-target: false;
-    // List-level drag state, mirrored here so a press can detect a stale
-    // drag (the grab was lost when a hop changed the row count and rebuilt
-    // the model) and clear it instead of leaving the card lifted.
-    in property <bool> list-dragging: false;
     property <bool> system-row: root.session.builtin;
-    // Local gesture state: this instance received the press and drives the
-    // drag (it keeps the pointer grab across in-place model updates).
-    property <bool> pressing: false;
-    property <bool> grab-dragging: false;
-    property <length> grab-y;
 
     height: 36px;
     border-radius: Theme.radius-sm;
@@ -306,29 +289,6 @@ export component Welcome inherits Rectangle {
     callback edit-session(string);
     callback duplicate-session(string);
     callback move-session(string /* id */, string /* group */);
-    // Drag-to-reorder a host card among its same-group siblings (dir: -1/1).
-    // Returns true when the card actually moved.
-    callback reorder-session(string /* id */, int /* dir */) -> bool;
-    // Drag finished (pointer released) → persist the new order.
-    callback reorder-end();
-    // Bumped by Rust whenever the sessions model is rebuilt wholesale; that
-    // destroys the dragging row's pointer grab, so end the drag cleanly
-    // instead of leaving the lifted card stuck (its grab is already gone —
-    // no release event will ever arrive).
-    in property <int> sessions-revision: 0;
-    changed sessions-revision => {
-        if (root.list-dragging) {
-            root.list-dragging = false;
-            root.drag-id = "";
-            root.reorder-end();
-        }
-    }
-    // List-level drag-to-reorder state: which session is being dragged.
-    // Kept at list level because hops swap row data under the pointer grab —
-    // the lifted card must follow the dragged session's data, not the
-    // component that owns the grab.
-    property <string> drag-id;
-    property <bool> list-dragging: false;
     callback toggle-group(string /* group */);
     callback new-group();
     callback edit-group(string /* current-name */);
@@ -404,7 +364,7 @@ export component Welcome inherits Rectangle {
                 font-weight: 700;
             }
             Text {
-                text: @tr("A lightweight and efficient Rust + Slint SSH client");
+                text: @tr("meatshell — a lightweight Rust + Slint SSH client by 'lil meatball'");
                 color: Theme.text-secondary;
                 font-size: Theme.fs-md;
                 wrap: no-wrap;
@@ -556,7 +516,6 @@ export component Welcome inherits Rectangle {
 
                         Rectangle {
                             horizontal-stretch: 1;
-
                             search-input := TextInput {
                                 width: parent.width;
                                 height: parent.height;
@@ -568,7 +527,6 @@ export component Welcome inherits Rectangle {
                                 single-line: true;
                                 edited => { root.search-changed(root.search-query); }
                             }
-
                             if root.search-query == "" : Text {
                                 width: parent.width;
                                 height: parent.height;
@@ -583,7 +541,6 @@ export component Welcome inherits Rectangle {
                         if root.search-query != "" : Rectangle {
                             width: 24px;
                             height: parent.height;
-
                             Rectangle {
                                 width: 24px;
                                 height: 24px;
@@ -592,7 +549,6 @@ export component Welcome inherits Rectangle {
                                 background: clear-search.has-hover ? Theme.bg-hover : transparent;
                                 accessible-role: button;
                                 accessible-label: @tr("Clear search");
-
                                 Text {
                                     text: "\u{E5CD}";
                                     font-family: "Material Icons";
@@ -607,29 +563,6 @@ export component Welcome inherits Rectangle {
                                         root.search-query = "";
                                         root.search-changed("");
                                         search-input.focus();
-                                    }
-                                }
-
-                                if clear-search.has-hover : Rectangle {
-                                    x: parent.width - self.width;
-                                    y: parent.height + 4px;
-                                    width: clear-search-tip.preferred-width + 16px;
-                                    height: 22px;
-                                    background: Theme.bg-elevated;
-                                    border-radius: Theme.radius-sm;
-                                    border-width: 1px;
-                                    border-color: Theme.border-strong;
-                                    drop-shadow-blur: 8px;
-                                    drop-shadow-color: #00000070;
-
-                                    clear-search-tip := Text {
-                                        width: parent.width;
-                                        height: parent.height;
-                                        text: @tr("Clear search");
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-xs;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
                                     }
                                 }
                             }
@@ -671,8 +604,6 @@ export component Welcome inherits Rectangle {
                     sess-list := VerticalLayout {
                     spacing: 0px;
                     for session[i] in sessions : VerticalLayout {
-                        // Exclude hidden rows from layout spacing while a group
-                        // is collapsed; keep its first row for the group header.
                         visible: session.group-header != "" || !session.collapsed;
                         padding-top: self.visible && i > 0 ? 2px : 0px;
                         spacing: 2px;
@@ -718,11 +649,7 @@ export component Welcome inherits Rectangle {
                                 mouse-cursor: pointer;
                                 // Left-click toggles collapse (any group, incl.
                                 // empty); right-click opens the group menu.
-                                clicked => {
-                                    if root.search-query == "" {
-                                        root.toggle-group(session.group);
-                                    }
-                                }
+                                clicked => { root.toggle-group(session.group); }
                                 pointer-event(e) => {
                                     if (!session.builtin && e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
                                         gmx = self.mouse-x;
@@ -798,13 +725,6 @@ export component Welcome inherits Rectangle {
                             edit => { root.edit-session(session.id); }
                             duplicate => { root.duplicate-session(session.id); }
                             move-to-group(g) => { root.move-session(session.id, g); }
-                            reorder(dir) => { return root.reorder-session(root.drag-id, dir); }
-                            drag-start => { root.drag-id = session.id; root.list-dragging = true; }
-                            drag-end => {
-                                root.list-dragging = false;
-                                root.drag-id = "";
-                                root.reorder-end();
-                            }
                             remove => { root.remove-session(session.id); }
                             reorder-preview(id, idx, dy) => { root.session-reorder-preview(id, idx, dy); }
                             reorder-drop(id) => { root.session-reorder-drop(id); }

@@ -299,6 +299,7 @@ export component Sparkline inherits Rectangle {
 export component ToolStrip inherits Rectangle {
     in property <string> dock-edge;   // left | right | top | bottom
     in property <string> glyph;       // the panel's tool icon (Material Icons)
+    in property <brush> strip-background: Theme.bg-toolstrip;
     in property <bool> active: false;
     in property <bool> show-second: false;
     in property <string> second-glyph;
@@ -308,12 +309,16 @@ export component ToolStrip inherits Rectangle {
     in property <bool> third-active: false;
     in property <string> tooltip;
     in property <bool> enabled: true;
+    // SFTP's compact expand affordance uses a 24px button while the shared
+    // control-panel strips keep their 30px icon area.
+    in property <length> icon-width: 30px;
+    in property <length> icon-height: 30px;
     callback expand();
     callback expand-second();
     callback expand-third();
     property <bool> horizontal: root.dock-edge == "top" || root.dock-edge == "bottom";
 
-    background: Theme.bg-toolstrip;
+    background: root.strip-background;
     // Hairline on the inner edge (facing the central content).
     Rectangle {
         x: root.dock-edge == "left" ? parent.width - self.width : 0px;
@@ -324,8 +329,8 @@ export component ToolStrip inherits Rectangle {
     }
     // Tool icon, hugging the strip's near corner.
     Rectangle {
-        width: 30px;
-        height: 30px;
+        width: root.icon-width;
+        height: root.icon-height;
         x: root.horizontal ? 4px : (parent.width - self.width) / 2;
         y: root.horizontal ? (parent.height - self.height) / 2 : 4px;
         border-radius: Theme.radius-sm;
@@ -455,6 +460,8 @@ export component DockGroupStrip inherits Rectangle {
 
 export component DockExpandButton inherits Rectangle {
     in property <string> dock-edge;   // left | right | top | bottom
+    // Optional panel glyph; empty keeps the normal edge chevron.
+    in property <string> glyph: "";
     // For top/bottom docks, hug the right corner instead of the left. SFTP uses
     // this so the expand button stays on the side its controls live on.
     in property <bool> hug-right: false;
@@ -481,7 +488,8 @@ export component DockExpandButton inherits Rectangle {
             clicked => { root.expand(); }
         }
         Text {
-            text: root.dock-edge == "right"  ? "\u{E5CB}"   // chevron_left
+            text: root.glyph != "" ? root.glyph
+                : root.dock-edge == "right"  ? "\u{E5CB}"   // chevron_left
                 : root.dock-edge == "top"    ? "\u{E5CF}"   // expand_more
                 : root.dock-edge == "bottom" ? "\u{E5CE}"   // expand_less
                 : "\u{E5CC}";                                // chevron_right (left dock)

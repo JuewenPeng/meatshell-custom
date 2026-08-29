@@ -1,7 +1,7 @@
 ﻿import { Theme } from "theme.slint";
 import { ScrollView, ListView } from "std-widgets.slint";
 import { TabInfo } from "tabs.slint";
-import { AutoScrollTextInput } from "widgets.slint";
+import { AutoScrollTextInput, DockExpandButton, ToolStrip } from "widgets.slint";
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -521,14 +521,14 @@ export component SftpPanel inherits Rectangle {
         // --- Toolbar (full width) ------------------------------------------
         Rectangle {
             width: root.width;
-            height: root.side-docked && root.panel-mode == "files" ? 58px : 32px;
+            height: root.side-docked && root.panel-mode == "files" ? 64px : 34px;
             z: 100;
             background: Theme.bg-panel-alt;
 
             HorizontalLayout {
                 y: 0px;
                 width: parent.width;
-                height: 32px;
+                height: 34px;
                 // Tooltips from the first-row icon tabs may extend into the
                 // second row of a side dock; keep them above the path field.
                 z: 2;
@@ -545,7 +545,7 @@ export component SftpPanel inherits Rectangle {
                     visible: root.toolbar-enabled;
                     width: 20px;
                     y: (parent.height - self.height) / 2;
-                    height: 22px;
+                    height: 24px;
                     grip-ta := TouchArea {
                         mouse-cursor: move;
                         moved => {
@@ -571,7 +571,7 @@ export component SftpPanel inherits Rectangle {
                 Rectangle {
                     visible: root.toolbar-enabled;
                     width: 8px;
-                    height: 22px;
+                    height: 24px;
                     Rectangle {
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
@@ -583,7 +583,7 @@ export component SftpPanel inherits Rectangle {
 
                 Rectangle {
                     width: 28px;
-                    height: 22px;
+                    height: 24px;
                     border-radius: Theme.radius-sm;
                     background: root.panel-mode == "files" ? Theme.accent : (files-tab-ta.has-hover ? Theme.bg-hover : transparent);
                     files-tab-ta := TouchArea {
@@ -602,7 +602,7 @@ export component SftpPanel inherits Rectangle {
                 }
                 Rectangle {
                     width: 28px;
-                    height: 22px;
+                    height: 24px;
                     border-radius: Theme.radius-sm;
                     background: root.panel-mode == "tunnels" ? Theme.accent : (tunnels-tab-ta.has-hover ? Theme.bg-hover : transparent);
                     tunnels-tab-ta := TouchArea {
@@ -622,7 +622,7 @@ export component SftpPanel inherits Rectangle {
 
                 if root.panel-mode == "files" && root.toolbar-enabled : Rectangle {
                     width: 8px;
-                    height: 22px;
+                    height: 24px;
                     Rectangle {
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
@@ -636,7 +636,7 @@ export component SftpPanel inherits Rectangle {
                 // SFTP upload handles both; only the local picker differs.
                 ul-btn := Rectangle {
                     visible: root.panel-mode == "files" && root.toolbar-enabled && root.show-action(232px);
-                    width: 24px; height: 22px;
+                    width: 24px; height: 24px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && ul-ta.has-hover) ? Theme.bg-hover : transparent;
                     ul-ta := TouchArea {
@@ -675,7 +675,7 @@ export component SftpPanel inherits Rectangle {
                 // Batch actions on checked entries (#100).
                 if root.panel-mode == "files" : Rectangle {
                     visible: root.show-action(260px);
-                    width: 24px; height: 22px;
+                    width: 24px; height: 24px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && root.selected-count > 0 && dls-ta.has-hover) ? Theme.bg-hover : transparent;
                     dls-ta := TouchArea {
@@ -687,7 +687,7 @@ export component SftpPanel inherits Rectangle {
                 }
                 if root.panel-mode == "files" : Rectangle {
                     visible: root.show-action(288px);
-                    width: 24px; height: 22px;
+                    width: 24px; height: 24px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && root.selected-count > 0 && mvs-ta.has-hover) ? Theme.bg-hover : transparent;
                     mvs-ta := TouchArea {
@@ -699,7 +699,7 @@ export component SftpPanel inherits Rectangle {
                 }
                 if root.panel-mode == "files" : Rectangle {
                     visible: root.show-action(316px);
-                    width: 24px; height: 22px;
+                    width: 24px; height: 24px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && root.selected-count > 0 && dels-ta.has-hover)
                         ? Theme.danger-hover-solid
@@ -715,7 +715,7 @@ export component SftpPanel inherits Rectangle {
                 // Copy the current path to the clipboard.
                 Rectangle {
                     visible: root.panel-mode == "files" && root.toolbar-enabled && root.show-action(344px);
-                    width: 24px; height: 22px;
+                    width: 24px; height: 24px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && copy-ta.has-hover) ? Theme.bg-hover : transparent;
                     copy-ta := TouchArea {
@@ -735,7 +735,7 @@ export component SftpPanel inherits Rectangle {
                 // Paste a path from the clipboard and jump straight to it.
                 Rectangle {
                     visible: root.panel-mode == "files" && root.toolbar-enabled && root.show-action(372px);
-                    width: 24px; height: 22px;
+                    width: 24px; height: 24px;
                     border-radius: Theme.radius-sm;
                     background: (root.toolbar-enabled && pj-ta.has-hover) ? Theme.bg-hover : transparent;
                     pj-ta := TouchArea {
@@ -774,7 +774,7 @@ export component SftpPanel inherits Rectangle {
                     // the space between the toolbar controls and collapse button.
                     horizontal-stretch: 1;
                     min-width: 0px;
-                    height: 22px;
+                    height: 24px;
                     changed width => {
                         if (!root.collapsed) {
                             root.scroll-path-to-end();
@@ -809,9 +809,9 @@ export component SftpPanel inherits Rectangle {
 
                 // Reserve the absolute collapse control at the right edge.
                 Rectangle {
-                    // Bottom-docked SFTP uses the command-bar toggle beside
-                    // Send, so its path field can use this space to the edge.
-                    width: root.dock-edge == "bottom" ? 0px : 24px;
+                    // Leave room for the collapse control at the path bar's
+                    // right edge on every dock orientation.
+                    width: 24px;
                 }
 
             }
@@ -821,9 +821,9 @@ export component SftpPanel inherits Rectangle {
                 visible: root.side-docked && root.panel-mode == "files" && root.toolbar-enabled;
                 z: 1;
                 x: 6px;
-                y: 33px;
+                y: 35px;
                 width: parent.width - 12px;
-                height: 22px;
+                height: 24px;
                 clip: true;
                 border-radius: Theme.radius-sm;
                 background: Theme.bg-root;
@@ -842,6 +842,22 @@ export component SftpPanel inherits Rectangle {
                 }
             }
 
+            // A collapsed bottom panel keeps only its expand affordances. The
+            // opaque hit-test layer prevents the path field and every other
+            // toolbar control underneath from remaining clickable.
+            if root.collapsed && root.dock-edge == "bottom" : Rectangle {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: 34px;
+                z: 3;
+                // Keep the collapsed mask the same colour as the panel body;
+                // collapsing must not introduce a new background band on any
+                // dock edge.
+                background: Theme.bg-panel-alt;
+                TouchArea { }
+            }
+
             // The navigation buttons precede the flexible path placeholder.
             // In a side dock that placeholder is transparent, but still fills
             // the space between Refresh and Collapse until it is compressed.
@@ -849,7 +865,7 @@ export component SftpPanel inherits Rectangle {
                 visible: root.panel-mode == "files" && root.toolbar-enabled;
                 z: 2;
                 x: min(path-wrap.x - 56px, parent.width - 6px - 24px - 4px - 24px - 4px - 24px);
-                y: 5px; width: 24px; height: 22px;
+                y: 5px; width: 24px; height: 24px;
                 border-radius: Theme.radius-sm;
                 background: up-ta.has-hover ? Theme.bg-hover : transparent;
                 up-ta := TouchArea { mouse-cursor: pointer; clicked => { root.navigate(".."); } }
@@ -860,7 +876,7 @@ export component SftpPanel inherits Rectangle {
                 visible: root.panel-mode == "files" && root.toolbar-enabled;
                 z: 2;
                 x: min(path-wrap.x - 28px, parent.width - 6px - 24px - 4px - 24px);
-                y: 5px; width: 24px; height: 22px;
+                y: 5px; width: 24px; height: 24px;
                 border-radius: Theme.radius-sm;
                 background: ref-ta.has-hover ? Theme.bg-hover : transparent;
                 ref-ta := TouchArea {
@@ -877,10 +893,13 @@ export component SftpPanel inherits Rectangle {
             }
 
             Rectangle {
-                visible: root.dock-edge != "bottom";
+                visible: root.dock-edge != "bottom" || !root.collapsed;
                 x: parent.width - 6px - 24px;
-                y: 5px; width: 24px; height: 22px;
+                y: 5px; width: 24px; height: 24px;
+                z: 4;
                 border-radius: Theme.radius-sm;
+                // Do not paint a separate base colour; the path bar remains
+                // visually continuous underneath this control.
                 background: min-ta.has-hover ? Theme.bg-hover : transparent;
                 min-ta := TouchArea { mouse-cursor: pointer; clicked => { root.toggle-collapsed(); } }
                 Text {
@@ -891,10 +910,46 @@ export component SftpPanel inherits Rectangle {
                        horizontal-alignment: center; vertical-alignment: center;
                        width: parent.width; height: parent.height; }
             }
+
+            // Use the same tool strip as side-docked collapsed panels. The
+            // opaque mask above keeps every other toolbar control inactive,
+            // while the left icon provides the ToolStrip expand affordance.
+            if root.collapsed && root.dock-edge == "bottom" : ToolStrip {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                z: 4;
+                dock-edge: "bottom";
+                glyph: "\u{E2C7}";
+                icon-width: 24px;
+                icon-height: 24px;
+                strip-background: Theme.bg-panel-alt;
+                tooltip: "SFTP";
+                enabled: true;
+                expand => {
+                    root.toggle-collapsed();
+                }
+            }
+
+            // Keep a compact expand affordance at the right edge for the
+            // bottom-docked collapsed panel, alongside the left ToolStrip icon.
+            if root.collapsed && root.dock-edge == "bottom" : DockExpandButton {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                z: 5;
+                dock-edge: "bottom";
+                hug-right: true;
+                flat: true;
+                expand => { root.toggle-collapsed(); }
+            }
         }
 
         // --- Main area: tree (left) + file list (right) --------------------
         if root.panel-mode == "files" : HorizontalLayout {
+            visible: !root.collapsed;
             vertical-stretch: 1;
             spacing: 0;
 
@@ -1740,8 +1795,9 @@ export component SftpPanel inherits Rectangle {
             }
         }
 
-        if root.panel-mode == "tunnels" : Rectangle {
-            vertical-stretch: 1;
+            if root.panel-mode == "tunnels" : Rectangle {
+                visible: !root.collapsed;
+                vertical-stretch: 1;
             clip: true;
             background: transparent;
 

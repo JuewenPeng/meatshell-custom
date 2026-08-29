@@ -399,10 +399,10 @@ impl TermBuffer {
 
     /// Feed a (already HVP-rewritten) byte slice to vt100 in bounded batches,
     /// capturing scrolled-off lines into history after each (see the `ingest`
-    /// doc comment). Besides newlines, bound the approximate display width:
-    /// one very long physical line can wrap through many screens without ever
-    /// containing `\n` (#385). Does NOT touch `self.raw`, so it is reused by
-    /// both live ingest and resize-reflow replay.
+    /// doc comment). Besides newlines, bound the approximate display width so
+    /// a single very long physical line cannot bypass history capture.
+    /// Does NOT touch `self.raw`, so it is reused by both live ingest and
+    /// resize-reflow replay.
     fn feed_batched(&mut self, bytes: &[u8]) {
         let (rows, cols) = self.parser.screen().size();
         let rows = rows as usize;
@@ -418,8 +418,8 @@ impl TermBuffer {
                 // A tab can advance up to eight terminal cells.
                 cells = cells.saturating_add(8);
             } else if bytes[i] >= 0x20 && bytes[i] & 0xc0 != 0x80 {
-                // Count ASCII and UTF-8 leading bytes. Wide Unicode occupies at
-                // most two cells, and the half-screen budget leaves that margin.
+                // Count UTF-8 leading bytes. Wide characters occupy at most two
+                // cells; the half-screen budget leaves room for that margin.
                 cells = cells.saturating_add(1);
             }
             if nl >= batch_lines || cells >= cell_budget {
@@ -629,5 +629,41 @@ impl TermBuffer {
             scroll_max: self.history.len() as i32,
             scroll_offset: self.view_offset as i32,
         }
+    }
+}
+
+#[cfg(test)]
+mod feed_batch_tests {
+    use super::*;
+    use crate::terminal::OutputHighlightPreset;
+    use std::collections::VecDeque;
+
+    fn buffer(rows: u16, cols: u16) -> TermBuffer {
+        TermBuffer {
+            parser: vt100::Parser::new(rows, cols, 0),
+            find_query: String::new(),
+            is_dark: false,
+            output_highlight: OutputHighlightPreset::Off,
+            custom_highlight_rules: Vec::new(),
+            json_format_output: false,
+            interactive_echo_until: std::time::Instant::now(),
+            sel_anchor: None,
+            sel_focus: None,
+            sel_ranges: Vec::new(),
+            history: VecDeque::new(),
+            prev: Vec::new(),
+            view_offset: 0,
+            displayed_text: Vec::new(),
+            csi_state: CsiState::Normal,
+            csi_pending: Vec::new(),
+            raw: VecDeque::new(),
+        }
+    }
+
+    #[test]
+    fn long_unbroken_output_is_batched_by_display_width() {
+        let mut value = buffer(3, 10);
+        value.feed_batched(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+        assert!(!value.history.is_empty());
     }
 }

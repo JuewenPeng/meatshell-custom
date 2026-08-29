@@ -502,6 +502,12 @@ pub struct Session {
     #[serde(default)]
     pub kind: SessionKind,
 
+    /// WSL distribution and startup directory for generated local sessions.
+    #[serde(default)]
+    pub local_distribution: String,
+    #[serde(default)]
+    pub local_working_dir: String,
+
     // --- Serial-only fields (ignored unless kind == Serial) -----------------
     /// Serial device path, e.g. "COM3" (Windows) or "/dev/ttyUSB0" (Linux).
     #[serde(default)]
@@ -523,6 +529,11 @@ pub struct Session {
     /// Tunnels established automatically when this SSH session connects.
     #[serde(default)]
     pub forwards: Vec<PortForward>,
+
+    /// Login expect/response rules evaluated against the interactive shell
+    /// output. Responses are kept as encrypted secrets on disk.
+    #[serde(default)]
+    pub triggers: Vec<SessionTrigger>,
 
     /// Enable SSH X11 forwarding for this session. MeatShell forwards X11 channels
     /// opened by the remote sshd to a local X server such as VcXsrv/Xming/X410.
@@ -568,6 +579,20 @@ pub struct PortForward {
     pub host_port: u16,
 }
 
+/// One login expect/response rule. When `expect` appears in remote output,
+/// `response` is sent automatically; `repeat` controls whether the rule stays
+/// active after its first match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTrigger {
+    pub expect: String,
+    #[serde(default)]
+    pub response: Secret,
+    #[serde(default = "default_true")]
+    pub append_enter: bool,
+    #[serde(default)]
+    pub repeat: bool,
+}
+
 impl Session {
     pub fn new_empty() -> Self {
         Self {
@@ -585,6 +610,8 @@ impl Session {
             last_used: None,
             group: String::new(),
             kind: SessionKind::Ssh,
+            local_distribution: String::new(),
+            local_working_dir: String::new(),
             serial_port: String::new(),
             baud_rate: default_baud(),
             data_bits: default_data_bits(),
@@ -592,6 +619,7 @@ impl Session {
             parity: default_parity(),
             flow_control: default_flow(),
             forwards: Vec::new(),
+            triggers: Vec::new(),
             x11_forwarding: false,
             x11_display: default_x11_display(),
             disable_shell_integration: false,
@@ -648,11 +676,30 @@ fn normalize_highlight_color(color: &str) -> &'static str {
     }
 }
 
+/// A named WSL launch profile exposed as a built-in local session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WslProfile {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub distribution: String,
+    #[serde(default = "default_wsl_home")]
+    pub directory: String,
+}
+
+fn default_wsl_home() -> String {
+    "~".to_string()
+}
+
 /// On-disk layout. Keep additive to ease forward-compat.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfigFile {
     #[serde(default)]
     pub sessions: Vec<Session>,
+    /// User-defined WSL launch profiles. An empty list keeps the implicit
+    /// default WSL entry for backwards compatibility.
+    #[serde(default)]
+    pub wsl_profiles: Vec<WslProfile>,
     /// Preset SFTP download directory. Empty = ask each time.
     #[serde(default)]
     pub download_dir: String,
@@ -733,6 +780,9 @@ pub struct ConfigFile {
     /// preset download dir. Defaults to false (#87).
     #[serde(default)]
     pub download_always_ask: bool,
+    /// Hide the quick-command bar under the terminal. Defaults to false.
+    #[serde(default)]
+    pub hide_cmd_bar: bool,
     /// Saved quick commands (#55).
     #[serde(default)]
     pub quick_commands: Vec<QuickCommand>,
@@ -1021,8 +1071,7 @@ impl ConfigStore {
                             session.private_key_inline = Secret::new(plain);
                         }
                         for trigger in &mut session.triggers {
-                            if let Some(plain) = Self::try_decrypt(&key, trigger.response.as_str())
-                            {
+                            if let Some(plain) = Self::try_decrypt(&key, trigger.response.as_str()) {
                                 trigger.response = Secret::new(plain);
                             }
                         }
@@ -1076,122 +1125,44 @@ impl ConfigStore {
         &self.cache.sessions
     }
 
-    /// Drag-to-reorder a saved session (`dir < 0` = up). The stored Vec order
-    /// is the display order within a group (same convention as quick commands).
-    /// Same-group hops swap neighbours; when there is no same-group neighbour
-    /// the hop crosses the group boundary instead: the session moves into the
-    /// nearest visible display group along `dir`, landing at that group's
-    /// boundary (first member moving down, last moving up). Returns whether
-    /// anything changed.
-    pub fn reorder_session(&mut self, id: &str, dir: isize) -> bool {
-        // Display group of a session: ungrouped (and reserved names) render
-        // under "default"; everything else under its own group. Mirrors
-        // build_session_rows in src/app/session_models.rs.
-        fn display_group(session: &Session) -> String {
-            if session.group.is_empty() || is_reserved_session_group(session.group.trim()) {
-                "default".to_string()
+    pub fn wsl_profiles(&self) -> &[WslProfile] {
+        &self.cache.wsl_profiles
+    }
+
+    /// Add a named WSL launch profile. Empty names are ignored so a malformed
+    /// settings submission cannot create an unusable built-in session.
+    pub fn add_wsl_profile(
+        &mut self,
+        name: String,
+        distribution: String,
+        directory: String,
+    ) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        self.cache.wsl_profiles.push(WslProfile {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            distribution: distribution.trim().to_string(),
+            directory: if directory.trim().is_empty() {
+                "~".to_string()
             } else {
-                session.group.clone()
-            }
-        }
-
-        let Some(idx) = self.cache.sessions.iter().position(|s| s.id == id) else {
-            return false;
-        };
-        let group = display_group(&self.cache.sessions[idx]);
-
-        // Same-group neighbour in stored (= display) order → plain swap.
-        let same_group_target = {
-            let sessions = &self.cache.sessions;
-            if dir < 0 {
-                (0..idx)
-                    .rev()
-                    .find(|&i| display_group(&sessions[i]) == group)
-            } else {
-                (idx + 1..sessions.len()).find(|&i| display_group(&sessions[i]) == group)
-            }
-        };
-        if let Some(target) = same_group_target {
-            self.cache.sessions.swap(idx, target);
-            return true;
-        }
-
-        // Cross-group hop. Display order: "default" first (only when ungrouped
-        // sessions exist), then named groups — explicit folders ∪ sessions'
-        // groups — alphabetically. Collapsed groups are skipped: their rows
-        // are hidden, so a card must never land inside one.
-        let Some(collapsed_groups) = self.cache.collapsed_session_groups.clone() else {
-            // Mirrors build_session_rows: no collapse list = everything
-            // collapsed, so no visible target group can exist.
-            return false;
-        };
-        let is_collapsed = |name: &str| collapsed_groups.iter().any(|g| g == name);
-
-        let mut display: Vec<String> = Vec::new();
-        if self
-            .cache
-            .sessions
-            .iter()
-            .any(|s| display_group(s) == "default")
-        {
-            display.push("default".to_string());
-        }
-        display.extend(named_display_groups(
-            &self.cache.groups,
-            &self.cache.sessions,
-        ));
-
-        let Some(pos) = display.iter().position(|g| g == &group) else {
-            return false;
-        };
-        let target_group = if dir < 0 {
-            (0..pos).rev().find(|&i| !is_collapsed(&display[i]))
-        } else {
-            (pos + 1..display.len()).find(|&i| !is_collapsed(&display[i]))
-        }
-        .map(|i| display[i].clone());
-        let Some(target_group) = target_group else {
-            return false;
-        };
-
-        let source_group = self.cache.sessions[idx].group.clone();
-        let mut moved = self.cache.sessions.remove(idx);
-        moved.group = if target_group == "default" {
-            String::new()
-        } else {
-            target_group.clone()
-        };
-        let insert_at = {
-            let members: Vec<usize> = self
-                .cache
-                .sessions
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| display_group(s) == target_group)
-                .map(|(i, _)| i)
-                .collect();
-            if members.is_empty() {
-                idx.min(self.cache.sessions.len())
-            } else if dir < 0 {
-                members[members.len() - 1] + 1
-            } else {
-                members[0]
-            }
-        };
-        self.cache.sessions.insert(insert_at, moved);
-
-        // A named source group that just lost its last member would vanish
-        // from the list (changing the row count mid-drag, which drops the
-        // dragging row's pointer grab); keep it as an empty folder. Register
-        // it in `groups` directly rather than via add_group: the folder was
-        // visibly expanded during the drag, and add_group would collapse it.
-        if group != "default"
-            && !self.cache.sessions.iter().any(|s| s.group == source_group)
-            && !self.cache.groups.iter().any(|g| g == &source_group)
-        {
-            self.cache.groups.push(source_group);
-        }
+                directory.trim().to_string()
+            },
+        });
         true
+    }
+
+    pub fn remove_wsl_profile(&mut self, id: &str) -> bool {
+        let before = self.cache.wsl_profiles.len();
+        self.cache.wsl_profiles.retain(|profile| profile.id != id);
+        self.cache.wsl_profiles.len() != before
+    }
+
+    #[allow(dead_code)] // reserved for an upcoming reorder/drag-drop feature
+    pub fn sessions_mut(&mut self) -> &mut Vec<Session> {
+        &mut self.cache.sessions
     }
 
     pub fn upsert(&mut self, session: Session) {
@@ -1479,6 +1450,15 @@ impl ConfigStore {
 
     pub fn set_sftp_follow_cd(&mut self, follow: bool) {
         self.cache.sftp_no_follow_cd = !follow;
+    }
+
+    /// Whether the quick-command bar under the terminal is hidden.
+    pub fn cmd_bar_hidden(&self) -> bool {
+        self.cache.hide_cmd_bar
+    }
+
+    pub fn set_cmd_bar_hidden(&mut self, hidden: bool) {
+        self.cache.hide_cmd_bar = hidden;
     }
 
     /// Whether SFTP directory and file lists use alternating row backgrounds.
@@ -2226,52 +2206,34 @@ impl ConfigStore {
         Ok(count)
     }
 
-    /// Import sessions from a MeatShell portable export or a FinalShell connection
-    /// export. New sessions get fresh ids; duplicates (same host+user+port+kind)
-    /// are skipped.
+    /// Import sessions from a string produced by [`Self::export_json`]. New sessions
+    /// get fresh ids; duplicates (same host+user+port+kind) are skipped.
     /// Returns `(added, skipped)`. The store is saved if anything was added.
     pub fn import_json(&mut self, raw: &str) -> Result<(usize, usize)> {
-        let (sessions, decrypt_meatshell_secrets) =
-            match serde_json::from_str::<ExportFile>(raw) {
-                Ok(file) => (file.sessions, true),
-                Err(meatshell_error) => (
-                    super::finalshell::parse_export(raw).with_context(|| {
-                        format!(
-                            "not a valid MeatShell or FinalShell export file; MeatShell parser: {meatshell_error}"
-                        )
-                    })?,
-                    false,
-                ),
-            };
+        let file: ExportFile =
+            serde_json::from_str(&raw).context("not a valid meatshell export file")?;
 
         let mut added = 0usize;
         let mut skipped = 0usize;
-        for mut s in sessions {
+        for mut s in file.sessions {
             // Recover the plaintext password (cache stores plaintext). Accept an
             // export blob, our local enc:v1 blob, or a legacy plaintext value.
-            // FinalShell's parser has already decrypted its DES password, so avoid
-            // interpreting a coincidental `enc:*` plaintext prefix as ours.
-            if decrypt_meatshell_secrets {
-                if let Some(plain) = Self::decrypt_export(s.password.as_str()) {
-                    s.password = Secret::new(plain);
-                } else if let Some(plain) = Self::try_decrypt(&self.key, s.password.as_str()) {
-                    s.password = Secret::new(plain);
-                }
-                if let Some(plain) = Self::decrypt_export(s.private_key_inline.as_str()) {
-                    s.private_key_inline = Secret::new(plain);
-                } else if let Some(plain) =
-                    Self::try_decrypt(&self.key, s.private_key_inline.as_str())
-                {
-                    s.private_key_inline = Secret::new(plain);
-                }
-                for trigger in &mut s.triggers {
-                    if let Some(plain) = Self::decrypt_export(trigger.response.as_str()) {
-                        trigger.response = Secret::new(plain);
-                    } else if let Some(plain) =
-                        Self::try_decrypt(&self.key, trigger.response.as_str())
-                    {
-                        trigger.response = Secret::new(plain);
-                    }
+            if let Some(plain) = Self::decrypt_export(s.password.as_str()) {
+                s.password = Secret::new(plain);
+            } else if let Some(plain) = Self::try_decrypt(&self.key, s.password.as_str()) {
+                s.password = Secret::new(plain);
+            }
+            if let Some(plain) = Self::decrypt_export(s.private_key_inline.as_str()) {
+                s.private_key_inline = Secret::new(plain);
+            } else if let Some(plain) = Self::try_decrypt(&self.key, s.private_key_inline.as_str())
+            {
+                s.private_key_inline = Secret::new(plain);
+            }
+            for trigger in &mut s.triggers {
+                if let Some(plain) = Self::decrypt_export(trigger.response.as_str()) {
+                    trigger.response = Secret::new(plain);
+                } else if let Some(plain) = Self::try_decrypt(&self.key, trigger.response.as_str()) {
+                    trigger.response = Secret::new(plain);
                 }
             }
             let dup = self.cache.sessions.iter().any(|x| {
@@ -2291,7 +2253,7 @@ impl ConfigStore {
         Ok((added, skipped))
     }
 
-    /// Import sessions from a MeatShell or FinalShell JSON export file.
+    /// Import sessions from a file produced by [`Self::export_to`].
     pub fn import_from(&mut self, path: &Path) -> Result<(usize, usize)> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -2369,147 +2331,6 @@ mod tests {
             .unwrap()
             .iter()
             .any(|group| group == "production"));
-    }
-
-    /// Display order for these tests: default(d1, d2), alpha(a1), beta(b1, b2)
-    /// — "default" first, named groups alphabetically, stored Vec order
-    /// matching display order.
-    fn reorder_store() -> ConfigStore {
-        let mut store = temp_store();
-        store.cache.sessions = vec![
-            sample_session("d1"),
-            sample_session("d2"),
-            Session {
-                group: "alpha".into(),
-                ..sample_session("a1")
-            },
-            Session {
-                group: "beta".into(),
-                ..sample_session("b1")
-            },
-            Session {
-                group: "beta".into(),
-                ..sample_session("b2")
-            },
-        ];
-        // Empty collapse list = every group expanded.
-        store.cache.collapsed_session_groups = Some(Vec::new());
-        store
-    }
-
-    fn id_of(store: &ConfigStore, name: &str) -> String {
-        store
-            .sessions()
-            .iter()
-            .find(|s| s.name == name)
-            .expect("session present")
-            .id
-            .clone()
-    }
-
-    fn order_of(store: &ConfigStore) -> Vec<(String, String)> {
-        store
-            .sessions()
-            .iter()
-            .map(|s| (s.name.clone(), s.group.clone()))
-            .collect()
-    }
-
-    #[test]
-    fn reorder_session_swaps_same_group_neighbours() {
-        let mut store = reorder_store();
-        assert!(store.reorder_session(&id_of(&store, "d1"), 1));
-        assert_eq!(
-            order_of(&store)[..2],
-            [("d2".into(), "".into()), ("d1".into(), "".into())]
-        );
-    }
-
-    #[test]
-    fn reorder_session_hops_down_into_next_group_at_its_top() {
-        let mut store = reorder_store();
-        assert!(store.reorder_session(&id_of(&store, "d2"), 1));
-        assert_eq!(
-            order_of(&store)[1..4],
-            [
-                ("d2".into(), "alpha".into()),
-                ("a1".into(), "alpha".into()),
-                ("b1".into(), "beta".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn reorder_session_hops_up_into_previous_group_at_its_bottom() {
-        let mut store = reorder_store();
-        assert!(store.reorder_session(&id_of(&store, "a1"), -1));
-        assert_eq!(
-            order_of(&store)[..3],
-            [
-                ("d1".into(), "".into()),
-                ("d2".into(), "".into()),
-                ("a1".into(), "".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn reorder_session_skips_collapsed_groups() {
-        let mut store = reorder_store();
-        store.set_session_group_collapsed("alpha", true);
-        assert!(store.reorder_session(&id_of(&store, "d2"), 1));
-        assert_eq!(
-            order_of(&store)[1..4],
-            [
-                ("a1".into(), "alpha".into()),
-                ("d2".into(), "beta".into()),
-                ("b1".into(), "beta".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn reorder_session_lands_in_empty_explicit_folder() {
-        let mut store = reorder_store();
-        store.cache.groups.push("gamma".into());
-        assert!(store.reorder_session(&id_of(&store, "b2"), 1));
-        let last = store.sessions().iter().find(|s| s.name == "b2").unwrap();
-        assert_eq!(last.group, "gamma");
-    }
-
-    #[test]
-    fn reorder_session_keeps_emptied_implicit_group_as_folder() {
-        let mut store = reorder_store();
-        assert!(store.reorder_session(&id_of(&store, "a1"), 1));
-        assert_eq!(
-            store
-                .sessions()
-                .iter()
-                .find(|s| s.name == "a1")
-                .unwrap()
-                .group,
-            "beta"
-        );
-        assert!(store.groups().iter().any(|g| g == "alpha"));
-    }
-
-    #[test]
-    fn reorder_session_no_op_at_list_edges() {
-        let mut store = reorder_store();
-        assert!(!store.reorder_session(&id_of(&store, "d1"), -1));
-        assert!(!store.reorder_session(&id_of(&store, "b2"), 1));
-        assert_eq!(order_of(&store).len(), 5);
-    }
-
-    #[test]
-    fn reorder_session_cross_group_needs_a_collapse_list() {
-        let mut store = reorder_store();
-        store.cache.collapsed_session_groups = None;
-        // Same-group hops still work ...
-        assert!(store.reorder_session(&id_of(&store, "d1"), 1));
-        // ... but crossing a boundary does not: no list means every group
-        // renders collapsed (mirrors build_session_rows).
-        assert!(!store.reorder_session(&id_of(&store, "b2"), 1));
     }
 
     #[test]

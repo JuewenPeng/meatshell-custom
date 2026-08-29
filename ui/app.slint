@@ -26,7 +26,7 @@ import { QuickCommandPanel } from "quick_command_panel.slint";
 import { SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
 import { ProcWindow, ProcRow } from "proc_window.slint";
 import { SystemInfoWindow, SysInfoRow, SysMetricRow, SysNetRow } from "system_info_window.slint";
-import { InterfacePanel, OutputRuleItem } from "interface_panel.slint";
+import { InterfacePanel, OutputRuleItem, WslProfileInfo } from "interface_panel.slint";
 // Re-export so `slint::include_modules!` generates the detached Rust window types.
 export { ProcWindow, SystemInfoWindow }
 import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox, Palette } from "std-widgets.slint";
@@ -83,7 +83,6 @@ export struct TerminalState {
     sftp-sort-key: string,      // ""|"name"|"size"|"modified" (#248)
     sftp-sort-dir: int,         // 0 default / 1 asc / -1 desc (#248)
     sftp-available: bool,       // false for local/serial/telnet sessions
-    font-size: int,             // per-session zoom override in px (0 = follow window)
     tunnels: [TunnelInfo],      // runtime SSH tunnels (#206)
     sftp-collapsed: bool,       // SFTP panel minimised — per session (#v0.5)
     sftp-panel-height: length,  // SFTP panel extent (bottom dock) — per session
@@ -148,24 +147,6 @@ component IconBtn inherits Rectangle {
     in property <brush> icon-color: Theme.text-secondary;
     in property <string> tooltip;
     in property <bool> active;
-    // `breathe=true` makes the button add a separate pulse layer underneath
-    // the icon. Used by the Transfers button to signal in-flight transfers
-    // in the toolbar accent without breaking the icon's silhouette
-    // (#breathing-light). All other IconBtn instances leave this false.
-    //
-    // IMPORTANT — background structure split:
-    //   The previous implementation put `active`, hover and `breathe` into
-    //   one `background: ta.has-hover || root.active || root.breathe ? ...`
-    //   expression with a single `animate background { ...; iteration-count:
-    //   -1; ... }` declaration. That made every button with `active=true`
-    //   (which includes the toolbar Settings/Transfers buttons whenever
-    //   their popup is open) keep looping the pulse even though no transfer
-    //   was running, so the toolbar looked like it was always breathing.
-    //
-    //   To fix that, hover/active and breathe are now rendered on two
-    //   independent layers below, with animation only on the breathe layer
-    //   and only while `breathe=true` (#breathing-light).
-    in property <bool> breathe: false;
     callback clicked();
     property <bool> tooltip-visible;
     width: 26px;
@@ -216,33 +197,6 @@ component IconBtn inherits Rectangle {
             height: parent.height;
         }
     }
-
-    // (Removed) Combined background+animate declaration previously lived here:
-    //   background: ta.has-hover || root.active || root.breathe
-    //               ? Theme.bg-hover : transparent;
-    //   animate background {
-    //       duration: 1400ms;
-    //       iteration-count: -1;
-    //       direction: alternate;
-    //   }
-    // That single layer made every `active=true` button (toolbar Settings,
-    // Transfers, etc.) pulse forever as long as its popup was open. Replaced
-    // by the two static/breathing layers above so only `breathe=true`
-    // buttons animate, and they animate on a dedicated opacity layer
-    // (#breathing-light).
-    //
-    // (Removed) Previous breathe-layer declaration (#v8-accent-breathe):
-    //   if root.breathe : Rectangle {
-    //       ...
-    //       background: Theme.bg-hover;   // ← same colour as static-bg
-    //       opacity: 0.35;
-    //       animate opacity { duration: 1400ms; iteration-count: -1;
-    //                         direction: alternate; }
-    //   }
-    // Visually identical to "no pulse" once the popup was open, because the
-    // static-bg layer (above) is also painting `Theme.bg-hover`, so opacity
-    // ramps collapsed into a single grey. Retinted to `Theme.accent` so the
-    // pulse is visible against the grey backdrop in every state.
 }
 
 // One row in the keyboard-shortcuts dialog: a key chip + a description (#103).
@@ -398,24 +352,6 @@ export component AppWindow inherits Window {
     callback open-repo();                          // open the project's GitHub page
     in-out property <bool> shortcuts-open: false; // centered keyboard-shortcuts dialog (#103)
     in property <string> download-dir;      // preset SFTP download folder ("" = ask)
-    // Download (Transfers) popup size + resize-drag state. The popup is an
-    // embedded Rectangle (not a top-level window), so its resize is driven in
-    // pure Slint via a bottom-right grip — mirroring the interface dialog's
-    // #dl-resize grip so both popups share one resize affordance.
-    in-out property <length> dl-w: 350px;    // current popup width
-    in-out property <length> dl-h: 400px;    // current popup height
-    in-out property <bool> dl-resizing: false;
-    in-out property <length> dl-base-w;     // width captured when the drag started
-    in-out property <length> dl-base-h;     // height captured when the drag started
-    in-out property <length> dl-grab-x;     // pointer x (logical) when the drag started
-    in-out property <length> dl-grab-y;     // pointer y (logical) when the drag started
-    // `true` while at least one transfer is active or preparing; drives the
-    // breathing indicator on the toolbar Transfers button (#breathing-light).
-    in-out property <bool> has-active-transfers: false;
-    // Start an OS resize from the bottom-right grip; mirrors ProcWindow so the
-    // main window gets the same visual affordance when the OS frame is hidden
-    // (custom-titlebar mode on Windows/Linux, #main-resize-grip).
-    callback win-resize-se();
     // Process monitor is now a detachable top-level window (ProcWindow). Rust
     // shows/hides it in response to open-processes(); proc-list/proc-available
     // stay here as the live data source shared with that window (#23).
@@ -437,6 +373,14 @@ export component AppWindow inherits Window {
     in property <[SysInfoRow]> sys-filesystem-rows;
     // Command bar (#55): quick commands + history, fed from Rust.
     in property <[QuickCmd]> quick-commands;
+    in-out property <bool> cmd-bar-hidden: false;
+    callback set-cmd-bar-hidden(bool);
+    // Request channel used by a docked quick-command panel to fill the active
+    // terminal input without sending a command.
+    property <string> quick-command-fill-target: "";
+    property <string> quick-command-fill-text: "";
+    property <bool> quick-command-fill-send-enter: false;
+    property <int> quick-command-fill-token: 0;
     in-out property <bool> quick-commands-as-sidebar: false;
     callback set-quick-commands-as-sidebar(bool);
     in-out property <bool> quick-panel-collapsed: false;
@@ -611,6 +555,8 @@ export component AppWindow inherits Window {
     in-out property <bool> mcp-allow-commands: true;
     in-out property <bool> mcp-allow-file-transfers: true;
     callback set-mcp-permissions(bool, bool, bool, bool);
+    in property <[WslProfileInfo]> wsl-profiles;
+    in-out property <string> wsl-new-directory: "~";
     callback add-wsl-profile(string, string, string);
     callback remove-wsl-profile(string);
     callback pick-wsl-directory();
@@ -785,8 +731,9 @@ export component AppWindow inherits Window {
     in-out property <string> editor-content;  // text, two-way with the input
     in-out property <bool> editor-readonly;   // view = true, edit = false
     in-out property <bool> editor-dirty: false; // edited since load
-    // Opening the dynamic editor and focusing its TextInput in the same event
-    // can re-enter Windows AccessKit while it is registering the new item tree.
+    // Focus is deferred one UI turn when the dynamic editor opens. Focusing
+    // from the component's init handler can re-enter the Windows accessibility
+    // adapter while the new item tree is still being registered.
     property <bool> editor-focus-pending: false;
     in-out property <string> editor-line-numbers; // newline-joined "1..N" from Rust (#81)
     callback save-file();                     // Ctrl+S / Save button (edit only)
@@ -810,13 +757,7 @@ export component AppWindow inherits Window {
 
     // --- Session list ------------------------------------------------------
     in property <[SessionInfo]> sessions;
-    // Bumped by Rust whenever the sessions model is rebuilt wholesale
-    // (set_vec). A rebuild destroys the dragging row's pointer grab, so
-    // Welcome watches this to clear its shared drag state instead of
-    // leaving a card lifted forever.
-    in property <int> sessions-revision: 0;
     in-out property <string> host-search-query;
-    callback host-search-changed(string);
 
     // --- Tabs --------------------------------------------------------------
     in property <[TabInfo]> tabs;
@@ -905,6 +846,8 @@ export component AppWindow inherits Window {
     callback add-forward();
     callback update-forward(int /* index */, PortFwd);
     callback delete-forward(int /* index */);
+    // Expect/send login triggers for SSH sessions.
+    in-out property <[TriggerDraft]> dialog-triggers;
     callback add-trigger();
     callback update-trigger(int /* index */, TriggerDraft);
     callback delete-trigger(int /* index */);
@@ -912,7 +855,6 @@ export component AppWindow inherits Window {
     callback tab-selected(string);
     callback tab-closed(string);
     callback new-tab-clicked();
-    callback new-window-clicked();   // open another application window (#multi-window)
     callback tab-reorder(int /* from-index */, int /* dir: -1 left / +1 right */);
     // Per-pane tab actions (v0.5): the int is the pane (leaf) id.
     callback pane-tab-selected(int /* pane-id */, string /* tab-id */);
@@ -927,13 +869,6 @@ export component AppWindow inherits Window {
     callback pane-merge(int /* pane-id */);
     // Open another connection to the same session as `tab-id` (a new tab).
     callback tab-duplicate(string /* tab-id */);
-    // Rename an open session's tab. Request pre-fills the dialog (Rust reads
-    // the current title); submit applies the new display name.
-    callback tab-rename-request(string /* tab-id */);
-    callback rename-tab(string /* tab-id */, string /* new-title */);
-    in-out property <bool> tab-rename-open: false;
-    in-out property <string> tab-rename-id: "";
-    in-out property <string> tab-rename-value: "";
     // Drag-to-split (v0.5): cursor moved / dropped while dragging `tab-id`, in
     // pane-area coordinates. Rust hit-tests the pane + edge zone.
     callback tab-drag-move(string /* tab-id */, length /* x */, length /* y */);
@@ -950,24 +885,11 @@ export component AppWindow inherits Window {
     // Reports the pane-area size to Rust so it can flatten the split tree into
     // absolute pane / splitter rects. Fired whenever the content area resizes.
     callback content-resized(length /* w */, length /* h */);
-    // pane-area origin in window coordinates; tab drag-out converts
-    // drop points to global screen coordinates with this (#tab-detach).
-    out property <length> content-origin-x: pane-area.absolute-position.x;
-    out property <length> content-origin-y: pane-area.absolute-position.y;
     // Asks Rust to recompute the sidebar (status + resources) for whatever tab
     // is now active.  Fired on every active-tab change, UI- or code-driven.
     callback refresh-sidebar();
-    changed active-tab-id => {
-        root.refresh-sidebar();
-        // Closing the last session destroys the terminal's IME focus anchor
-        // and nothing else re-claims focus — with no focused item, Slint
-        // delivers keys nowhere, stranding the zen escape shortcut (and every
-        // window-level shortcut). Re-anchor on the shortcut scope whenever the
-        // welcome tab is active and no terminal remains.
-        if (root.active-tab-id == "welcome" && root.terminals.length == 0) {
-            shortcut-scope.focus();
-        }
-    }
+    callback host-search-changed(string);
+    changed active-tab-id => { root.refresh-sidebar(); }
 
     // Raw keystroke forwarding: Rust converts key+modifiers to PTY bytes.
     callback send-key(string /* tab-id */, string /* key */, bool /* ctrl */, bool /* alt */, bool /* shift */);
@@ -1075,7 +997,7 @@ export component AppWindow inherits Window {
     // Recompute search highlights for a session's visible screen.
     callback find-query-changed(string /* tab-id */, string /* query */);
     // Scroll a session's scrollback history by N lines (+ = up/older).
-    callback terminal-scroll(string /* tab-id */, float /* delta-lines (fractional, momentum-aware) */);
+    callback terminal-scroll(string /* tab-id */, int /* delta-lines */);
     // Wheel forwarded to an alt-screen program (#170): tab-id, dir (+1 up/-1 down), col, row.
     callback terminal-wheel(string, int, int, int);
     callback terminal-scroll-to(string /* tab-id */, int /* offset */); // scrollbar drag (#103)
@@ -1107,7 +1029,6 @@ export component AppWindow inherits Window {
             height: root.titlebar-inset;
             background: Theme.bg-topbar;
         }
-    }
 
         // Immersive custom title bar (#119) — only on frameless platforms
         // (Windows/Linux). App icon + name on the left, a draggable middle
@@ -1557,6 +1478,8 @@ export component AppWindow inherits Window {
                 compact: true;
                 dock-edge: root.welcome-sidebar-dock;
                 sessions: root.sessions;
+                search-query <=> root.host-search-query;
+                search-changed(query) => { root.host-search-changed(query); }
                 import-hint: root.ssh-import-hint;
                 drag-session-id: root.session-drag-id;
                 drop-session-id: root.session-drop-id;
@@ -1631,7 +1554,10 @@ export component AppWindow inherits Window {
                 dock-edge: root.quick-panel-dock;
                 run-command(command, send-enter) => {
                     if (root.active-tab-id != "" && root.active-tab-id != "welcome") {
-                        root.run-command(root.active-tab-id, command, send-enter);
+                        root.quick-command-fill-target = root.active-tab-id;
+                        root.quick-command-fill-text = command;
+                        root.quick-command-fill-send-enter = send-enter;
+                        root.quick-command-fill-token += 1;
                     }
                 }
                 toggle-group(group) => { root.toggle-quick-group(group); }
@@ -1797,7 +1723,10 @@ export component AppWindow inherits Window {
                 dock-edge: root.quick-panel-dock;
                 run-command(command, send-enter) => {
                     if (root.active-tab-id != "" && root.active-tab-id != "welcome") {
-                        root.run-command(root.active-tab-id, command, send-enter);
+                        root.quick-command-fill-target = root.active-tab-id;
+                        root.quick-command-fill-text = command;
+                        root.quick-command-fill-send-enter = send-enter;
+                        root.quick-command-fill-token += 1;
                     }
                 }
                 toggle-group(group) => { root.toggle-quick-group(group); }
@@ -1998,21 +1927,9 @@ export component AppWindow inherits Window {
                 }
                 root.panel-dragging = false;
             }
-                expand-second => {
-                    if (parent.combine-collapsed-tools) {
-                        root.sidebar-collapsed = false;
-                        root.set-sidebar-collapsed(false);
-                        if (root.quick-panel-open && root.quick-panel-dock == root.sidebar-dock) {
-                            root.quick-panel-collapsed = true;
-                        }
-                    } else {
-                        root.quick-panel-collapsed = false;
-                    }
-                }
-                expand-third => { root.quick-panel-collapsed = false; }
-            }
             toggle-collapse() => {
                 root.collapse-dock-group(root.sidebar-dock);
+            }
             }
         }
 
@@ -2145,508 +2062,413 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-            }
+        }
 
-            // Right side: tabs + content — positioned in the rect left after the
-            // sidebar is carved off its docked edge. Clipped so the terminal / SFTP
-            // panel can never bleed (visually or for clicks) onto a panel docked on
-            // the bottom or right (#dock).
-            quick-area := Rectangle {
-                x: root.sidebar-dock == "left" ? parent.sb-w + parent.sp : 0px;
-                y: root.sidebar-dock == "top"  ? parent.sb-h + parent.sp : 0px;
-                width:  root.sidebar-horizontal ? parent.width - parent.sb-w - parent.sp : parent.width;
-                height: root.sidebar-horizontal ? parent.height : parent.height - parent.sb-h - parent.sp - parent.bottom-strip-h;
-                clip: true;
-                property <bool> quick-horizontal:
-                    root.quick-panel-dock == "left" || root.quick-panel-dock == "right";
-                property <length> quick-w:
-                    !root.zen-mode && root.quick-panel-open && !root.quick-panel-collapsed ? root.quick-panel-width : 0px;
-                property <length> quick-h:
-                    !root.zen-mode && root.quick-panel-open && !root.quick-panel-collapsed ? root.quick-panel-height : 0px;
-                property <length> quick-sp:
-                    !root.zen-mode && root.quick-panel-open && !root.quick-panel-collapsed ? 4px : 0px;
-
-                central := Rectangle {
-                x: root.quick-panel-open && !root.quick-panel-collapsed && root.quick-panel-dock == "left"
-                    ? parent.quick-w + parent.quick-sp : 0px;
-                y: root.quick-panel-open && !root.quick-panel-collapsed && root.quick-panel-dock == "top"
-                    ? parent.quick-h + parent.quick-sp : 0px;
-                width: root.quick-panel-open && !root.quick-panel-collapsed && parent.quick-horizontal
-                    ? parent.width - parent.quick-w - parent.quick-sp : parent.width;
-                height: root.quick-panel-open && !root.quick-panel-collapsed && !parent.quick-horizontal
-                    ? parent.height - parent.quick-h - parent.quick-sp : parent.height;
-                clip: true;
-                // Split-pane area (v0.5): panes tile this rect; each pane has its own
-                // tab strip + active terminal / welcome. Rust flattens the split tree
-                // into `panes` for the size we report here.
-                pane-area := Rectangle {
-                    width: parent.width;
-                    height: parent.height;
-                    changed width => { root.content-resized(self.width, self.height); }
-                    changed height => { root.content-resized(self.width, self.height); }
-                for pane[pi] in root.panes : Rectangle {
-                    x: pane.x; y: pane.y; width: pane.w; height: pane.h;
-                    clip: true;
-                    VerticalLayout {
-                    spacing: 0;
-
-                    HorizontalLayout {
-                    spacing: 0;
-                    // (Collapsed resource panel now reserves its own ToolStrip slot in
-                    // `rest`, so the tab strip no longer needs a spacer for it.)
-                    TabBar {
-                        horizontal-stretch: 1;
-                        // Reserve room for the top-right toolbar icons that sit over
-                        // this row so tabs don't slide underneath them (#122).
-                        reserve-right: pane.reserve-right;
-                        show-new-tab: !root.welcome-as-sidebar;
-                        can-merge-pane: root.panes.length > 1;
-                        tabs: pane.tabs;
-                        active-id: pane.active-id;
-                        tab-selected(id) => { root.pane-tab-selected(pane.id, id); }
-                        tab-closed(id) => { root.pane-tab-closed(pane.id, id); }
-                        new-tab() => { root.pane-new-tab(pane.id); }
-                        tab-reorder(from-index, direction) => {
-                            root.pane-tab-reorder(pane.id, from-index, direction);
-                        }
-                        tab-split(id, dir) => { root.pane-split(pane.id, id, dir); }
-                        merge-pane() => { root.pane-merge(pane.id); }
-                        tab-duplicate(id) => { root.tab-duplicate(id); }
-                        tab-rename-request(id) => { root.tab-rename-request(id); }
-                        tab-drag-move(id, ax, ay) => {
-                            root.tab-drag-move(id,
-                                ax - pane-area.absolute-position.x,
-                                ay - pane-area.absolute-position.y);
-                        }
-                        tab-drag-drop(id, ax, ay) => {
-                            root.tab-drag-drop(id,
-                                ax - pane-area.absolute-position.x,
-                                ay - pane-area.absolute-position.y);
-                        }
-                    }
-                }
-
-                // Content area swaps based on active tab kind.
-                Rectangle {
-                    vertical-stretch: 1;
-                    background: Theme.bg-root;
-
-                    // Empty pane outside welcome-sidebar mode: keep a small hint for
-                    // rare empty panes, but do not cover the wallpaper when the
-                    // session list is already visible as a sidebar.
-                    if pane.tabs.length == 0 && !root.welcome-as-sidebar : Rectangle {
-                        width: parent.width;
-                        height: parent.height;
-                        Text {
-                            text: root.lang-en
-                                ? "Pick a session on the left to begin"
-                                : "从左侧选择一个会话开始";
-                            color: Theme.text-muted;
-                            font-size: Theme.fs-sm;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Welcome tab — fill the content area explicitly (some renderers
-                    // don't auto-fill, which spread the header/card apart) (#dock).
-                    if pane.active-id == "welcome" : Welcome {
-                        width: parent.width;
-                        height: parent.height;
-                        sessions: root.sessions;
-                        import-hint: root.ssh-import-hint;
-                        search-query <=> root.host-search-query;
-                        sessions-revision: root.sessions-revision;
-                        search-changed(query) => { root.host-search-changed(query); }
-                        new-session => { root.new-session-clicked(); }
-                        import-ssh-config => { root.import-ssh-config(); }
-                        connect-session(id) => { root.connect-session(id); }
-                        edit-session(id) => { root.edit-session(id); }
-                        duplicate-session(id) => { root.duplicate-session(id); }
-                        move-session(id, group) => { root.move-session(id, group); }
-                        reorder-session(id, dir) => { return root.reorder-session(id, dir); }
-                        reorder-end => { root.reorder-session-end(); }
-                        toggle-group(group) => { root.toggle-group(group); }
-                        new-group => {
-                            root.group-dialog-orig = "";
-                            root.group-dialog-name = "";
-                            root.group-dialog-error = "";
-                            root.group-dialog-open = true;
-                        }
-                        edit-group(name) => {
-                            root.group-dialog-orig = name;
-                            root.group-dialog-name = name;
-                            root.group-dialog-error = "";
-                            root.group-dialog-open = true;
-                        }
-                        delete-group(name) => { root.delete-group(name); }
-                        remove-session(id) => { root.remove-session(id); }
-                        cycle-tab(reverse) => { root.cycle-tab(reverse); }
-                    }
-
-                    // Terminal tabs — one TerminalView per terminal state. Only
-                    // the one matching `active-tab-id` is visible. Slint doesn't
-                    // allow nesting `if` directly inside a `for`, so we toggle
-                    // visibility instead and rely on the layout to overlap them.
-                    for term[i] in root.terminals : TerminalView {
-                        visible: term.id == pane.active-id;
-                        active: term.id == root.active-tab-id;
-                        zen-mode: root.zen-mode;
-                        width: term.id == pane.active-id ? parent.width : 0px;
-                        height: term.id == pane.active-id ? parent.height : 0px;
-                        tab-id: term.id;
-                        status-line: term.status;
-                        spans: term.spans;
-                        cursor-row: term.cursor-row;
-                        cursor-col: term.cursor-col;
-                        cursor-style: root.term-cursor-style;
-                        cursor-color: root.term-cursor-color;
-                        terminal-line-spacing: root.terminal-line-spacing;
-                        extra-paste-shortcuts-enabled: root.extra-paste-shortcuts-enabled;
-                        rows-used: term.rows-used;
-                        scroll-max: term.scroll-max;
-                        scroll-offset: term.scroll-offset;
-                        is-alt-screen: term.is-alt-screen;
-                        find-matches: term.find-matches;
-                        selection: term.selection;
-                        sftp-panel-height: term.sftp-panel-height;
-                        set-sftp-panel-height(v) => { root.set-pane-sftp-height(term.id, v); }
-                        sftp-panel-width: term.sftp-panel-width;
-                        set-sftp-panel-width(v) => { root.set-pane-sftp-width(term.id, v); }
-                        sftp-dock <=> root.sftp-dock;
-                        sftp-collapsed: term.sftp-collapsed;
-                        set-sftp-collapsed(v) => { root.set-pane-sftp-collapsed(term.id, v); }
-                        sftp-saved-height: term.sftp-saved-height;
-                        set-sftp-saved-height(v) => { root.set-pane-sftp-saved-height(term.id, v); }
-                        sftp-tree-width: root.sftp-tree-width;
-                        persist-sftp-tree-width(v) => { root.persist-sftp-tree-width(v); }
-                        sftp-path: term.sftp-path;
-                        sftp-entries: term.sftp-entries;
-                        sftp-status: term.sftp-status;
-                        sftp-loading: term.sftp-loading;
-                        sftp-tree-nodes: term.sftp-tree-nodes;
-                        sftp-transfer-targets: root.tabs;
-                        sftp-selected-count: term.sftp-selected-count;
-                        sftp-sort-key: term.sftp-sort-key;
-                        sftp-sort-dir: term.sftp-sort-dir;
-                        sftp-available: term.sftp-available;
-                        tunnels: term.tunnels;
-                        quick-commands: root.quick-commands;
-                        quick-sidebar-enabled: root.quick-commands-as-sidebar;
-                        quick-panel-docked: root.quick-panel-open;
-                        cmd-bar-hidden: root.cmd-bar-hidden;
-                        quick-external-command: root.quick-external-command;
-                        quick-external-send-enter: root.quick-external-send-enter;
-                        quick-external-sequence: root.quick-external-sequence;
-                        command-history: root.command-history;
-                        history-view: root.history-view;
-                        run-command(cmd, all) => { root.run-command(term.id, cmd, all); }
-                        copy-text(t) => { root.copy-text(t); }
-                        delete-history(i) => { root.delete-history(i); }
-                        delete-history-cmd(c) => { root.delete-history-cmd(c); }
-                        search-history(q) => { root.search-history(q); }
-                        manage-quick-commands() => {
-                            root.qcm-name = "";
-                            root.qcm-command = "";
-                            root.qcm-group = "";
-                            root.qcm-edit-index = -1;
-                            root.quick-cmd-manage-open = true;
-                        }
-                        quick-dock-drag-move(ax, ay) => {
-                            root.panel-dragging = true;
-                            root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
-                            root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
-                        }
-                        quick-dock-drag-end() => {
-                            if (root.dock-target != "") {
-                                root.quick-panel-dock = root.dock-target;
-                                root.quick-panel-open = true;
-                                root.quick-panel-collapsed = false;
-                                if (root.sidebar-dock == root.dock-target) {
-                                    root.sidebar-collapsed = true;
-                                    root.set-sidebar-collapsed(true);
-                                }
-                                if (root.welcome-as-sidebar
-                                        && root.welcome-sidebar-dock == root.dock-target) {
-                                    root.welcome-collapsed = true;
-                                    root.set-welcome-collapsed(true);
-                                }
-                            }
-                            root.panel-dragging = false;
-                        }
-                        toggle-quick-group(g) => { root.toggle-quick-group(g); }
-                        edit-quick-command(i) => { root.edit-quick-command(i); }
-                        duplicate-quick-command(i) => { root.duplicate-quick-command(i); }
-                        delete-quick-command(i) => { root.delete-quick-command(i); }
-                        move-quick-command(i, g) => { root.move-quick-command(i, g); }
-                        new-quick-group() => { root.qcg-orig = ""; root.qcg-name = ""; root.qcg-open = true; }
-                        rename-quick-group(g) => { root.qcg-orig = g; root.qcg-name = g; root.qcg-open = true; }
-                        delete-quick-group(g) => { root.delete-quick-group(g); }
-                        send-key(key, ctrl, alt, shift) => { root.send-key(term.id, key, ctrl, alt, shift) }
-                        diagnose-key-event(key, control, meta, alt, shift) => {
-                            root.diagnose-key-event(term.id, key, control, meta, alt, shift);
-                        }
-                        cycle-tab(reverse) => { root.cycle-tab(reverse); }
-                        new-window-key() => { root.new-window-clicked(); }
-                        zoom-key(direction, window-wide) => { root.zoom-term-font(term.id, direction, window-wide); }
-                        zen-key() => { root.toggle-zen-key(); }
-                        term-font-size-px: term.font-size > 0 ? term.font-size * 1.0 : root.term-font-size / 1px;
-                        terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
-                        sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
-                        sftp-download(path) => { root.sftp-download(term.id, path); }
-                        sftp-upload-clicked(dir, folder) => { root.sftp-upload-clicked(term.id, dir, folder); }
-                        sftp-refresh(path) => { root.sftp-refresh(term.id, path); }
-                        sftp-tree-expand(path) => { root.sftp-tree-expand(term.id, path); }
-                        sftp-toggle-select(i) => { root.sftp-toggle-select(term.id, i); }
-                        sftp-download-selected() => { root.sftp-download-selected(term.id); }
-                        sftp-copy-to-target(path, target) => { root.sftp-copy-to-target(term.id, path, target); }
-                        sftp-copy-selected-to-target(target) => { root.sftp-copy-selected-to-target(term.id, target); }
-                        // Confirm before deleting the checked entries (#100), reusing
-                        // the delete-confirm dialog in batch mode.
-                        sftp-delete-selected() => {
-                            root.confirm-delete-tab = term.id;
-                            root.confirm-delete-batch = true;
-                            root.confirm-delete-path = root.lang-en ? "the selected items" : "选中的项目";
-                            root.confirm-delete-open = true;
-                        }
-                        // Gate delete behind an in-app confirmation (#28): stash the
-                        // target and open the modal; the real delete fires on confirm.
-                        sftp-delete(path) => {
-                            root.confirm-delete-tab = term.id;
-                            root.confirm-delete-path = path;
-                            root.confirm-delete-open = true;
-                        }
-                        sftp-view(path) => { root.sftp-view(term.id, path); }
-                        sftp-edit(path) => { root.sftp-edit(term.id, path); }
-                        sftp-open-external(path) => { root.sftp-open-external(term.id, path); }
-                        sftp-edit-external(path) => { root.sftp-edit-external(term.id, path); }
-                        sftp-sort-request(key) => { root.sftp-sort-request(term.id, key); }
-                        sftp-clear-sort() => { root.sftp-clear-sort(term.id); }
-                        tunnel-add(name, kind, bind, bind-port, host, host-port) => {
-                            root.tunnel-add(term.id, name, kind, bind, bind-port, host, host-port);
-                        }
-                        tunnel-stop(id) => { root.tunnel-stop(term.id, id); }
-                        // #69 context-menu extensions → shared prompt dialog.
-                        sftp-rename-request(path, name) => {
-                            root.sftp-prompt-kind = "rename";
-                            root.sftp-prompt-tab = term.id;
-                            root.sftp-prompt-target = path;
-                            root.sftp-prompt-value = name;
-                            root.sftp-prompt-open = true;
-                        }
-                        sftp-chmod-request(path, name, mode) => {
-                            root.sftp-chmod-open(term.id, path, name, mode);
-                        }
-                        sftp-copy-path(path) => { root.sftp-copy-path(path); }
-                        sftp-new-folder(dir) => {
-                            root.sftp-prompt-kind = "mkdir";
-                            root.sftp-prompt-tab = term.id;
-                            root.sftp-prompt-target = dir;
-                            root.sftp-prompt-value = "";
-                            root.sftp-prompt-open = true;
-                        }
-                        sftp-new-file(dir) => {
-                            root.sftp-prompt-kind = "touch";
-                            root.sftp-prompt-tab = term.id;
-                            root.sftp-prompt-target = dir;
-                            root.sftp-prompt-value = "";
-                            root.sftp-prompt-open = true;
-                        }
-                        paste-from-clipboard() => { root.paste-from-clipboard(term.id); }
-                        copy-terminal-text() => { root.copy-terminal-text(term.id); }
-                        clear-terminal() => { root.clear-terminal(term.id); }
-                        find-query-changed(q) => { root.find-query-changed(term.id, q); }
-                        terminal-scroll(d) => { root.terminal-scroll(term.id, d); }
-                        terminal-wheel(d, c, r) => { root.terminal-wheel(term.id, d, c, r); }
-                        terminal-scroll-to(o) => { root.terminal-scroll-to(term.id, o); }
-                        select-start(r, c, ctrl, shift) => { root.term-select-start(term.id, r, c, ctrl, shift); }
-                        select-update(r, c) => { root.term-select-update(term.id, r, c); }
-                        select-end() => { root.term-select-end(term.id); }
-                        select-word(r, c) => { root.term-select-word(term.id, r, c); }
-                        select-autoscroll(dir) => { root.term-select-autoscroll(term.id, dir); }
-                    }
-
-                    // Windows may show the terminal model being reconstructed when
-                    // restoring from minimize (#183). Briefly cover the terminal area
-                    // until the restore repaint settles; the underlying PTY/buffer is
-                    // untouched.
-                    if root.terminal-restore-cover && pane.active-id != "welcome" && pane.tabs.length > 0 : Rectangle {
-                        width: parent.width;
-                        height: parent.height;
-                        background: Theme.term-bg;
-                    }
-                }
-                }
-                }
-
-                // Draggable splitters between panes. Single pane => the model is
-                // empty, so this renders nothing. The handle is a thin 6px bar but its
-                // TouchArea reaches ±5px beyond so it's easy to grab.
-                for sp[si] in root.splitters : Rectangle {
-                    x: sp.x; y: sp.y; width: sp.w; height: sp.h;
-                    // A tab dropped on a pane boundary leaves the pointer hovering
-                    // over this splitter. Highlight only while the splitter itself
-                    // is being dragged, otherwise that hover looks like a stuck
-                    // full-height tab insertion caret.
-                    background: sp-ta.pressed ? Theme.accent : Theme.border-strong;
-                    animate background { duration: 100ms; }
-                    sp-ta := TouchArea {
-                        x: sp.vertical ? -5px : 0px;
-                        y: sp.vertical ? 0px : -5px;
-                        width: sp.vertical ? parent.width + 10px : parent.width;
-                        height: sp.vertical ? parent.height : parent.height + 10px;
-                        mouse-cursor: sp.vertical ? ew-resize : ns-resize;
-                        moved => {
-                            if (self.pressed) {
-                                root.splitter-drag(sp.split-id,
-                                    sp.vertical ? sp.x - 5px + self.mouse-x
-                                                : sp.y - 5px + self.mouse-y,
-                                    sp.vertical);
-                            }
-                        }
-                    }
-                }
-
-                // Drag-to-split drop-zone highlight (v0.5). Purely visual (no
-                // TouchArea) so it never eats the drag; Rust sets the rect.
-                if root.drag-active : Rectangle {
-                    x: root.drag-hl-x;
-                    y: root.drag-hl-y;
-                    width: root.drag-hl-w;
-                    height: root.drag-hl-h;
-                    background: Theme.accent.with-alpha(0.22);
-                    border-width: 2px;
-                    border-color: Theme.accent;
-                    border-radius: Theme.radius-sm;
-                }
-                }
-            }
-
-            if root.quick-panel-open && !root.quick-panel-collapsed : QuickDockPanel {
-                x: root.quick-panel-dock == "right" ? parent.width - parent.quick-w : 0px;
-                y: root.quick-panel-dock == "bottom" ? parent.height - parent.quick-h : 0px;
-                width: parent.quick-horizontal ? parent.quick-w : parent.width;
-                height: parent.quick-horizontal ? parent.height : parent.quick-h;
-                commands: root.quick-commands;
-                dock-edge: root.quick-panel-dock;
-                activate(command, send-enter) => {
-                    root.quick-external-command = command;
-                    root.quick-external-send-enter = send-enter;
-                    root.quick-external-sequence += 1;
-                }
-                toggle-group(group) => { root.toggle-quick-group(group); }
-                manage => {
-                    root.qcm-name = "";
-                    root.qcm-command = "";
-                    root.qcm-group = "";
-                    root.qcm-edit-index = -1;
-                    root.quick-cmd-manage-open = true;
-                }
-                close => { root.quick-panel-collapsed = true; }
-                dock-drag-move(ax, ay) => {
-                    root.panel-dragging = true;
-                    root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
-                    root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
-                }
-                dock-drag-end => {
-                    if (root.dock-target != "") {
-                        root.quick-panel-dock = root.dock-target;
-                        if (root.sidebar-dock == root.dock-target) {
-                            root.sidebar-collapsed = true;
-                            root.set-sidebar-collapsed(true);
-                        }
-                        if (root.welcome-as-sidebar
-                                && root.welcome-sidebar-dock == root.dock-target) {
-                            root.welcome-collapsed = true;
-                            root.set-welcome-collapsed(true);
-                        }
-                    }
-                    root.panel-dragging = false;
-                }
-            }
-
-            Rectangle {
-                visible: root.quick-panel-open && !root.quick-panel-collapsed;
-                x: root.quick-panel-dock == "left" ? parent.quick-w
-                 : root.quick-panel-dock == "right" ? parent.width - parent.quick-w - 4px
-                 : 0px;
-                y: root.quick-panel-dock == "top" ? parent.quick-h
-                 : root.quick-panel-dock == "bottom" ? parent.height - parent.quick-h - 4px
-                 : 0px;
-                width: parent.quick-horizontal ? 4px : parent.width;
-                height: parent.quick-horizontal ? parent.height : 4px;
-                background: quick-split-ta.has-hover ? Theme.accent : Theme.border-subtle;
-                quick-split-ta := TouchArea {
-                    x: quick-area.quick-horizontal ? -4px : 0px;
-                    y: quick-area.quick-horizontal ? 0px : -4px;
-                    width: quick-area.quick-horizontal ? 12px : parent.width;
-                    height: quick-area.quick-horizontal ? parent.height : 12px;
-                    mouse-cursor: quick-area.quick-horizontal ? ew-resize : ns-resize;
-                    moved => {
-                        if (self.pressed) {
-                            if (quick-area.quick-horizontal) {
-                                root.quick-panel-width = clamp(
-                                    root.quick-panel-dock == "right"
-                                        ? quick-area.width - ((self.absolute-position.x + self.mouse-x)
-                                            - quick-area.absolute-position.x)
-                                        : (self.absolute-position.x + self.mouse-x)
-                                            - quick-area.absolute-position.x,
-                                    180px, max(200px, quick-area.width - 240px));
-                            } else {
-                                root.quick-panel-height = clamp(
-                                    root.quick-panel-dock == "bottom"
-                                        ? quick-area.height - ((self.absolute-position.y + self.mouse-y)
-                                            - quick-area.absolute-position.y)
-                                        : (self.absolute-position.y + self.mouse-y)
-                                            - quick-area.absolute-position.y,
-                                    120px, max(140px, quick-area.height - 160px));
-                            }
-                        }
-                    }
-                }
-            }
-            }
-            }
-
-            // (Resource collapse now uses a ToolStrip inside `rest`, above.)
-
-            // Drag-to-dock snap overlay — four edge zones; the one under the cursor
-            // (root.dock-target) lights up. Purely visual (no TouchArea) so the
-            // header's drag keeps receiving move events (#dock).
-            if root.panel-dragging : Rectangle {
-                x: 0; y: 0;
+        // Right side: tabs + content — positioned in the rect left after the
+        // sidebar is carved off its docked edge. Clipped so the terminal / SFTP
+        // panel can never bleed (visually or for clicks) onto a panel docked on
+        // the bottom or right (#dock).
+        central := Rectangle {
+            x: dock-area.dock-left-taken;
+            y: dock-area.dock-top-taken;
+            width: max(0px, parent.width - dock-area.dock-left-taken - dock-area.dock-right-taken);
+            height: max(0px, parent.height - dock-area.dock-top-taken - dock-area.dock-bottom-taken);
+            clip: true;
+            // Split-pane area (v0.5): panes tile this rect; each pane has its own
+            // tab strip + active terminal / welcome. Rust flattens the split tree
+            // into `panes` for the size we report here.
+            pane-area := Rectangle {
                 width: parent.width;
                 height: parent.height;
-                Rectangle {   // left zone
-                    x: 0; y: 0; width: parent.width * 0.22; height: parent.height;
-                    background: root.dock-target == "left"
-                        ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
-                    border-width: root.dock-target == "left" ? 2px : 0px;
-                    border-color: Theme.accent;
-                }
-                Rectangle {   // right zone
-                    x: parent.width * 0.78; y: 0; width: parent.width * 0.22; height: parent.height;
-                    background: root.dock-target == "right"
-                        ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
-                    border-width: root.dock-target == "right" ? 2px : 0px;
-                    border-color: Theme.accent;
-                }
-                Rectangle {   // top zone
-                    x: 0; y: 0; width: parent.width; height: parent.height * 0.22;
-                    background: root.dock-target == "top"
-                        ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
-                    border-width: root.dock-target == "top" ? 2px : 0px;
-                    border-color: Theme.accent;
-                }
-                Rectangle {   // bottom zone
-                    x: 0; y: parent.height * 0.78; width: parent.width; height: parent.height * 0.22;
-                    background: root.dock-target == "bottom"
-                        ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
-                    border-width: root.dock-target == "bottom" ? 2px : 0px;
-                    border-color: Theme.accent;
+                changed width => { root.content-resized(self.width, self.height); }
+                changed height => { root.content-resized(self.width, self.height); }
+            for pane[pi] in root.panes : Rectangle {
+                x: pane.x; y: pane.y; width: pane.w; height: pane.h;
+                clip: true;
+                VerticalLayout {
+                spacing: 0;
+
+                HorizontalLayout {
+                spacing: 0;
+                // (Collapsed resource panel now reserves its own ToolStrip slot in
+                // `rest`, so the tab strip no longer needs a spacer for it.)
+                TabBar {
+                    horizontal-stretch: 1;
+                    // Reserve room for the top-right toolbar icons that sit over
+                    // this row so tabs don't slide underneath them (#122).
+                    reserve-right: pane.reserve-right;
+                    show-new-tab: !root.welcome-as-sidebar;
+                    can-merge-pane: root.panes.length > 1;
+                    tabs: pane.tabs;
+                    active-id: pane.active-id;
+                    tab-selected(id) => { root.pane-tab-selected(pane.id, id); }
+                    tab-closed(id) => { root.pane-tab-closed(pane.id, id); }
+                    new-tab() => { root.pane-new-tab(pane.id); }
+                    tab-reorder(from-index, direction) => {
+                        root.pane-tab-reorder(pane.id, from-index, direction);
+                    }
+                    tab-split(id, dir) => { root.pane-split(pane.id, id, dir); }
+                    merge-pane() => { root.pane-merge(pane.id); }
+                    tab-duplicate(id) => { root.tab-duplicate(id); }
+                    tab-drag-move(id, ax, ay) => {
+                        root.tab-drag-move(id,
+                            ax - pane-area.absolute-position.x,
+                            ay - pane-area.absolute-position.y);
+                    }
+                    tab-drag-drop(id, ax, ay) => {
+                        root.tab-drag-drop(id,
+                            ax - pane-area.absolute-position.x,
+                            ay - pane-area.absolute-position.y);
+                    }
                 }
             }
+
+            // Content area swaps based on active tab kind.
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.term-bg;
+
+                // Empty pane outside welcome-sidebar mode: keep a small hint for
+                // rare empty panes, but do not cover the wallpaper when the
+                // session list is already visible as a sidebar.
+                if pane.tabs.length == 0 && !root.welcome-as-sidebar : Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    Text {
+                        text: root.lang-en
+                            ? "Pick a session on the left to begin"
+                            : "从左侧选择一个会话开始";
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-sm;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Welcome tab — fill the content area explicitly (some renderers
+                // don't auto-fill, which spread the header/card apart) (#dock).
+                if pane.active-id == "welcome" : Welcome {
+                    width: parent.width;
+                    height: parent.height;
+                    sessions: root.sessions;
+                    search-query <=> root.host-search-query;
+                    search-changed(query) => { root.host-search-changed(query); }
+                    import-hint: root.ssh-import-hint;
+                    drag-session-id: root.session-drag-id;
+                    drop-session-id: root.session-drop-id;
+                    drop-before: root.session-drop-before;
+                    session-reorder-preview(id, idx, dy) => { root.session-reorder-preview(id, idx, dy); }
+                    session-reorder-drop(id) => { root.session-reorder-drop(id); }
+                    session-reorder-cancel => { root.session-reorder-cancel(); }
+                    new-session => { root.new-session-clicked(); }
+                    import-ssh-config => { root.import-ssh-config(); }
+                    connect-session(id) => { root.connect-session(id); }
+                    edit-session(id) => { root.edit-session(id); }
+                    duplicate-session(id) => { root.duplicate-session(id); }
+                    move-session(id, group) => { root.move-session(id, group); }
+                    toggle-group(group) => { root.toggle-group(group); }
+                    new-group => {
+                        root.group-dialog-orig = "";
+                        root.group-dialog-name = "";
+                        root.group-dialog-open = true;
+                    }
+                    edit-group(name) => {
+                        root.group-dialog-orig = name;
+                        root.group-dialog-name = name;
+                        root.group-dialog-open = true;
+                    }
+                    delete-group(name) => { root.delete-group(name); }
+                    remove-session(id) => { root.remove-session(id); }
+                    cycle-tab(reverse) => { root.cycle-tab(reverse); }
+                }
+
+                // Terminal tabs — one TerminalView per terminal state. Only
+                // the one matching `active-tab-id` is visible. Slint doesn't
+                // allow nesting `if` directly inside a `for`, so we toggle
+                // visibility instead and rely on the layout to overlap them.
+                for term[i] in root.terminals : TerminalView {
+                    visible: term.id == pane.active-id;
+                    width: term.id == pane.active-id ? parent.width : 0px;
+                    height: term.id == pane.active-id ? parent.height : 0px;
+                    tab-id: term.id;
+                    zen-mode: root.zen-mode;
+                    status-line: term.status;
+                    show-status-bar: root.show-terminal-status-bar;
+                    spans: term.spans;
+                    cursor-row: term.cursor-row;
+                    cursor-col: term.cursor-col;
+                    cursor-style: root.term-cursor-style;
+                    cursor-color: root.term-cursor-auto ? Theme.term-fg : root.term-cursor-color;
+                    cursor-opacity: root.term-cursor-opacity;
+                    rows-used: term.rows-used;
+                    scroll-max: term.scroll-max;
+                    scroll-offset: term.scroll-offset;
+                    is-alt-screen: term.is-alt-screen;
+                    find-matches: term.find-matches;
+                    selection: term.selection;
+                    ctrl-c-copy: root.terminal-ctrl-c-copy;
+                    lang-en: root.lang-en;
+                    cmd-bar-hidden: root.cmd-bar-hidden;
+                    quick-command-fill-target: root.quick-command-fill-target;
+                    quick-command-fill-text: root.quick-command-fill-text;
+                    quick-command-fill-send-enter: root.quick-command-fill-send-enter;
+                    quick-command-fill-token: root.quick-command-fill-token;
+                    sftp-panel-height: term.sftp-panel-height;
+                    set-sftp-panel-height(v) => { root.set-pane-sftp-height(term.id, v); }
+                    sftp-panel-width: term.sftp-panel-width;
+                    set-sftp-panel-width(v) => { root.set-pane-sftp-width(term.id, v); }
+                    sftp-dock <=> root.sftp-dock;
+                    sftp-collapsed: term.sftp-collapsed;
+                    set-sftp-collapsed(v) => { root.set-pane-sftp-collapsed(term.id, v); }
+                    sftp-saved-height: term.sftp-saved-height;
+                    set-sftp-saved-height(v) => { root.set-pane-sftp-saved-height(term.id, v); }
+                    sftp-path: term.sftp-path;
+                    sftp-entries: term.sftp-entries;
+                    sftp-status: term.sftp-status;
+                    sftp-loading: term.sftp-loading;
+                    sftp-tree-nodes: term.sftp-tree-nodes;
+                    sftp-move-tree-nodes: term.sftp-move-tree-nodes;
+                    sftp-tree-focus-index: term.sftp-tree-focus-index;
+                    sftp-move-tree-focus-index: term.sftp-move-tree-focus-index;
+                    sftp-transfer-targets: root.tabs;
+                    sftp-selected-count: term.sftp-selected-count;
+                    sftp-restore-selected-row: term.sftp-restore-selected-row;
+                    sftp-restore-viewport-y: term.sftp-restore-viewport-y;
+                    sftp-has-restore-viewport: term.sftp-has-restore-viewport;
+                    sftp-list-scroll-token: term.sftp-list-scroll-token;
+                    sftp-list-scroll-mode: term.sftp-list-scroll-mode;
+                    sftp-sort-key: term.sftp-sort-key;
+                    sftp-sort-dir: term.sftp-sort-dir;
+                    sftp-available: term.sftp-available;
+                    sftp-zebra-rows: root.sftp-zebra-rows;
+                    tunnels: term.tunnels;
+                    quick-commands: root.quick-commands;
+                    quick-commands-sidebar: root.quick-commands-as-sidebar;
+                    command-history: root.command-history;
+                    history-view: root.history-view;
+                    run-command(cmd, all) => { root.run-command(term.id, cmd, all); }
+                    quick-command-fill-consumed() => {
+                        root.quick-command-fill-target = "";
+                    }
+                    copy-text(t) => { root.copy-text(t); }
+                    delete-history(i) => { root.delete-history(i); }
+                    delete-history-cmd(c) => { root.delete-history-cmd(c); }
+                    search-history(q) => { root.search-history(q); }
+                    manage-quick-commands() => {
+                        root.qcm-name = "";
+                        root.qcm-command = "";
+                        root.qcm-group = "";
+                        root.qcm-edit-index = -1;
+                        root.quick-cmd-manage-open = true;
+                    }
+                    toggle-quick-group(g) => { root.toggle-quick-group(g); }
+                    edit-quick-command(i) => { root.edit-quick-command(i); }
+                    duplicate-quick-command(i) => { root.duplicate-quick-command(i); }
+                    delete-quick-command(i) => { root.delete-quick-command(i); }
+                    move-quick-command(i, g) => { root.move-quick-command(i, g); }
+                    new-quick-group() => { root.qcg-orig = ""; root.qcg-name = ""; root.qcg-open = true; }
+                    rename-quick-group(g) => { root.qcg-orig = g; root.qcg-name = g; root.qcg-open = true; }
+                    delete-quick-group(g) => { root.delete-quick-group(g); }
+                    send-key(key, ctrl, alt, shift) => { root.send-key(term.id, key, ctrl, alt, shift) }
+                    cycle-tab(reverse) => { root.cycle-tab(reverse); }
+                    terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
+                    sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
+                    sftp-open-path(path) => { root.sftp-open-path(term.id, path); }
+                    sftp-remember-list-position(path, viewport-y) => { root.sftp-remember-list-position(term.id, path, viewport-y); }
+                    sftp-navigate-back() => { root.sftp-navigate-back(term.id); }
+                    sftp-navigate-forward() => { root.sftp-navigate-forward(term.id); }
+                    sftp-download(path) => { root.sftp-download(term.id, path); }
+                    sftp-archive-download(path) => { root.sftp-archive-download(term.id, path); }
+                    sftp-upload-clicked(dir, folder) => { root.sftp-upload-clicked(term.id, dir, folder); }
+                    sftp-refresh(path) => { root.sftp-refresh(term.id, path); }
+                    sftp-load-more() => { root.sftp-load-more(term.id); }
+                    sftp-load-all() => { root.sftp-load-all(term.id); }
+                    sftp-sort(column, ascending) => { root.sftp-sort(term.id, column, ascending); }
+                    sftp-tree-expand(path, was-expanded) => { root.sftp-tree-expand(term.id, path, was-expanded); }
+                    sftp-move-tree-expand(path, was-expanded) => { root.sftp-move-tree-expand(term.id, path, was-expanded); }
+                    sftp-tree-probe(path) => { root.sftp-tree-probe(term.id, path); }
+                    sftp-tree-load-more(path) => { root.sftp-tree-load-more(term.id, path); }
+                    sftp-move-tree-load-more(path) => { root.sftp-move-tree-load-more(term.id, path); }
+                    sftp-tree-reveal(path) => { root.sftp-tree-reveal(term.id, path); }
+                    sftp-move-tree-reveal(path) => { root.sftp-move-tree-reveal(term.id, path); }
+                    sftp-toggle-select(i) => { root.sftp-toggle-select(term.id, i); }
+                    sftp-select-single(i) => { root.sftp-select-single(term.id, i); }
+                    sftp-select-range(a, i, keep) => { root.sftp-select-range(term.id, a, i, keep); }
+                    sftp-select-all() => { root.sftp-select-all(term.id); }
+                    sftp-download-selected() => { root.sftp-download-selected(term.id); }
+                    sftp-archive-download-selected() => { root.sftp-archive-download-selected(term.id); }
+                    sftp-copy-to-target(path, target) => { root.sftp-copy-to-target(term.id, path, target); }
+                    sftp-copy-selected-to-target(target) => { root.sftp-copy-selected-to-target(term.id, target); }
+                    // Confirm before deleting the checked entries (#100), reusing
+                    // the delete-confirm dialog in batch mode.
+                    sftp-delete-selected() => {
+                        root.confirm-delete-tab = term.id;
+                        root.confirm-delete-batch = true;
+                        root.confirm-delete-path = root.lang-en
+                            ? "Selected " + term.sftp-selected-count + " item(s)"
+                            : "已选择 " + term.sftp-selected-count + " 个项目";
+                        root.confirm-delete-open = true;
+                    }
+                    // Gate delete behind an in-app confirmation (#28): stash the
+                    // target and open the modal; the real delete fires on confirm.
+                    sftp-delete(path) => {
+                        root.confirm-delete-tab = term.id;
+                        root.confirm-delete-batch = false;
+                        root.confirm-delete-path = path;
+                        root.confirm-delete-open = true;
+                    }
+                    sftp-view(path) => { root.sftp-view(term.id, path); }
+                    sftp-edit(path) => { root.sftp-edit(term.id, path); }
+                    sftp-open-external(path) => { root.sftp-open-external(term.id, path); }
+                    sftp-edit-external(path) => { root.sftp-edit-external(term.id, path); }
+                    tunnel-add(name, kind, bind, bind-port, host, host-port) => {
+                        root.tunnel-add(term.id, name, kind, bind, bind-port, host, host-port);
+                    }
+                    tunnel-stop(id) => { root.tunnel-stop(term.id, id); }
+                    clear-failed-tunnels() => { root.clear-failed-tunnels(term.id); }
+                    // #69 context-menu extensions → shared prompt dialog.
+                    sftp-rename-request(path, name) => {
+                        root.sftp-prompt-kind = "rename";
+                        root.sftp-prompt-tab = term.id;
+                        root.sftp-prompt-target = path;
+                        root.sftp-prompt-value = name;
+                        root.sftp-prompt-open = true;
+                    }
+                    sftp-rename-submit(path, name) => {
+                        root.sftp-prompt-submit(term.id, "rename", path, name);
+                    }
+                    sftp-chmod-request(path, name, mode) => {
+                        root.sftp-chmod-open(term.id, path, name, mode);
+                    }
+                    sftp-copy-path(path) => { root.sftp-copy-path(path); }
+                    sftp-new-folder(dir) => {
+                        root.sftp-prompt-kind = "mkdir";
+                        root.sftp-prompt-tab = term.id;
+                        root.sftp-prompt-target = dir;
+                        root.sftp-prompt-value = "";
+                        root.sftp-prompt-open = true;
+                    }
+                    sftp-new-file(dir) => {
+                        root.sftp-prompt-kind = "touch";
+                        root.sftp-prompt-tab = term.id;
+                        root.sftp-prompt-target = dir;
+                        root.sftp-prompt-value = "";
+                        root.sftp-prompt-open = true;
+                    }
+                    sftp-move-submit(source, target) => {
+                        root.sftp-move-submit(term.id, source, target);
+                    }
+                    sftp-move-selected-submit(target) => {
+                        root.sftp-move-selected-submit(term.id, target);
+                    }
+                    paste-from-clipboard() => { root.paste-from-clipboard(term.id); }
+                    copy-terminal-text() => { root.copy-terminal-text(term.id); }
+                    clear-terminal() => { root.clear-terminal(term.id); }
+                    find-query-changed(q) => { root.find-query-changed(term.id, q); }
+                    terminal-scroll(d) => { root.terminal-scroll(term.id, d); }
+                    terminal-wheel(d, c, r) => { root.terminal-wheel(term.id, d, c, r); }
+                    terminal-scroll-to(o) => { root.terminal-scroll-to(term.id, o); }
+                    select-start(r, c, ctrl, shift) => { root.term-select-start(term.id, r, c, ctrl, shift); }
+                    select-update(r, c) => { root.term-select-update(term.id, r, c); }
+                    select-end() => { root.term-select-end(term.id); }
+                    select-autoscroll(dir) => { root.term-select-autoscroll(term.id, dir); }
+                }
+
+                // Windows may show the terminal model being reconstructed when
+                // restoring from minimize (#183). Briefly cover the terminal area
+                // until the restore repaint settles; the underlying PTY/buffer is
+                // untouched.
+                if root.terminal-restore-cover && pane.active-id != "welcome" && pane.tabs.length > 0 : Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    background: Theme.term-bg;
+                }
+
+            }
+            }
+            }
+
+            // Draggable splitters between panes. Single pane => the model is
+            // empty, so this renders nothing. The handle is a thin 6px bar but its
+            // TouchArea reaches ±5px beyond so it's easy to grab.
+            for sp[si] in root.splitters : Rectangle {
+                x: sp.x; y: sp.y; width: sp.w; height: sp.h;
+                background: sp-ta.has-hover || sp-ta.pressed ? Theme.accent : Theme.border-strong;
+                animate background { duration: 100ms; }
+                sp-ta := TouchArea {
+                    x: sp.vertical ? -5px : 0px;
+                    y: sp.vertical ? 0px : -5px;
+                    width: sp.vertical ? parent.width + 10px : parent.width;
+                    height: sp.vertical ? parent.height : parent.height + 10px;
+                    mouse-cursor: sp.vertical ? ew-resize : ns-resize;
+                    moved => {
+                        if (self.pressed) {
+                            root.splitter-drag(sp.split-id,
+                                sp.vertical ? sp.x - 5px + self.mouse-x
+                                            : sp.y - 5px + self.mouse-y,
+                                sp.vertical);
+                        }
+                    }
+                }
+            }
+
+            // Drag-to-split drop-zone highlight (v0.5). Purely visual (no
+            // TouchArea) so it never eats the drag; Rust sets the rect.
+            if root.drag-active : Rectangle {
+                x: root.drag-hl-x;
+                y: root.drag-hl-y;
+                width: root.drag-hl-w;
+                height: root.drag-hl-h;
+                background: Theme.accent.with-alpha(0.22);
+                border-width: 2px;
+                border-color: Theme.accent;
+                border-radius: Theme.radius-sm;
+            }
+            }
         }
+        }
+
+        // (Resource collapse now uses a ToolStrip inside `rest`, above.)
+
+        // Drag-to-dock snap overlay — four edge zones; the one under the cursor
+        // (root.dock-target) lights up. Purely visual (no TouchArea) so the
+        // header's drag keeps receiving move events (#dock).
+        if root.panel-dragging : Rectangle {
+            x: 0; y: 0;
+            width: parent.width;
+            height: parent.height;
+            Rectangle {   // left zone
+                x: 0; y: 0; width: parent.width * 0.22; height: parent.height;
+                background: root.dock-target == "left"
+                    ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.dock-target == "left" ? 2px : 0px;
+                border-color: Theme.accent;
+            }
+            Rectangle {   // right zone
+                x: parent.width * 0.78; y: 0; width: parent.width * 0.22; height: parent.height;
+                background: root.dock-target == "right"
+                    ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.dock-target == "right" ? 2px : 0px;
+                border-color: Theme.accent;
+            }
+            Rectangle {   // top zone
+                x: 0; y: 0; width: parent.width; height: parent.height * 0.22;
+                background: root.dock-target == "top"
+                    ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.dock-target == "top" ? 2px : 0px;
+                border-color: Theme.accent;
+            }
+            Rectangle {   // bottom zone
+                x: 0; y: parent.height * 0.78; width: parent.width; height: parent.height * 0.22;
+                background: root.dock-target == "bottom"
+                    ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.dock-target == "bottom" ? 2px : 0px;
+                border-color: Theme.accent;
+            }
+        }
+    }
+    }
+
     // App toolbar icons (settings/download/theme/SFTP follow/sync). They sit at the top-right
     // of the tab row — below the custom title bar when frameless (y offset), or
     // at the very top on macOS where the native title bar is separate (#119).
@@ -2659,19 +2481,11 @@ export component AppWindow inherits Window {
     }
     IconBtn {
         x: root.width - 64px - root.toolbar-x-off; y: root.toolbar-y;
-        icon: "\u{E8D5}";   // Material "swap_vert" — symmetrical up+down arrows, clearer "transfer" semantic
+        icon: "\u{E8D5}";   // Material "swap_vert" — transfers
         tooltip: @tr("Transfers manager");
         active: root.download-open;
-        // Pulse the button's own background instead of a separate dot in the
-        // corner; the dot was visually loud and broke the icon's silhouette
-        // (#breathing-light).
-        breathe: root.has-active-transfers;
         clicked => { root.download-open = !root.download-open; root.settings-open = false; }
     }
-    // (Removed) External breathing-dot Rectangle that previously sat on the
-    // top-left of the Transfers button. The pulse now lives on the IconBtn's
-    // own background via `breathe: root.has-active-transfers` above, so the
-    // icon stays clean and no stray dot shows over the toolbar (#breathing-light).
     IconBtn {
         x: root.width - 94px - root.toolbar-x-off; y: root.toolbar-y;
         icon: Theme.dark ? "\u{E518}" : (Theme.variant == "jiangnan" ? "\u{E51C}" : "\u{EA63}");
@@ -2703,13 +2517,17 @@ export component AppWindow inherits Window {
         clicked => { root.sync-input = !root.sync-input; root.set-sync-input(root.sync-input); }
     }
     IconBtn {
-        x: root.width - 154px - root.toolbar-x-off; y: root.toolbar-y;
+        x: root.width - 184px - root.toolbar-x-off; y: root.toolbar-y;
         icon: "\u{E86F}";   // Material "code" — command bar
+        icon-color: !root.cmd-bar-hidden ? Theme.accent : Theme.text-secondary;
         active: !root.cmd-bar-hidden;
         tooltip: root.lang-en
             ? (root.cmd-bar-hidden ? "Show command bar" : "Hide command bar")
             : (root.cmd-bar-hidden ? "显示命令栏" : "隐藏命令栏");
-        clicked => { root.cmd-bar-hidden = !root.cmd-bar-hidden; root.set-cmd-bar-hidden(root.cmd-bar-hidden); }
+        clicked => {
+            root.cmd-bar-hidden = !root.cmd-bar-hidden;
+            root.set-cmd-bar-hidden(root.cmd-bar-hidden);
+        }
     }
 
     // Frameless resize edges (#119): thin hit-zones that start an OS-level
@@ -2930,8 +2748,8 @@ export component AppWindow inherits Window {
 
                     // Text area: a line-number gutter on the left + the editor.
                     // Wrap long lines to the visible editor width so text and
-                    // selection painting cannot overflow to the right (#387).
-                    // The gutter stays pinned and follows vertical scrolling.
+                    // selection painting cannot overflow the editor card (#387).
+                    // The gutter remains pinned while following vertical scroll.
                     Rectangle {
                         vertical-stretch: 1;
                         background: Theme.bg-root;
@@ -2953,22 +2771,38 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Rectangle { width: 1px; background: Theme.border-subtle; }
-                            ed-scroll := ScrollView {
-                                viewport-width: max(self.visible-width, edit-input.preferred-width + 16px);
-                                viewport-height: max(self.visible-height, edit-input.preferred-height + 16px);
-                                edit-input := TextInput {
-                                    x: 8px;
-                                    y: 8px;
-                                    width: max(parent.visible-width - 16px, self.preferred-width);
-                                    height: self.preferred-height;
-                                    text <=> root.editor-content;
-                                    read-only: root.editor-readonly;
-                                    single-line: false;
-                                    wrap: no-wrap;
-                                    color: Theme.text-primary;
-                                    font-family: Theme.ui-font-family;
-                                    font-size: Theme.fs-md;
-                                    edited => { root.editor-dirty = true; root.editor-recount(root.editor-content); }
+                            editor-viewport := Rectangle {
+                                horizontal-stretch: 1;
+                                clip: true;
+                                ed-scroll := ScrollView {
+                                    viewport-width: self.visible-width;
+                                    viewport-height: max(self.visible-height, edit-input.preferred-height + 16px);
+                                    edit-input := TextInput {
+                                        x: 8px;
+                                        y: 8px;
+                                        width: max(1px, ed-scroll.visible-width - 16px);
+                                        height: max(ed-scroll.visible-height - 16px, self.preferred-height);
+                                        text <=> root.editor-content;
+                                        read-only: root.editor-readonly;
+                                        single-line: false;
+                                        wrap: char-wrap;
+                                        color: Theme.text-primary;
+                                        font-family: Theme.ui-font-family;
+                                        font-size: Theme.fs-md;
+                                        cursor-position-changed(position) => {
+                                            let cursor-y = position.y + self.y + ed-scroll.viewport-y;
+                                            if (cursor-y < 12px) {
+                                                ed-scroll.viewport-y = min(0px,
+                                                    ed-scroll.viewport-y + 12px - cursor-y);
+                                            } else if (cursor-y > ed-scroll.visible-height - 12px) {
+                                                ed-scroll.viewport-y = max(
+                                                    min(0px, ed-scroll.visible-height - ed-scroll.viewport-height),
+                                                    ed-scroll.viewport-y
+                                                        - (cursor-y - ed-scroll.visible-height + 12px));
+                                            }
+                                        }
+                                        edited => { root.editor-dirty = true; root.editor-recount(root.editor-content); }
+                                    }
                                 }
                             }
                         }
@@ -3010,9 +2844,8 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-            // Defer focus until the next UI turn. Focusing directly from init
-            // re-enters Slint's Windows accessibility adapter and can panic
-            // with "RefCell already borrowed" (#386).
+            // Defer focus until the next UI turn to avoid Windows focus
+            // re-entrancy when the editor component is created dynamically.
             init => { root.editor-focus-pending = true; }
             editor-focus-timer := Timer {
                 interval: 0ms;
@@ -3041,8 +2874,8 @@ export component AppWindow inherits Window {
         // panel docks right/top) (#dock).
         x: parent.width - 364px - root.toolbar-x-off;
         y: (root.custom-titlebar ? 78px : 40px + root.titlebar-inset) + root.toolbar-y-off;
-        width: root.dl-w;
-        height: root.dl-h;
+        width: 350px;
+        height: 400px;
         visible: root.download-open;
         background: Theme.bg-panel;
         border-radius: Theme.radius-md;
@@ -3062,7 +2895,7 @@ export component AppWindow inherits Window {
 
             HorizontalLayout {
                 Text {
-                    text: @tr("Transfers manager");
+                    text: @tr("Download settings");
                     color: Theme.text-primary;
                     font-size: Theme.fs-md;
                     font-weight: 600;
@@ -3072,16 +2905,13 @@ export component AppWindow inherits Window {
                 Rectangle {
                     width: 20px; height: 20px;
                     border-radius: Theme.radius-sm;
-                    // Match ProcWindow's close button: red (#e81123) on hover,
-                    // white glyph, smooth 90ms transition (#close-hover-red).
-                    background: close-ta.has-hover ? #e81123 : transparent;
-                    animate background { duration: 90ms; }
+                    background: close-ta.has-hover ? Theme.bg-hover : transparent;
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.download-open = false; }
                     }
                     Text { text: "\u{E5CD}"; font-family: "Material Icons";
-                           color: close-ta.has-hover ? white : Theme.text-secondary; font-size: Theme.fs-sm;
+                           color: Theme.text-secondary; font-size: Theme.fs-sm;
                            horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
@@ -3186,14 +3016,7 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     spacing: 4px;
                                     Text {
-                                        text: t.is-upload ? "\u{E5D8}" : "\u{E5DB}"; // up / down arrow
-                                        color: t.is-upload ? #639922 : #7c3aed;  // upload=green, download=accent purple
-                                        font-family: "Material Icons";
-                                        font-size: Theme.fs-md;
-                                        vertical-alignment: center;
-                                    }
-                                    Text {
-                                        text: t.name;
+                                        text: (t.is-upload ? "↑ " : "↓ ") + t.name;
                                         color: Theme.text-primary;
                                         font-size: Theme.fs-xs;
                                         horizontal-stretch: 1;
@@ -3244,65 +3067,6 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-
-        // --- Bottom-right resize grip (#dl-resize) -------------------------
-        // Mirrors the interface dialog's grip: same Material "open_in_full"
-        // glyph + nwse-resize cursor, pure-Slint drag-resize (the popup is an
-        // embedded Rectangle, so OS drag_resize_window can't be used here).
-        Rectangle {
-            // #dl-resize: bottom-right resize grip — switched from
-            // "open_in_full" glyph to the 3-dot diagonal pattern used by
-            // ProcWindow (#grip-icon-3dots) so all three affordances share
-            // one visual. Background stays transparent even on hover so the
-            // hover state never paints a 16x16 grey block (which read as a
-            // "shadow"). Hover feedback is given by the 3 dots shifting to
-            // text-secondary below.
-            x: parent.width - 16px;
-            y: parent.height - 16px;
-            width: 16px;
-            height: 16px;
-            background: transparent;
-            // 保留原 \u{E3C2} open_in_full 视觉（注释保留以备切换） (#grip-icon-3dots)
-            // Text {
-            //     text: "\u{E3C2}";   // Material "open_in_full" — matches interface dialog grip
-            //     font-family: "Material Icons";
-            //     color: Theme.text-muted;
-            //     font-size: 14px;
-            //     horizontal-alignment: center;
-            //     vertical-alignment: center;
-            // }
-            // 替换为进程弹框(ProcWindow:457)同款 3 点对角手柄
-            Rectangle { x: parent.width - 5px;  y: parent.height - 5px;  width: 2px; height: 2px;
-                        background: Theme.text-muted; }
-            Rectangle { x: parent.width - 9px;  y: parent.height - 5px;  width: 2px; height: 2px;
-                        background: Theme.text-muted; }
-            Rectangle { x: parent.width - 5px;  y: parent.height - 9px;  width: 2px; height: 2px;
-                        background: Theme.text-muted; }
-            dl-resize-ta := TouchArea {
-                mouse-cursor: nwse-resize;
-                pointer-event(e) => {
-                    if (e.kind == PointerEventKind.down) {
-                        root.dl-resizing = true;
-                        root.dl-base-w = root.dl-w;
-                        root.dl-base-h = root.dl-h;
-                        root.dl-grab-x = self.absolute-position.x + self.mouse-x;
-                        root.dl-grab-y = self.absolute-position.y + self.mouse-y;
-                    } else if (e.kind == PointerEventKind.up) {
-                        root.dl-resizing = false;
-                    }
-                }
-                moved => {
-                    if (root.dl-resizing) {
-                        root.dl-w = clamp(
-                            round((root.dl-base-w + (self.absolute-position.x + self.mouse-x - root.dl-grab-x)) / 1px) * 1px,
-                            300px, 900px);
-                        root.dl-h = clamp(
-                            round((root.dl-base-h + (self.absolute-position.y + self.mouse-y - root.dl-grab-y)) / 1px) * 1px,
-                            320px, 900px);
                     }
                 }
             }
@@ -3612,77 +3376,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    // --- Rename-session dialog ----------------------------------------------
-    // Tab context menu → Rename: a display-name override for one open session.
-    // Submitting an empty name restores the saved session name.
-    if root.tab-rename-open : Rectangle {
-        width: parent.width;
-        height: parent.height;
-        background: #00000080;
-        TouchArea { clicked => { root.tab-rename-open = false; } }
-
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: 340px;
-            height: 196px;
-            background: Theme.popup-bg;
-            border-radius: Theme.radius-md;
-            border-width: 1px;
-            border-color: Theme.border-strong;
-            drop-shadow-blur: 24px;
-            drop-shadow-color: #000000a0;
-            TouchArea {}   // swallow inside clicks
-
-            VerticalLayout {
-                padding: 18px;
-                spacing: 12px;
-                Text {
-                    text: root.lang-en ? "Rename session" : "重命名会话";
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-lg;
-                    font-weight: 700;
-                }
-                Text {
-                    text: @tr("Session name");
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-sm;
-                }
-                tr-input := LineEdit {
-                    text <=> root.tab-rename-value;
-                    font-family: Theme.ui-font-family; // CJK-capable (#54)
-                    placeholder-text: @tr("Session name");
-                    // Focus the text the moment the dialog opens.
-                    init => { tr-input.focus(); }
-                    accepted => {
-                        root.rename-tab(root.tab-rename-id, root.tab-rename-value);
-                    }
-                }
-                Text {
-                    text: @tr("Leave empty to restore the default name");
-                    color: Theme.text-muted;
-                    font-size: Theme.fs-xs;
-                }
-                Rectangle { vertical-stretch: 1; }
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 8px;
-                    Button {
-                        text: root.lang-en ? "Cancel" : "取消";
-                        clicked => { root.tab-rename-open = false; }
-                    }
-                    Button {
-                        text: root.lang-en ? "OK" : "确定";
-                        primary: true;
-                        clicked => {
-                            root.rename-tab(root.tab-rename-id, root.tab-rename-value);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     // --- Quick-command manage dialog (#55) --------------------------------
     qcmd-edit-defer-timer := Timer {
         interval: 30ms;
@@ -3716,7 +3409,7 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: 460px;
-            height: 420px;
+            height: 520px;
             background: Theme.bg-panel;
             border-radius: Theme.radius-md;
             border-width: 1px;
@@ -3740,15 +3433,12 @@ export component AppWindow inherits Window {
                     Rectangle {
                         width: 22px; height: 22px;
                         border-radius: Theme.radius-sm;
-                        // Match ProcWindow's close button: red (#e81123) on hover,
-                        // white glyph, smooth 90ms transition (#close-hover-red).
-                        background: qcm-close.has-hover ? #e81123 : transparent;
-                        animate background { duration: 90ms; }
+                        background: qcm-close.has-hover ? Theme.bg-hover : transparent;
                         qcm-close := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.quick-cmd-manage-open = false; }
                         }
-                        Text { text: "\u{E5CD}"; font-family: "Material Icons"; color: qcm-close.has-hover ? white : Theme.text-secondary;
+                        Text { text: "\u{E5CD}"; font-family: "Material Icons"; color: Theme.text-secondary;
                                font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
                     }
                 }
@@ -4508,12 +4198,6 @@ export component AppWindow inherits Window {
                 ShortcutRow { keys: root.is-mac ? "⌃⇧Tab" : "Ctrl+Shift+Tab"; desc: root.lang-en ? "Previous tab" : "上一个标签页"; }
 
                 Rectangle { height: 6px; }
-                Text { text: root.lang-en ? "Window" : "窗口";
-                       color: Theme.text-muted; font-size: Theme.fs-xs; }
-                ShortcutRow { keys: root.is-mac ? "⌘⇧N" : "Ctrl+Shift+N"; desc: root.lang-en ? "New window" : "新建窗口"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⌥Z" : "Ctrl+Alt+Z"; desc: root.lang-en ? "Toggle zen (focus) mode" : "切换专注模式"; }
-
-                Rectangle { height: 6px; }
                 Text { text: root.lang-en ? "Terminal" : "终端";
                        color: Theme.text-muted; font-size: Theme.fs-xs; }
                 CheckBox {
@@ -4543,12 +4227,6 @@ export component AppWindow inherits Window {
                 ShortcutRow { keys: root.is-mac ? "⌘V" : "Ctrl+V"; desc: root.lang-en ? "Paste" : "粘贴"; }
                 ShortcutRow { keys: root.is-mac ? "⌘F" : "Ctrl+F"; desc: root.lang-en ? "Find in terminal" : "查找"; }
                 ShortcutRow { keys: root.is-mac ? "⌘⇧R" : "Ctrl+Shift+R"; desc: root.lang-en ? "Jump to command history search" : "跳到命令历史搜索"; }
-                ShortcutRow { keys: root.is-mac ? "⌘=" : "Ctrl+="; desc: root.lang-en ? "Enlarge terminal font (this session)" : "放大终端字体（当前会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘-" : "Ctrl+-"; desc: root.lang-en ? "Shrink terminal font (this session)" : "缩小终端字体（当前会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘0" : "Ctrl+0"; desc: root.lang-en ? "Reset terminal font size (this session)" : "重置终端字体大小（当前会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⌥=" : "Ctrl+Alt+="; desc: root.lang-en ? "Enlarge terminal font (all sessions in window)" : "放大终端字体（本窗口所有会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⌥-" : "Ctrl+Alt+-"; desc: root.lang-en ? "Shrink terminal font (all sessions in window)" : "缩小终端字体（本窗口所有会话）"; }
-                ShortcutRow { keys: root.is-mac ? "⌘⌥0" : "Ctrl+Alt+0"; desc: root.lang-en ? "Reset terminal font size (all sessions in window)" : "重置终端字体大小（本窗口所有会话）"; }
                 ShortcutRow { keys: root.lang-en ? "Drag" : "鼠标拖动"; desc: root.lang-en ? "Select text" : "选择文本"; }
                 ShortcutRow { keys: root.lang-en ? "Wheel / Scrollbar" : "滚轮 / 滚动条"; desc: root.lang-en ? "Scroll history" : "滚动历史"; }
 
@@ -4666,7 +4344,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 padding-left: 4px; padding-right: 4px;
                                 Text {
-                                    text: "github.com/yituorou/meatshell";
+                                    text: "github.com/jeff141/meatshell";
                                     color: Theme.accent;
                                     font-size: Theme.fs-sm;
                                     vertical-alignment: center;
@@ -4763,8 +4441,8 @@ export component AppWindow inherits Window {
     }
 
     // Multi-line paste can execute several shell commands at once. Keep the
-    // prompt explicit; clicking the backdrop never accepts the paste (#262),
-    // while Enter provides the expected keyboard confirmation (#392).
+    // prompt explicit and require a button click; clicking the backdrop never
+    // accepts the paste (#262).
     ConfirmDialog {
         width: parent.width;
         height: parent.height;
@@ -5157,16 +4835,13 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 width: 24px; height: 24px;
                                 border-radius: Theme.radius-sm;
-                                // Match ProcWindow's close button: red (#e81123) on hover,
-                                // white glyph, smooth 90ms transition (#close-hover-red).
-                                background: if-close-ta.has-hover ? #e81123 : transparent;
-                                animate background { duration: 90ms; }
+                                background: if-close-ta.has-hover ? Theme.bg-hover : transparent;
                                 if-close-ta := TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.interface-open = false; }
                                 }
                                 Text { text: "\u{E5CD}"; font-family: "Material Icons";
-                                       color: if-close-ta.has-hover ? white : Theme.text-secondary; font-size: 15px;
+                                       color: Theme.text-secondary; font-size: 15px;
                                        horizontal-alignment: center; vertical-alignment: center; }
                             }
                         }
@@ -5217,6 +4892,8 @@ export component AppWindow inherits Window {
                     wallpaper-overlay <=> root.wallpaper-overlay;
                     current-wallpaper: root.current-wallpaper;
                     custom-wallpaper-name: root.custom-wallpaper-name;
+                    wsl-profiles: root.wsl-profiles;
+                    wsl-new-directory <=> root.wsl-new-directory;
                     set-wallpaper(v) => { root.set-wallpaper(v); }
                     pick-wallpaper-file() => { root.pick-wallpaper-file(); }
                     set-term-font(v) => { root.set-term-font(v); }
@@ -5261,31 +4938,19 @@ export component AppWindow inherits Window {
                 }
             }
             Rectangle {
-                // #ifd-resize: bottom-right resize grip — switched from
-                // "open_in_full" glyph to the 3-dot diagonal pattern used by
-                // ProcWindow (#grip-icon-3dots) so all three affordances share
-                // one visual.
-                x: parent.width - 16px;
-                y: parent.height - 16px;
-                width: 16px;
-                height: 16px;
-                background: transparent;
-                // 保留原 \u{E3C2} open_in_full 视觉（注释保留以备切换） (#grip-icon-3dots)
-                // Text {
-                //     text: "\u{E3C2}";
-                //     font-family: "Material Icons";
-                //     color: Theme.text-muted;
-                //     font-size: 14px;
-                //     horizontal-alignment: center;
-                //     vertical-alignment: center;
-                // }
-                // 替换为进程弹框(ProcWindow:457)同款 3 点对角手柄
-                Rectangle { x: parent.width - 5px;  y: parent.height - 5px;  width: 2px; height: 2px;
-                            background: Theme.text-muted; }
-                Rectangle { x: parent.width - 9px;  y: parent.height - 5px;  width: 2px; height: 2px;
-                            background: Theme.text-muted; }
-                Rectangle { x: parent.width - 5px;  y: parent.height - 9px;  width: 2px; height: 2px;
-                            background: Theme.text-muted; }
+                x: parent.width - 18px;
+                y: parent.height - 18px;
+                width: 18px;
+                height: 18px;
+                background: resize-ta.has-hover || root.ifd-resizing ? Theme.bg-hover : transparent;
+                Text {
+                    text: "\u{E3C2}";
+                    font-family: "Material Icons";
+                    color: Theme.text-muted;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
                 resize-ta := TouchArea {
                     mouse-cursor: nwse-resize;
                     pointer-event(e) => {
@@ -5312,32 +4977,5 @@ export component AppWindow inherits Window {
                 }
             }
         }
-    }
-
-    // --- Bottom-right resize grip (frameless platforms) -------------------
-    // #main-resize-grip: mirrors ProcWindow's grip so the main window has the
-    // same visual affordance + drag-resize behavior when the OS title bar is
-    // hidden (custom-titlebar mode). Only rendered in frameless mode; otherwise
-    // the OS frame already provides this corner.
-    if root.custom-titlebar : Rectangle {
-        width: 16px;
-        height: 16px;
-        x: root.width - self.width;
-        y: root.height - self.height;
-        TouchArea {
-            mouse-cursor: nwse-resize;
-            pointer-event(e) => {
-                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
-                    root.win-resize-se();
-                }
-            }
-        }
-        // Classic dotted resize grip (a diagonal of 2px dots, bottom-right).
-        Rectangle { x: parent.width - 5px;  y: parent.height - 5px;  width: 2px; height: 2px;
-                    background: Theme.text-muted; }
-        Rectangle { x: parent.width - 9px;  y: parent.height - 5px;  width: 2px; height: 2px;
-                    background: Theme.text-muted; }
-        Rectangle { x: parent.width - 5px;  y: parent.height - 9px;  width: 2px; height: 2px;
-                    background: Theme.text-muted; }
     }
 }

@@ -19,7 +19,7 @@ use ssh_key::{HashAlg, PublicKey};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use crate::config::{AuthMethod, PortForward, Secret, Session, SessionTrigger};
+use crate::config::{AuthMethod, PortForward, Session, SessionTrigger, Secret};
 use crate::i18n::t;
 
 // ---------------------------------------------------------------------------
@@ -95,68 +95,95 @@ pub(crate) fn load_session_private_key(session: &Session, pass: &str) -> Result<
 
 /// Format a byte count as a human-readable string.
 pub fn format_size(bytes: u64) -> String {
-    const UNIT: f64 = 1024.0;
-    const UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
-    let mut value = bytes as f64;
-    let mut idx = 0;
-    while value >= UNIT && idx < UNITS.len() - 1 {
-        value /= UNIT;
-        idx += 1;
-    }
-    if idx == 0 {
-        format!("{} {}", bytes, UNITS[0])
-    } else if idx >= 4 {
-        format!("{:.2} {}", value, UNITS[idx])
+    if bytes < 1_024 {
+        format!("{} B", bytes)
+    } else if bytes < 1_024 * 1_024 {
+        format!("{:.1} KB", bytes as f64 / 1_024.0)
+    } else if bytes < 1_024 * 1_024 * 1_024 {
+        format!("{:.1} MB", bytes as f64 / (1_024.0 * 1_024.0))
+    } else if bytes < 1_024_u64.pow(4) {
+        format!("{:.2} GB", bytes as f64 / 1_024_f64.powi(3))
+    } else if bytes < 1_024_u64.pow(5) {
+        format!("{:.2} TB", bytes as f64 / 1_024_f64.powi(4))
+    } else if bytes < 1_024_u64.pow(6) {
+        format!("{:.2} PB", bytes as f64 / 1_024_f64.powi(5))
     } else {
-        format!("{:.1} {}", value, UNITS[idx])
+        format!("{:.2} EB", bytes as f64 / 1_024_f64.powi(6))
     }
 }
 
 #[cfg(test)]
 mod size_format_tests {
-    use super::{format_size, TriggerEngine};
-    use crate::config::{Secret, SessionTrigger};
+    use super::format_size;
 
     #[test]
     fn formats_large_storage_units_through_exabytes() {
-        const GIB: u64 = 1024_u64.pow(3);
-        const TIB: u64 = 1024_u64.pow(4);
-        const PIB: u64 = 1024_u64.pow(5);
-        const EIB: u64 = 1024_u64.pow(6);
-
-        assert_eq!(format_size(GIB), "1.0 GB");
-        assert_eq!(format_size(TIB), "1.00 TB");
-        assert_eq!(format_size(PIB), "1.00 PB");
-        assert_eq!(format_size(EIB), "1.00 EB");
+        assert_eq!(format_size(1_024_u64.pow(3)), "1.00 GB");
+        assert_eq!(format_size(1_024_u64.pow(4)), "1.00 TB");
+        assert_eq!(format_size(1_024_u64.pow(5)), "1.00 PB");
+        assert_eq!(format_size(1_024_u64.pow(6)), "1.00 EB");
         assert_eq!(format_size(u64::MAX), "16.00 EB");
     }
+}
 
-    fn trigger(expect: &str, response: &str, repeat: bool) -> SessionTrigger {
-        SessionTrigger {
-            expect: expect.to_string(),
-            response: Secret::new(response),
-            append_enter: true,
-            repeat,
+/// Runtime state for session login expect/response rules. Matching is kept
+/// bounded so a noisy shell cannot grow memory without limit; rules can also
+/// be one-shot (the default) or repeat for every later match.
+struct TriggerEngine(Vec<RuntimeTrigger>);
+
+struct RuntimeTrigger {
+    rule: SessionTrigger,
+    buffer: String,
+    active: bool,
+}
+
+impl TriggerEngine {
+    fn new(rules: &[SessionTrigger]) -> Self {
+        Self(
+            rules
+                .iter()
+                .filter(|rule| !rule.expect.trim().is_empty() && !rule.response.is_empty())
+                .cloned()
+                .map(|rule| RuntimeTrigger {
+                    rule,
+                    buffer: String::new(),
+                    active: true,
+                })
+                .collect(),
+        )
+    }
+
+    fn feed(&mut self, text: &str) -> Vec<(Secret, bool)> {
+        let mut replies = Vec::new();
+        if text.is_empty() {
+            return replies;
         }
-    }
-
-    #[test]
-    fn session_trigger_matches_across_output_chunks_once() {
-        let mut engine = TriggerEngine::new(&[trigger("Password:", "secret", false)]);
-        assert!(engine.feed("Pass").is_empty());
-        let replies = engine.feed("word:");
-        assert_eq!(replies.len(), 1);
-        assert_eq!(replies[0].0.as_str(), "secret");
-        assert!(replies[0].1);
-        assert!(engine.feed("Password:").is_empty());
-    }
-
-    #[test]
-    fn repeating_session_trigger_consumes_each_match() {
-        let mut engine = TriggerEngine::new(&[trigger("continue?", "y", true)]);
-        assert_eq!(engine.feed("continue?").len(), 1);
-        assert!(engine.feed("unrelated output").is_empty());
-        assert_eq!(engine.feed("continue?").len(), 1);
+        for trigger in &mut self.0 {
+            if !trigger.active {
+                continue;
+            }
+            trigger.buffer.push_str(text);
+            if let Some(start) = trigger.buffer.find(&trigger.rule.expect) {
+                let end = start + trigger.rule.expect.len();
+                trigger.buffer.drain(..end);
+                replies.push((trigger.rule.response.clone(), trigger.rule.append_enter));
+                trigger.active = trigger.rule.repeat;
+            }
+            // Keep enough trailing bytes to match an expect string split across
+            // SSH packets, while bounding memory for long-running sessions.
+            let keep = trigger.rule.expect.len().max(256);
+            if trigger.buffer.len() > keep {
+                let drop = trigger.buffer.len() - keep;
+                let boundary = trigger
+                    .buffer
+                    .char_indices()
+                    .find(|(index, _)| *index >= drop)
+                    .map(|(index, _)| index)
+                    .unwrap_or(trigger.buffer.len());
+                trigger.buffer.drain(..boundary);
+            }
+        }
+        replies
     }
 }
 
@@ -225,43 +252,24 @@ impl AuxiliaryStartup {
         }
     }
 
-    fn pending(&self) -> Option<AuxiliaryChannelKind> {
-        if self.in_progress {
-            None
-        } else {
-            self.pending
-        }
-    }
-
     fn begin(&mut self) -> Option<AuxiliaryChannelKind> {
-        let kind = self.pending()?;
         if self.in_progress {
             return None;
         }
+        let kind = self.pending?;
         self.in_progress = true;
         Some(kind)
     }
 
     fn complete(&mut self) {
-        if !self.in_progress {
-            return;
+        if self.in_progress {
+            self.pending = self.pending.and_then(AuxiliaryChannelKind::next);
+            self.in_progress = false;
         }
-        self.pending = self.pending.and_then(AuxiliaryChannelKind::next);
-        self.in_progress = false;
     }
 }
 
 const AUXILIARY_CHANNEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
-async fn auxiliary_timeout<F, T>(
-    timeout: std::time::Duration,
-    future: F,
-) -> Result<T, tokio::time::error::Elapsed>
-where
-    F: std::future::Future<Output = T>,
-{
-    tokio::time::timeout(timeout, future).await
-}
 
 async fn open_auxiliary_channel(
     handle: &Handle<ClientHandler>,
@@ -279,8 +287,7 @@ async fn open_auxiliary_channel(
             .with_context(|| format!("{label} exec"))?;
         Ok::<Channel<Msg>, anyhow::Error>(channel)
     };
-
-    match auxiliary_timeout(AUXILIARY_CHANNEL_TIMEOUT, operation).await {
+    match tokio::time::timeout(AUXILIARY_CHANNEL_TIMEOUT, operation).await {
         Ok(Ok(channel)) => Some(channel),
         Ok(Err(error)) => {
             tracing::warn!("{label} startup failed: {error:#}");
@@ -319,21 +326,18 @@ async fn remote_supports_prompt_setup(handle: &Handle<ClientHandler>) -> bool {
         let _ = channel.eof().await;
 
         let mut output = String::new();
-        let mut supported: Option<bool> = None;
-        // Drain the channel fully, including the server's CHANNEL_CLOSE. Do not
-        // return as soon as the marker is seen (the old code dropped the Channel
-        // mid-flight) and do not just send `channel.close()` without awaiting the
-        // peer's confirmation: some servers reuse channel IDs aggressively and
-        // will tear down the *next* channel (the interactive shell) if it is
-        // opened while this one is still being torn down. Draining to Close
-        // serializes the teardown and avoids that race.
+        let mut supported = None;
+        // Drain the probe channel all the way to CHANNEL_CLOSE. Some Dropbear
+        // servers reuse channel ids aggressively; returning as soon as the
+        // marker arrives can leave teardown in flight and break the next shell
+        // channel opened immediately afterwards.
         while let Some(message) = channel.wait().await {
             match message {
                 ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
                     if supported.is_none() {
                         output.push_str(&String::from_utf8_lossy(&data));
-                        if let Some(s) = prompt_setup_supported(&output) {
-                            supported = Some(s);
+                        if let Some(value) = prompt_setup_supported(&output) {
+                            supported = Some(value);
                         } else if output.len() > 256 {
                             supported = Some(false);
                         }
@@ -343,7 +347,7 @@ async fn remote_supports_prompt_setup(handle: &Handle<ClientHandler>) -> bool {
                 _ => {}
             }
         }
-        supported
+        Some(supported.unwrap_or(false))
     };
 
     tokio::time::timeout(std::time::Duration::from_millis(1000), probe)
@@ -355,38 +359,29 @@ async fn remote_supports_prompt_setup(handle: &Handle<ClientHandler>) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZmodemDirection {
-    /// Remote `sz` sends files; MeatShell receives them.
     Download,
-    /// Remote `rz` receives files; MeatShell sends selected local files.
     Upload,
 }
 
-/// Identify the first hex ZMODEM handshake by its actual frame type. Remote
-/// `sz` starts with ZRQINIT (`00`), while remote `rz` starts with ZRINIT (`01`).
-/// Treating both as a receive operation made `rz` deadlock because each side
-/// waited for the other to start sending (#308).
+/// Identify the first hex ZMODEM handshake by its frame type. Remote `sz`
+/// starts with ZRQINIT (`00`), while remote `rz` starts with ZRINIT (`01`).
 fn zmodem_direction(data: &[u8]) -> Option<ZmodemDirection> {
     data.windows(4).find_map(|window| {
         if window[0] != 0x18 || window[1] != b'B' {
             return None;
         }
-        let high = zmodem_hex_nibble(window[2])?;
-        let low = zmodem_hex_nibble(window[3])?;
-        match (high << 4) | low {
+        let nibble = |value: u8| match value {
+            b'0'..=b'9' => Some(value - b'0'),
+            b'a'..=b'f' => Some(value - b'a' + 10),
+            b'A'..=b'F' => Some(value - b'A' + 10),
+            _ => None,
+        };
+        match (nibble(window[2])? << 4) | nibble(window[3])? {
             0 => Some(ZmodemDirection::Download),
             1 => Some(ZmodemDirection::Upload),
             _ => None,
         }
     })
-}
-
-fn zmodem_hex_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn line_start_before(text: &str, pos: usize) -> usize {
@@ -409,6 +404,7 @@ fn include_following_line_break(text: &str, mut pos: usize) -> usize {
     pos
 }
 
+#[cfg(test)]
 fn prompt_setup_echo_end(text: &str, prefix_pos: usize) -> usize {
     if let Some(rel) = text[prefix_pos..].find(PROMPT_SETUP_SUFFIX) {
         return include_following_line_break(text, prefix_pos + rel + PROMPT_SETUP_SUFFIX.len());
@@ -435,6 +431,7 @@ fn strip_prompt_setup_echo(text: &mut String, prefix_pos: usize, end_pos: usize)
 /// suppression window. Some shells echo a long injected command only after the
 /// first prompt has already been delivered, so the normal buffered path cannot
 /// catch it (#266).
+#[cfg(test)]
 fn strip_late_prompt_setup_echo(text: &mut String) -> bool {
     let Some(prefix_pos) = text.find(PROMPT_SETUP_PREFIX) else {
         return false;
@@ -447,12 +444,73 @@ fn strip_late_prompt_setup_echo(text: &mut String) -> bool {
     true
 }
 
+#[cfg(test)]
 fn strip_pending_prompt_setup_echo(text: &mut String, pending: &mut bool) -> bool {
     if !*pending || !strip_late_prompt_setup_echo(text) {
         return false;
     }
     *pending = false;
     true
+}
+
+/// Filter a setup-command echo that arrived after the normal suppression
+/// window.  Long commands are commonly split at arbitrary byte boundaries by
+/// the SSH server, so a prefix and its terminating `__ms7'` may land in
+/// different packets.  Keep only the current command line until the suffix is
+/// available; text before that line can still be rendered immediately.
+fn filter_late_prompt_setup_echo(
+    text: &mut String,
+    pending: &mut bool,
+    held: &mut String,
+) {
+    if !*pending {
+        return;
+    }
+
+    if !held.is_empty() {
+        held.push_str(text);
+        if let Some(prefix_pos) = held.find(PROMPT_SETUP_PREFIX) {
+            if let Some(rel_end) = held[prefix_pos..].find(PROMPT_SETUP_SUFFIX) {
+                let end = prefix_pos + rel_end + PROMPT_SETUP_SUFFIX.len();
+                let mut combined = std::mem::take(held);
+                strip_prompt_setup_echo(&mut combined, prefix_pos, end);
+                *text = combined;
+                *pending = false;
+            } else if held.len() >= (1 << 14) {
+                // A broken/non-POSIX shell may never emit the closing text.
+                // Bound the temporary buffer and release it rather than
+                // hiding or retaining an unbounded terminal stream.
+                let end = held[prefix_pos..]
+                    .find(['\r', '\n'])
+                    .map(|offset| prefix_pos + offset)
+                    .unwrap_or(held.len());
+                let mut combined = std::mem::take(held);
+                strip_prompt_setup_echo(&mut combined, prefix_pos, end);
+                *text = combined;
+                *pending = false;
+            } else {
+                text.clear();
+            }
+        } else {
+            // This should only happen if the remote split the short prefix
+            // itself. Keep buffering rather than exposing a partial command.
+            text.clear();
+        }
+        return;
+    }
+
+    let Some(prefix_pos) = text.find(PROMPT_SETUP_PREFIX) else {
+        return;
+    };
+    if let Some(rel_end) = text[prefix_pos..].find(PROMPT_SETUP_SUFFIX) {
+        let end = prefix_pos + rel_end + PROMPT_SETUP_SUFFIX.len();
+        strip_prompt_setup_echo(text, prefix_pos, end);
+        *pending = false;
+        return;
+    }
+
+    let line_start = line_start_before(text, prefix_pos);
+    *held = text.split_off(line_start);
 }
 
 /// Extract the remote path from an OSC 7 sequence embedded in `text`.
@@ -1754,6 +1812,7 @@ async fn run_session(
     resource_monitor_enabled: bool,
 ) -> Result<()> {
     let session_started = std::time::Instant::now();
+    let mut trigger_engine = TriggerEngine::new(&session.triggers);
     let _ = events.send(SessionEvent::Status(format!(
         "{} {}@{}:{} ...",
         t("连接中", "Connecting"),
@@ -1908,6 +1967,9 @@ async fn run_session(
     // session makes recalling an accidentally saved setup command clear normal
     // terminal rows (#289).
     let mut late_prompt_echo_pending = false;
+    // If the late echo starts before the suppression deadline but finishes in
+    // a later SSH packet, retain that command line until its suffix arrives.
+    let mut late_prompt_echo_buf = String::new();
     // After a ZMODEM transfer finishes we briefly ignore ZMODEM detection so the
     // sender's lingering close frames can't spawn a spurious second receive (#76).
     let mut zmodem_done_at: Option<std::time::Instant> = None;
@@ -2064,94 +2126,15 @@ async fn run_session(
     }
     let handle = Arc::new(handle);
 
-    // Auxiliary channels are deliberately outside the terminal-ready critical
-    // path. SFTP gets the first opportunity after Connected; lightweight
-    // resources follow, and process/system enrichment starts last.
-    let (mon_ready_tx, mut mon_ready_rx) = tokio::sync::oneshot::channel();
-    let (proc_ready_tx, mut proc_ready_rx) = tokio::sync::oneshot::channel();
-    let (sys_ready_tx, mut sys_ready_rx) = tokio::sync::oneshot::channel();
-    // Shared flag so the delayed spawn tasks can skip opening a channel
-    // when monitoring was disabled (e.g. sidebar collapsed) during the
-    // sleep window. Opening a channel just to immediately close it can
-    // cause some SSH servers to drop the entire transport (#345).
-    let mon_flag = Arc::new(AtomicBool::new(true));
-    if session.disable_shell_integration {
-        let _ = mon_ready_tx.send(None);
-        let _ = proc_ready_tx.send(None);
-        let _ = sys_ready_tx.send(None);
-    } else {
-        let proc_flag = mon_flag.clone();
-        let sys_flag = mon_flag.clone();
-        let mon_handle = handle.clone();
-        let resources_enabled = resource_monitor_enabled;
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            let channel = if !resources_enabled {
-                None
-            } else { match mon_handle.channel_open_session().await {
-                Ok(ch) => match ch.exec(true, MON_CMD).await {
-                    Ok(()) => Some(ch),
-                    Err(error) => {
-                        tracing::warn!("monitor exec failed: {error}");
-                        None
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!("monitor channel open failed: {error}");
-                    None
-                }
-            }};
-            let _ = mon_ready_tx.send(channel);
-        });
-        let proc_handle = handle.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            if !proc_flag.load(Ordering::Relaxed) {
-                let _ = proc_ready_tx.send(None);
-                return;
-            }
-            let channel = match proc_handle.channel_open_session().await {
-                Ok(ch) => match ch.exec(true, PROC_CMD).await {
-                    Ok(()) => Some(ch),
-                    Err(error) => {
-                        tracing::warn!("process monitor exec failed: {error}");
-                        None
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!("process monitor channel open failed: {error}");
-                    None
-                }
-            };
-            let _ = proc_ready_tx.send(channel);
-        });
-        let sys_handle = handle.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-            if !sys_flag.load(Ordering::Relaxed) {
-                let _ = sys_ready_tx.send(None);
-                return;
-            }
-            let channel = match sys_handle.channel_open_session().await {
-                Ok(ch) => match ch.exec(true, SYS_CMD).await {
-                    Ok(()) => Some(ch),
-                    Err(error) => {
-                        tracing::warn!("system-info exec failed: {error}");
-                        None
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!("system-info channel open failed: {error}");
-                    None
-                }
-            };
-            let _ = sys_ready_tx.send(channel);
-        });
-    }
-    let mut mon_start_pending = true;
-    let mut proc_start_pending = true;
-    let mut sys_start_pending = true;
-    let mut resource_monitoring = true;
+    // Delay auxiliary channels until the terminal is usable, but open them
+    // serially from this task. Detached concurrent opens can race russh on
+    // strict servers and briefly make the process panel appear empty (#264).
+    let auxiliary_started_at = tokio::time::Instant::now();
+    let mut auxiliary_startup = AuxiliaryStartup::new(!session.disable_shell_integration);
+    let mut auxiliary_deadline = auxiliary_startup
+        .pending
+        .map(|kind| auxiliary_started_at + kind.delay());
+    let mut resource_monitoring = resource_monitor_enabled;
     let mut first_terminal_output = true;
     // Local (-L) and dynamic (-D) listen client-side; their tasks are aborted
     // on session exit.
@@ -2200,7 +2183,6 @@ async fn run_session(
                         _ => None,
                     };
                     let auxiliary_available = auxiliary_channel.is_some();
-
                     match kind {
                         AuxiliaryChannelKind::Resources => mon_channel = auxiliary_channel,
                         AuxiliaryChannelKind::Processes => proc_channel = auxiliary_channel,
@@ -2208,7 +2190,7 @@ async fn run_session(
                     }
                     auxiliary_startup.complete();
                     auxiliary_deadline = auxiliary_startup
-                        .pending()
+                        .pending
                         .map(|next| tokio::time::Instant::now() + next.delay());
                     tracing::debug!(
                         "[SESSION_START] id={} stage={kind:?}-startup-finished available={} elapsed_ms={}",
@@ -2350,9 +2332,17 @@ async fn run_session(
                 suppress_deadline = None;
                 let mut buf = std::mem::take(&mut echo_buf);
                 if let Some(p) = buf.find(PROMPT_SETUP_PREFIX) {
-                    let end = prompt_setup_echo_end(&buf, p);
-                    strip_prompt_setup_echo(&mut buf, p, end);
-                    late_prompt_echo_pending = false;
+                    if let Some(rel_end) = buf[p..].find(PROMPT_SETUP_SUFFIX) {
+                        let end = p + rel_end + PROMPT_SETUP_SUFFIX.len();
+                        strip_prompt_setup_echo(&mut buf, p, end);
+                        late_prompt_echo_pending = false;
+                    } else {
+                        // Do not strip only the first wrapped line. Hold the
+                        // complete command line until the suffix arrives.
+                        let line_start = line_start_before(&buf, p);
+                        late_prompt_echo_buf = buf.split_off(line_start);
+                        late_prompt_echo_pending = true;
+                    }
                 } else {
                     // Nothing identifiable arrived before the deadline. Allow
                     // one later setup echo to be removed, then permanently
@@ -2366,9 +2356,8 @@ async fn run_session(
             msg = channel.wait() => {
                 match msg {
                     Some(ChannelMsg::Data { data }) => {
-                        // Route the two ZMODEM handshakes in opposite directions:
-                        // remote `sz` downloads into Downloads; remote `rz` opens
-                        // a local multi-file picker and uploads the selection.
+                        // Route remote `sz` and `rz` handshakes to the matching
+                        // receive/send implementation.
                         let zmodem_cooldown = zmodem_done_at
                             .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
                         if let Some(direction) = (!zmodem_cooldown)
@@ -2440,18 +2429,9 @@ async fn run_session(
                                     tracing::warn!("zmodem {direction:?} failed: {e:#}");
                                     let _ = channel.data(&ZMODEM_CANCEL[..]).await;
                                     let _ = events.send(SessionEvent::Output(format!(
-                                        "\r\n[meatshell] {}: {e:#}\r\n",
-                                        match direction {
-                                            ZmodemDirection::Download => t(
-                                                "ZMODEM 接收失败,已取消",
-                                                "ZMODEM receive failed; cancelled",
-                                            ),
-                                            ZmodemDirection::Upload => t(
-                                                "ZMODEM 上传失败,已取消",
-                                                "ZMODEM upload failed; cancelled",
-                                            ),
-                                        }
-                                    )));
+                                        "\r\n[meatshell] {}: {e}\r\n",
+                                        t("ZMODEM 接收失败,已取消", "ZMODEM receive failed; cancelled")
+                                    ).into()));
                                 }
                             }
                             continue;
@@ -2492,6 +2472,15 @@ async fn run_session(
                             // output containing our injected setup command is
                             // buffered and stripped; the first usable terminal
                             // frame no longer waits for shell integration.
+                            for (response, append_enter) in trigger_engine.feed(&chunk) {
+                                let mut bytes = response.as_str().as_bytes().to_vec();
+                                if append_enter {
+                                    bytes.push(b'\r');
+                                }
+                                if let Err(error) = channel.data(&bytes[..]).await {
+                                    tracing::warn!("login trigger response failed: {error}");
+                                }
+                            }
                             let _ = events.send(SessionEvent::Output(chunk));
                             let _ = channel.data(prompt_setup.as_bytes()).await;
                             continue;
@@ -2531,9 +2520,15 @@ async fn run_session(
                                 suppress_deadline = None;
                                 let mut buf = std::mem::take(&mut echo_buf);
                                 if let Some(p) = buf.find(PROMPT_SETUP_PREFIX) {
-                                    let end = prompt_setup_echo_end(&buf, p);
-                                    strip_prompt_setup_echo(&mut buf, p, end);
-                                    late_prompt_echo_pending = false;
+                                    if let Some(rel_end) = buf[p..].find(PROMPT_SETUP_SUFFIX) {
+                                        let end = p + rel_end + PROMPT_SETUP_SUFFIX.len();
+                                        strip_prompt_setup_echo(&mut buf, p, end);
+                                        late_prompt_echo_pending = false;
+                                    } else {
+                                        let line_start = line_start_before(&buf, p);
+                                        late_prompt_echo_buf = buf.split_off(line_start);
+                                        late_prompt_echo_pending = true;
+                                    }
                                 } else {
                                     late_prompt_echo_pending = true;
                                 }
@@ -2548,9 +2543,10 @@ async fn run_session(
                                 let _ = events.send(SessionEvent::CwdChanged(cwd));
                             }
                             let mut clean = chunk;
-                            strip_pending_prompt_setup_echo(
+                            filter_late_prompt_setup_echo(
                                 &mut clean,
                                 &mut late_prompt_echo_pending,
+                                &mut late_prompt_echo_buf,
                             );
                             clean
                         };
@@ -2572,15 +2568,23 @@ async fn run_session(
                             if append_enter {
                                 bytes.push(b'\r');
                             }
-                            let encoded = terminal_encoder.encode(&bytes);
-                            if let Err(error) = channel.data(&encoded[..]).await {
-                                tracing::warn!("session trigger response failed: {error}");
+                            if let Err(error) = channel.data(&bytes[..]).await {
+                                tracing::warn!("login trigger response failed: {error}");
                             }
                         }
                         let _ = events.send(SessionEvent::Output(text));
                     }
                     Some(ChannelMsg::ExtendedData { data, ext: _ }) => {
                         let text = String::from_utf8_lossy(&data).into_owned();
+                        for (response, append_enter) in trigger_engine.feed(&text) {
+                            let mut bytes = response.as_str().as_bytes().to_vec();
+                            if append_enter {
+                                bytes.push(b'\r');
+                            }
+                            if let Err(error) = channel.data(&bytes[..]).await {
+                                tracing::warn!("login trigger response failed: {error}");
+                            }
+                        }
                         let _ = events.send(SessionEvent::Output(text));
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
@@ -2588,10 +2592,7 @@ async fn run_session(
                             format!("{} (code {exit_status})", t("远程进程退出", "remote process exited")),
                         ));
                     }
-                    Some(ChannelMsg::Close) => {
-                        break;
-                    }
-                    None => {
+                    Some(ChannelMsg::Close) | None => {
                         break;
                     }
                     _ => {}
@@ -3562,11 +3563,41 @@ fn _assert_handle_send() {
 }
 
 #[cfg(test)]
+mod auxiliary_startup_tests {
+    use super::{AuxiliaryChannelKind, AuxiliaryStartup, AUXILIARY_CHANNEL_TIMEOUT};
+
+    #[test]
+    fn starts_channels_in_order_without_overlap() {
+        let mut startup = AuxiliaryStartup::new(true);
+        assert_eq!(startup.begin(), Some(AuxiliaryChannelKind::Resources));
+        assert_eq!(startup.begin(), None);
+        startup.complete();
+        assert_eq!(startup.begin(), Some(AuxiliaryChannelKind::Processes));
+        startup.complete();
+        assert_eq!(startup.begin(), Some(AuxiliaryChannelKind::SystemInfo));
+        startup.complete();
+        assert_eq!(startup.begin(), None);
+    }
+
+    #[test]
+    fn disabled_startup_has_no_pending_channel() {
+        let mut startup = AuxiliaryStartup::new(false);
+        assert_eq!(startup.begin(), None);
+    }
+
+    #[tokio::test]
+    async fn timeout_constant_is_bounded() {
+        let result = tokio::time::timeout(AUXILIARY_CHANNEL_TIMEOUT.min(std::time::Duration::from_millis(1)), std::future::pending::<()>()).await;
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
 mod prompt_setup_echo_tests {
     use super::{
-        prompt_setup_echo_end, prompt_setup_supported, strip_late_prompt_setup_echo,
-        strip_pending_prompt_setup_echo, strip_prompt_setup_echo, PROMPT_BODY,
-        PROMPT_SETUP_HISTORY_MARKER, PROMPT_SETUP_PREFIX,
+        filter_late_prompt_setup_echo, prompt_setup_echo_end, prompt_setup_supported,
+        strip_late_prompt_setup_echo, strip_pending_prompt_setup_echo, strip_prompt_setup_echo,
+        PROMPT_BODY, PROMPT_SETUP_HISTORY_MARKER, PROMPT_SETUP_PREFIX,
     };
 
     #[test]
@@ -3653,6 +3684,26 @@ mod prompt_setup_echo_tests {
     }
 
     #[test]
+    fn late_setup_filter_handles_echo_split_across_packets() {
+        let mut first = format!(
+            "prompt\r\n{} && eval 'body",
+            PROMPT_SETUP_PREFIX
+        );
+        let mut held = String::new();
+        let mut pending = true;
+        filter_late_prompt_setup_echo(&mut first, &mut pending, &mut held);
+        assert_eq!(first, "prompt\r\n");
+        assert!(!held.is_empty());
+
+        let mut second = "; __ms7'\r\nafter".to_string();
+        filter_late_prompt_setup_echo(&mut second, &mut pending, &mut held);
+        assert!(!pending);
+        assert!(held.is_empty());
+        assert!(!second.contains(PROMPT_SETUP_PREFIX));
+        assert!(second.contains("after"));
+    }
+
+    #[test]
     fn hidden_setup_echo_resynchronizes_the_prompt_cursor() {
         let prompt = "root@host:~# ";
         let mut parser = vt100::Parser::new(4, 80, 0);
@@ -3670,69 +3721,6 @@ mod prompt_setup_echo_tests {
 
         assert_eq!(parser.screen().contents().lines().next(), Some(prompt));
         assert_eq!(parser.screen().cursor_position(), (0, prompt.len() as u16));
-    }
-}
-
-#[cfg(test)]
-mod zmodem_detection_tests {
-    use super::{zmodem_direction, ZmodemDirection};
-
-    #[test]
-    fn distinguishes_remote_sz_from_remote_rz() {
-        assert_eq!(
-            zmodem_direction(b"**\x18B00000000000000\r\n"),
-            Some(ZmodemDirection::Download)
-        );
-        assert_eq!(
-            zmodem_direction(b"rz waiting to receive.**\x18B0100000023be50\r\n\x11"),
-            Some(ZmodemDirection::Upload)
-        );
-    }
-
-    #[test]
-    fn ignores_non_handshake_frames_and_ctrl_x() {
-        assert_eq!(zmodem_direction(b"plain \x18 text"), None);
-        assert_eq!(zmodem_direction(b"**\x18B08000000000000\r\n"), None);
-    }
-}
-
-#[cfg(test)]
-mod auxiliary_startup_tests {
-    use super::{auxiliary_timeout, AuxiliaryChannelKind, AuxiliaryStartup};
-
-    #[test]
-    fn starts_channels_in_order_and_never_overlaps_them() {
-        let mut startup = AuxiliaryStartup::new(true);
-
-        assert_eq!(startup.begin(), Some(AuxiliaryChannelKind::Resources));
-        assert_eq!(startup.begin(), None);
-        startup.complete();
-
-        assert_eq!(startup.begin(), Some(AuxiliaryChannelKind::Processes));
-        assert_eq!(startup.begin(), None);
-        startup.complete();
-
-        assert_eq!(startup.begin(), Some(AuxiliaryChannelKind::SystemInfo));
-        startup.complete();
-        assert_eq!(startup.begin(), None);
-    }
-
-    #[test]
-    fn disabled_shell_integration_skips_all_auxiliary_channels() {
-        let mut startup = AuxiliaryStartup::new(false);
-
-        assert_eq!(startup.begin(), None);
-    }
-
-    #[tokio::test]
-    async fn auxiliary_channel_startup_timeout_releases_the_pump() {
-        let result = auxiliary_timeout(
-            std::time::Duration::from_millis(1),
-            std::future::pending::<()>(),
-        )
-        .await;
-
-        assert!(result.is_err());
     }
 }
 
@@ -3871,6 +3859,60 @@ mod monitor_hardening_tests {
         assert_eq!(procs[0].pid, 42);
         assert_eq!(procs[0].user, "root");
         assert_eq!(procs[0].command, "java -jar demo.jar");
+    }
+}
+
+#[cfg(test)]
+mod trigger_engine_tests {
+    use super::{SessionTrigger, Secret, TriggerEngine};
+
+    fn rule(expect: &str, response: &str, repeat: bool) -> SessionTrigger {
+        SessionTrigger {
+            expect: expect.into(),
+            response: Secret::new(response),
+            append_enter: true,
+            repeat,
+        }
+    }
+
+    #[test]
+    fn matches_text_split_across_packets() {
+        let mut engine = TriggerEngine::new(&[rule("Password:", "secret", false)]);
+        assert!(engine.feed("Pass").is_empty());
+        let replies = engine.feed("word:");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].0.as_str(), "secret");
+        assert!(engine.feed("Password:").is_empty());
+    }
+
+    #[test]
+    fn repeat_rules_can_match_again() {
+        let mut engine = TriggerEngine::new(&[rule("login:", "alice", true)]);
+        assert_eq!(engine.feed("login:")[0].0.as_str(), "alice");
+        assert_eq!(engine.feed("login:")[0].0.as_str(), "alice");
+    }
+}
+
+#[cfg(test)]
+mod zmodem_detection_tests {
+    use super::{zmodem_direction, ZmodemDirection};
+
+    #[test]
+    fn distinguishes_remote_sz_from_remote_rz() {
+        assert_eq!(
+            zmodem_direction(b"**\x18B00000000000000\r\n"),
+            Some(ZmodemDirection::Download)
+        );
+        assert_eq!(
+            zmodem_direction(b"rz waiting to receive.**\x18B0100000023be50\r\n\x11"),
+            Some(ZmodemDirection::Upload)
+        );
+    }
+
+    #[test]
+    fn ignores_non_handshake_frames_and_ctrl_x() {
+        assert_eq!(zmodem_direction(b"plain \x18 text"), None);
+        assert_eq!(zmodem_direction(b"**\x18B08000000000000\r\n"), None);
     }
 }
 

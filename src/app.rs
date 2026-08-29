@@ -81,9 +81,8 @@ use i_slint_backend_winit::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use tokio::runtime::Runtime;
 
-use crate::app::core::{AppCore, TabRoute, TabRoutes, WindowRegistry, WindowState};
 use crate::config::{
-    AuthMethod, ConfigStore, OutputHighlightRule, Secret, Session, SessionKind,
+    AuthMethod, ConfigStore, OutputHighlightRule, Secret, Session, SessionKind, WslProfile,
 };
 use crate::i18n::t;
 use crate::layout::{LogicalRect, TerminalWheelHit};
@@ -172,40 +171,6 @@ type LocalSnap = Arc<Mutex<SystemSnapshot>>;
 
 fn should_block_close(exit_confirmed: bool, has_live_sessions: bool) -> bool {
     !exit_confirmed && has_live_sessions
-}
-
-/// Tear down one window's workers (SSH + SFTP) and hide its detachable
-/// monitor windows. Idempotent: repeated calls see empty maps. Also aborts
-/// every queued auth prompt (host key / credentials / MFA) owned by this
-/// window, answering reject/cancel so the blocked connection attempts fail
-/// cleanly instead of hanging on a dialog that will never show (#multi-window).
-fn teardown_window(
-    window_id: u64,
-    handles: &Rc<RefCell<HashMap<String, SessionHandle>>>,
-    sftp_handles: &SftpHandles,
-    proc_weak: &slint::Weak<ProcWindow>,
-    sys_weak: &slint::Weak<SystemInfoWindow>,
-) {
-    abort_window_prompts(window_id);
-    {
-        let mut sessions = handles.borrow_mut();
-        for handle in sessions.values() {
-            handle.close();
-        }
-        sessions.clear();
-    }
-    if let Ok(mut sftp) = sftp_handles.lock() {
-        for handle in sftp.values() {
-            handle.close();
-        }
-        sftp.clear();
-    }
-    if let Some(w) = proc_weak.upgrade() {
-        let _ = w.hide();
-    }
-    if let Some(w) = sys_weak.upgrade() {
-        let _ = w.hide();
-    }
 }
 
 /// Tab ids currently shown in a pane (`term.id == pane.active-id` in Slint).
@@ -355,15 +320,6 @@ fn do_tab_render_flush(
 
 /// Number of samples kept for the sparkline.
 const NET_HISTORY_LEN: usize = 60;
-
-// UI-thread handle to the process core, published by `run()` before the
-// event loop starts. Cross-thread callers (the single-instance IPC
-// listener) run a capture-less closure via `invoke_from_event_loop` and
-// fetch the non-Send `Rc<AppCore>` from here instead of moving it across
-// threads.
-thread_local! {
-    static NEW_WINDOW_CORE: RefCell<Option<Rc<AppCore>>> = const { RefCell::new(None) };
-}
 
 /// Embed the app icon PNG into the binary and set it as the X11 window icon.
 ///
@@ -750,158 +706,12 @@ pub fn run() -> Result<()> {
     #[cfg(target_os = "macos")]
     setup_macos_platform(config.renderer_mode());
 
-    // --- Single-instance coordination -------------------------------------
-    // A second `meatshell --new-window` forwards to us and exits; we never
-    // run two GUI instances for that entry point (Chrome-style). Plain
-    // launches pass forward=false and never forward: if the endpoint is
-    // taken they run as an independent second instance. IPC failures fall
-    // through to a normal launch rather than blocking the app.
-    let si_path = crate::app::single_instance::socket_path();
-    let instance = match crate::app::single_instance::acquire(&si_path, intent.new_window) {
-        Ok(i) => Some(i),
-        Err(e) => {
-            tracing::warn!("single-instance acquire failed: {e}");
-            None
-        }
-    };
-    if intent.new_window {
-        if let Some(crate::app::single_instance::Instance::Forwarded) = instance {
-            return Ok(());
-        }
-        // We are the primary (or IPC failed): fall through and open a window.
-    }
-
     // --- Runtime + store -------------------------------------------------
     let runtime = Arc::new(Runtime::new().context("failed to start tokio runtime")?);
     let store = Rc::new(RefCell::new(config));
     // Reachable from the Slint-thread event handler for recording terminal
     // commands into history (#113).
     HISTORY_STORE.with(|s| *s.borrow_mut() = Some(store.clone()));
-
-    let core = Rc::new(AppCore {
-        runtime,
-        store,
-        registry: Rc::new(WindowRegistry::default()),
-        window_states: Rc::new(RefCell::new(HashMap::new())),
-        tab_routes: Arc::new(Mutex::new(HashMap::new())),
-        first_window_done: Cell::new(false),
-    });
-
-    // IPC listener: forwarded "new-window" requests arrive on the listener
-    // thread, but open_window() must run on the Slint UI thread — and
-    // AppCore holds Rc state, so it cannot be captured by the
-    // invoke_from_event_loop closure. The closure therefore captures nothing
-    // and fetches the core from a UI-thread-local set just before the event
-    // loop starts; until then (early startup) the listener retries briefly so
-    // no request is lost.
-    if let Some(crate::app::single_instance::Instance::Primary { listen }) = instance {
-        std::thread::spawn(move || {
-            listen.spawn(move |msg| {
-                if msg == "new-window" {
-                    tracing::info!("single-instance: new-window request received");
-                    // invoke_from_event_loop fails forever once the event
-                    // loop is gone (app quitting) — retry only briefly so
-                    // this listener callback cannot spin indefinitely.
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_secs(10);
-                    while slint::invoke_from_event_loop(|| {
-                        NEW_WINDOW_CORE.with(|c| {
-                            if let Some(core) = c.borrow().clone() {
-                                match open_window(core.clone(), true, None) {
-                                    Ok(window_id) => {
-                                        // The request came from an OS entry
-                                        // point while we may be in the
-                                        // background — bring the new window
-                                        // to the front (best effort).
-                                        if let Some(st) =
-                                            core.window_states.borrow().get(&window_id)
-                                        {
-                                            if let Some(w) = st.weak.upgrade() {
-                                                raise_to_front(&w);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("failed to open forwarded window: {e:#}")
-                                    }
-                                }
-                            }
-                        });
-                    })
-                    .is_err()
-                    {
-                        if std::time::Instant::now() >= deadline {
-                            tracing::warn!(
-                                "single-instance: event loop unreachable, dropping new-window request"
-                            );
-                            break;
-                        }
-                        // The event loop provider appears after startup begins;
-                        // retry instead of dropping an explicit user action.
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                }
-            });
-        });
-    }
-
-    // Set the Wayland app_id / X11 WM_CLASS *before* the window is created so
-    // the Linux desktop shell can match the running window to the installed
-    // `meatshell.desktop` entry and show our icon in the dock/taskbar.  (On
-    // Windows the icon comes from the embedded .ico, so this is a no-op there.)
-    let _ = slint::set_xdg_app_id("meatshell");
-
-    // Taskbar jump list ("新建窗口") on Windows: register before the first
-    // window shows so the entry is available immediately. Failure is
-    // warn-only and never blocks startup.
-    #[cfg(windows)]
-    crate::app::jump_list::register_new_window_task();
-
-    open_window(core.clone(), false, None)?;
-
-    // Publish the core to the UI thread so the IPC listener's
-    // invoke_from_event_loop closures can open windows without capturing the
-    // non-Send Rc<AppCore> (see the listener above).
-    NEW_WINDOW_CORE.with(|c| *c.borrow_mut() = Some(core.clone()));
-
-    // Global loop: window.run() returns when *its* window closes, which is
-    // wrong once several windows share the loop.
-    let loop_result = slint::run_event_loop();
-    if let Err(e) = &loop_result {
-        tracing::warn!(
-            "event loop exited with error ({e:#}); running bounded shutdown anyway"
-        );
-    }
-    // Bound the shutdown instead of relying on Rust's drop glue: tokio's
-    // Runtime Drop waits indefinitely for tasks that never finished
-    // (telnet/local/sftp pumps, spawn_blocking helpers) — the observed
-    // windowless lingering process on Windows 11. Take ownership of the
-    // runtime when all holders have gone, give stragglers two seconds, then
-    // hard-exit unconditionally. The event-loop error path goes through here
-    // too: propagating with `?` would hand the runtime to the TLS destructor
-    // chain, where a wedged blocking thread could hang the process forever.
-    NEW_WINDOW_CORE.with(|c| *c.borrow_mut() = None);
-    if let Ok(core_owned) = Rc::try_unwrap(core) {
-        if let Ok(runtime) = Arc::try_unwrap(core_owned.runtime) {
-            runtime.shutdown_timeout(std::time::Duration::from_secs(2));
-        }
-    }
-    std::process::exit(0);
-}
-
-/// Build and wire one application window. Called for the first window by
-/// `run()` and for every subsequent window by the new-window entry points.
-/// `at` pins the window to a physical screen position (tab detach); without
-/// it the window cascades from the newest one or centers.
-/// Returns the registry id used to unregister on close.
-fn open_window(
-    core: Rc<AppCore>,
-    cascade: bool,
-    at: Option<slint::PhysicalPosition>,
-) -> Result<u64> {
-    let runtime = core.runtime.clone();
-    let store = core.store.clone();
-    let registry = core.registry.clone();
 
     // Per-tab SSH handles (shell only; lives on Slint thread via Rc).
     let handles: Rc<RefCell<HashMap<String, SessionHandle>>> =
@@ -930,12 +740,12 @@ fn open_window(
     let last_term_size: Arc<Mutex<(u32, u32)>> = Arc::new(Mutex::new((80, 24)));
 
     // --- Build window + models ------------------------------------------
+    // Set the Wayland app_id / X11 WM_CLASS *before* the window is created so
+    // the Linux desktop shell can match the running window to the installed
+    // `meatshell.desktop` entry and show our icon in the dock/taskbar.  (On
+    // Windows the icon comes from the embedded .ico, so this is a no-op there.)
+    let _ = slint::set_xdg_app_id("meatshell");
     let window = AppWindow::new().context("failed to build Slint window")?;
-    // Cascade origin must be captured *before* registering: once registered,
-    // registry.newest() is this window itself. Registration itself is deferred
-    // until after the last fallible construction below, so a failed monitor
-    // window never leaves a stale registry entry.
-    let cascade_origin = if cascade { registry.newest() } else { None };
     // Slint applies preferred-width/height while the native window is being
     // created. Do not treat those startup Resized events as user adjustments;
     // otherwise they overwrite the persisted size before restoration (#278).
@@ -986,13 +796,10 @@ fn open_window(
     window.set_sys_swap_rows(ModelRc::from(sys_swap_model.clone()));
     window.set_sys_network_rows(ModelRc::from(sys_network_model.clone()));
     window.set_sys_filesystem_rows(ModelRc::from(sys_filesystem_model.clone()));
-    let proc_win = Rc::new(ProcWindow::new().context("failed to build process window")?);
+    let proc_win = ProcWindow::new().context("failed to build process window")?;
     proc_win.set_custom_titlebar(cfg!(not(target_os = "macos")));
     proc_win.set_proc_list(ModelRc::from(proc_rows_model.clone()));
-    let sys_win = Rc::new(SystemInfoWindow::new().context("failed to build system info window")?);
-    // Every fallible construction has now succeeded — register the window.
-    // (cascade_origin above was captured before this point, as required.)
-    let window_id = registry.register(window.as_weak());
+    let sys_win = SystemInfoWindow::new().context("failed to build system info window")?;
     sys_win.set_custom_titlebar(cfg!(not(target_os = "macos")));
     sys_win.set_metrics(ModelRc::from(sys_metrics_model.clone()));
     sys_win.set_nets(ModelRc::from(sys_net_rows_model.clone()));
@@ -1037,22 +844,6 @@ fn open_window(
         use i_slint_backend_winit::winit::window::ResizeDirection;
         let weak = proc_win.as_weak();
         proc_win.on_win_resize_se(move || {
-            if let Some(w) = weak.upgrade() {
-                w.window().with_winit_window(|ww| {
-                    let _ = ww.drag_resize_window(ResizeDirection::SouthEast);
-                });
-                schedule_slint_pointer_ungrab(weak.clone());
-            }
-        });
-    }
-    {
-        // Bottom-right resize grip on the main window (frameless mode only).
-        // #main-resize-grip: mirrors proc_window's grip so the main window
-        // gets the same OS-drag-resize-from-corner behavior when the OS title
-        // bar is hidden (custom-titlebar mode on Windows/Linux).
-        use i_slint_backend_winit::winit::window::ResizeDirection;
-        let weak = window.as_weak();
-        window.on_win_resize_se(move || {
             if let Some(w) = weak.upgrade() {
                 w.window().with_winit_window(|ww| {
                     let _ = ww.drag_resize_window(ResizeDirection::SouthEast);
@@ -1148,6 +939,8 @@ fn open_window(
     // shell (#158); on Windows/Linux they stay Ctrl-based.
     window.set_is_mac(cfg!(target_os = "macos"));
     window.set_is_windows(cfg!(windows));
+    window.set_wsl_profiles(wsl_profile_model(&store.borrow()));
+    window.set_wsl_new_directory("~".into());
 
     // Apply the saved terminal font (Interface settings). An empty family keeps
     // the built-in default; the size always applies (defaults to 13).
@@ -1179,6 +972,7 @@ fn open_window(
         window.set_quick_panel_width(s.quick_panel_width());
         window.set_quick_panel_height(s.quick_panel_height());
         window.set_quick_panel_dock(s.quick_panel_dock().into());
+        window.set_cmd_bar_hidden(s.cmd_bar_hidden());
     }
 
     // Apply the saved immersive wallpaper (overrides dark/light when set; a
@@ -1239,6 +1033,16 @@ fn open_window(
         window.on_set_sftp_zebra_rows(move |enabled| {
             let mut s = store.borrow_mut();
             s.set_sftp_zebra_rows(enabled);
+            let _ = s.save();
+        });
+    }
+
+    // Toolbar toggle: hide/show the quick-command bar and persist it globally.
+    {
+        let store = store.clone();
+        window.on_set_cmd_bar_hidden(move |hidden| {
+            let mut s = store.borrow_mut();
+            s.set_cmd_bar_hidden(hidden);
             let _ = s.save();
         });
     }
@@ -1746,7 +1550,6 @@ fn open_window(
     {
         let weak = window.as_weak();
         let store = store.clone();
-        let registry = registry.clone();
         window.on_set_term_font_size(move |size: i32| {
             {
                 let mut s = store.borrow_mut();
@@ -1756,7 +1559,6 @@ fn open_window(
             if let Some(w) = weak.upgrade() {
                 w.set_term_font_size(size as f32);
             }
-            registry.broadcast_config_changed();
         });
     }
     {
@@ -1841,7 +1643,6 @@ fn open_window(
         let store = store.clone();
         let bufs_wp = bufs.clone();
         let proc_weak = proc_win.as_weak();
-        let registry = registry.clone();
         window.on_set_wallpaper(move |id: SharedString| {
             let id = id.to_string();
             let mut selected_builtin_theme = None;
@@ -1855,22 +1656,15 @@ fn open_window(
                     sync_proc_theme(&w, &p);
                 }
             }
-            {
-                let mut s = store.borrow_mut();
-                s.set_wallpaper(id);
-                // Choosing a built-in wallpaper applies its recommended palette once;
-                // persist that result so it too survives the next launch. A later
-                // manual theme toggle will overwrite this preference as expected.
-                if let Some(dark) = selected_builtin_theme {
-                    s.set_theme_pref(if dark { "dark" } else { "light" }.to_string());
-                }
-                let _ = s.save();
+            let mut s = store.borrow_mut();
+            s.set_wallpaper(id);
+            // Choosing a built-in wallpaper applies its recommended palette once;
+            // persist that result so it too survives the next launch. A later
+            // manual theme toggle will overwrite this preference as expected.
+            if let Some(dark) = selected_builtin_theme {
+                s.set_theme_pref(if dark { "dark" } else { "light" }.to_string());
             }
-            // Only the theme flip needs cross-window propagation; the wallpaper
-            // image itself is not synced to other windows (YAGNI).
-            if selected_builtin_theme.is_some() {
-                registry.broadcast_config_changed();
-            }
+            let _ = s.save();
         });
     }
     {
@@ -1901,11 +1695,75 @@ fn open_window(
     let sessions_model: Rc<VecModel<SessionInfo>> = Rc::new(VecModel::default());
     window.set_sessions(ModelRc::from(sessions_model.clone()));
     sync_sessions_to_model(&store.borrow(), &sessions_model);
+    // WSL profiles are persisted in the same config as sessions and are also
+    // exposed as built-in local sessions in Quick Connect.
     {
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
+        window.on_add_wsl_profile(
+            move |name: SharedString, distribution: SharedString, directory: SharedString| {
+                let changed = {
+                    let mut s = store.borrow_mut();
+                    let changed = s.add_wsl_profile(
+                        name.to_string(),
+                        distribution.to_string(),
+                        directory.to_string(),
+                    );
+                    if changed {
+                        let _ = s.save();
+                    }
+                    changed
+                };
+                if changed {
+                    if let Some(w) = weak.upgrade() {
+                        w.set_wsl_profiles(wsl_profile_model(&store.borrow()));
+                        sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                    }
+                }
+            },
+        );
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let sessions_model = sessions_model.clone();
+        window.on_remove_wsl_profile(move |id: SharedString| {
+            let changed = {
+                let mut s = store.borrow_mut();
+                let changed = s.remove_wsl_profile(id.as_str());
+                if changed {
+                    let _ = s.save();
+                }
+                changed
+            };
+            if changed {
+                if let Some(w) = weak.upgrade() {
+                    w.set_wsl_profiles(wsl_profile_model(&store.borrow()));
+                    sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_pick_wsl_directory(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("选择 WSL 启动目录 / Choose WSL startup directory")
+                .pick_folder()
+            else {
+                return;
+            };
+            let directory = wsl_directory_from_windows_path(&path);
+            if let Some(w) = weak.upgrade() {
+                w.set_wsl_new_directory(directory.into());
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        let sessions_model = sessions_model.clone();
         window.on_webdav_download(move || {
             let Some(w) = weak.upgrade() else { return };
             let enabled = w.get_webdav_enabled();
@@ -1941,7 +1799,6 @@ fn open_window(
             let msg = match res {
                 Ok((added, skipped)) => {
                     sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                    registry.broadcast_config_changed();
                     format!(
                         "{} {}, {} {}",
                         t("已导入", "imported"),
@@ -2074,68 +1931,6 @@ fn open_window(
         });
     }
     {
-        // Font zoom shortcuts. Ctrl+=/-/0 zooms one session: a per-tab px
-        // override; Ctrl+0 resets that session to the size chosen in
-        // Settings. Ctrl+Shift+=/-/0 zooms every session in this window
-        // (shared term-font-size, cleared per-tab overrides so it visibly
-        // applies to all); Ctrl+Shift+0 resets the window to the Settings
-        // size. Zoom never persists globally — the settings stepper owns
-        // that. Changing the size re-measures the cell grid and triggers the
-        // PTY resize on its own.
-        let weak = window.as_weak();
-        let store = store.clone();
-        let terminals_model = terminals_model.clone();
-        window.on_zoom_term_font(move |tab_id: SharedString, direction: i32, window_wide: bool| {
-            let Some(w) = weak.upgrade() else {
-                return;
-            };
-            let settings_size = store.borrow().font_size() as i32;
-            if window_wide {
-                let next = if direction == 0 {
-                    settings_size
-                } else {
-                    w.get_term_font_size() as i32 + direction
-                };
-                w.set_term_font_size(next.clamp(8, 32) as f32);
-                // Per-tab overrides would pin sessions at their old size and
-                // defeat "zoom everything", so drop them.
-                use slint::Model as _;
-                for row in terminals_model.iter() {
-                    if row.font_size > 0 {
-                        let id = row.id.to_string();
-                        update_terminal_row(&terminals_model, &id, |r| r.font_size = 0);
-                    }
-                }
-                return;
-            }
-            let tab_id = tab_id.to_string();
-            if tab_id.is_empty() || tab_id == "welcome" {
-                return;
-            }
-            use slint::Model as _;
-            let Some(row) = terminals_model
-                .iter()
-                .find(|r| r.id.to_string() == tab_id)
-            else {
-                return;
-            };
-            if direction == 0 {
-                // Back to the Settings size, regardless of the window base.
-                update_terminal_row(&terminals_model, &tab_id, |r| {
-                    r.font_size = settings_size.clamp(8, 32)
-                });
-                return;
-            }
-            let base = if row.font_size > 0 {
-                row.font_size
-            } else {
-                w.get_term_font_size() as i32
-            };
-            let next = (base + direction).clamp(8, 32);
-            update_terminal_row(&terminals_model, &tab_id, |r| r.font_size = next);
-        });
-    }
-    {
         let terminals_model = terminals_model.clone();
         let weak = window.as_weak();
         window.on_set_pane_sftp_height(move |tab_id: SharedString, v: f32| {
@@ -2169,43 +1964,6 @@ fn open_window(
     let tab_statuses: TabStatuses = Arc::new(Mutex::new(HashMap::new()));
     let local_snap: LocalSnap = Arc::new(Mutex::new(SystemSnapshot::default()));
     let local_net_hist: NetHist = Arc::new(Mutex::new(vec![0.0; NET_HISTORY_LEN]));
-
-    // Per-tab display-name overrides set via "Rename session" (tab context
-    // menu). Display only — the saved session keeps its own name.
-    let tab_titles: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
-
-    // Repeated timers created below (system sampler). Parked in WindowState
-    // so closing the window stops them instead of leaking.
-    let window_timers: Rc<RefCell<Vec<slint::Timer>>> = Rc::new(RefCell::new(Vec::new()));
-
-    // Expose this window's state to the rest of the process so tabs can be
-    // dragged out into a new window or merged into another one (#tab-detach).
-    core.window_states.borrow_mut().insert(
-        window_id,
-        WindowState {
-            weak: window.as_weak(),
-            handles: handles.clone(),
-            bufs: bufs.clone(),
-            gates: render_gates.clone(),
-            statuses: tab_statuses.clone(),
-            sftp_handles: sftp_handles.clone(),
-            sftp_last_cwd: sftp_last_cwd.clone(),
-            local_snap: local_snap.clone(),
-            net_hist: local_net_hist.clone(),
-            follow_cd: sftp_follow_cd.clone(),
-            layout: layout.clone(),
-            tabs_model: tabs_model.clone(),
-            terminals_model: terminals_model.clone(),
-            panes_model: panes_model.clone(),
-            splitters_model: splitters_model.clone(),
-            timers: window_timers.clone(),
-            content_size: content_size.clone(),
-            proc_win: proc_win.clone(),
-            sys_win: sys_win.clone(),
-            proc_weak: proc_win.as_weak(),
-            sys_weak: sys_win.as_weak(),
-        },
-    );
 
     {
         let proc_weak = proc_win.as_weak();
@@ -2273,9 +2031,7 @@ fn open_window(
     // --- Wire callbacks --------------------------------------------------
     wire_session_callbacks(
         &window,
-        window_id,
         store.clone(),
-        registry.clone(),
         sessions_model.clone(),
         tabs_model.clone(),
         terminals_model.clone(),
@@ -2320,7 +2076,6 @@ fn open_window(
         let weak = window.as_weak();
         let store = store.clone();
         let tabs_model = tabs_model.clone();
-        let registry = registry.clone();
         window.on_set_language(move |code| {
             crate::i18n::set_language(&code.to_string());
             {
@@ -2328,7 +2083,6 @@ fn open_window(
                 s.set_language(crate::i18n::current_code().to_string());
                 let _ = s.save();
             }
-            registry.broadcast_config_changed();
             // Re-translate the welcome tab's dynamic title.
             for i in 0..tabs_model.row_count() {
                 if let Some(mut row) = tabs_model.row_data(i) {
@@ -2386,12 +2140,12 @@ fn open_window(
 
     // Host-key confirmation dialog (#109-5): the user trusts or rejects the
     // presented server key; the decision fans back out to the blocked SSH/SFTP
-    // handler(s) and the next queued prompt for THIS window (if any) is shown.
+    // handler(s) and the next queued prompt (if any) is shown.
     {
         let weak = window.as_weak();
         window.on_hostkey_accept(move || {
             if let Some(w) = weak.upgrade() {
-                resolve_front_hostkey(&w, window_id, true);
+                resolve_front_hostkey(&w, true);
             }
         });
     }
@@ -2399,7 +2153,7 @@ fn open_window(
         let weak = window.as_weak();
         window.on_hostkey_reject(move || {
             if let Some(w) = weak.upgrade() {
-                resolve_front_hostkey(&w, window_id, false);
+                resolve_front_hostkey(&w, false);
             }
         });
     }
@@ -2408,17 +2162,9 @@ fn open_window(
     // username/password (or cancels); the answer unblocks the SSH/SFTP auth.
     {
         let weak = window.as_weak();
-        let registry = registry.clone();
         window.on_cred_accept(move || {
             if let Some(w) = weak.upgrade() {
-                let remember = w.get_cred_remember();
-                resolve_front_cred(&w, window_id, true);
-                // "Remember" persisted new credentials onto the saved session
-                // (auth_dialogs::persist_credentials); the registry is not
-                // reachable there, so broadcast from this owning callback.
-                if remember {
-                    registry.broadcast_config_changed();
-                }
+                resolve_front_cred(&w, true);
             }
         });
     }
@@ -2426,7 +2172,7 @@ fn open_window(
         let weak = window.as_weak();
         window.on_cred_reject(move || {
             if let Some(w) = weak.upgrade() {
-                resolve_front_cred(&w, window_id, false);
+                resolve_front_cred(&w, false);
             }
         });
     }
@@ -2437,7 +2183,7 @@ fn open_window(
         let weak = window.as_weak();
         window.on_mfa_submit(move || {
             if let Some(w) = weak.upgrade() {
-                resolve_front_mfa(&w, window_id, true);
+                resolve_front_mfa(&w, true);
             }
         });
     }
@@ -2445,7 +2191,7 @@ fn open_window(
         let weak = window.as_weak();
         window.on_mfa_cancel(move || {
             if let Some(w) = weak.upgrade() {
-                resolve_front_mfa(&w, window_id, false);
+                resolve_front_mfa(&w, false);
             }
         });
     }
@@ -2520,7 +2266,7 @@ fn open_window(
     // --- In-app update check (#48) -----------------------------------------
     // "Download" on the banner opens the latest-release page in the browser.
     window.on_open_update_url(move || {
-        let url = "https://github.com/yituorou/meatshell/releases/latest";
+        let url = "https://github.com/jeff141/meatshell/releases/latest";
         #[cfg(windows)]
         let _ = std::process::Command::new("explorer").arg(url).spawn();
         #[cfg(target_os = "macos")]
@@ -2530,7 +2276,7 @@ fn open_window(
     });
     // The open-source link in the About dialog opens the project page.
     window.on_open_repo(move || {
-        let url = "https://github.com/yituorou/meatshell";
+        let url = "https://github.com/jeff141/meatshell";
         #[cfg(windows)]
         let _ = std::process::Command::new("explorer").arg(url).spawn();
         #[cfg(target_os = "macos")]
@@ -2541,18 +2287,12 @@ fn open_window(
     // Query the GitHub releases API on a background thread; if a newer version
     // exists, flip the banner on. Best-effort: any network/parse error is
     // silently ignored and the app keeps working on the current version.
-    // Skipped entirely when the user turned the check off (#184). Runs only
-    // for the first window of the process: the old `registry.count() == 1`
-    // guard re-fired the check whenever the count returned to 1 after a
-    // close-then-open. The flag is set regardless of the enabled setting, so
-    // a disabled check is never deferred to a later window either.
-    let first_window = !core.first_window_done.get();
-    core.first_window_done.set(true);
-    if first_window && store.borrow().update_check_enabled() {
+    // Skipped entirely when the user turned the check off (#184).
+    if store.borrow().update_check_enabled() {
         let weak = window.as_weak();
         std::thread::spawn(move || {
             let body =
-                match ureq::get("https://api.github.com/repos/yituorou/meatshell/releases/latest")
+                match ureq::get("https://api.github.com/repos/jeff141/meatshell/releases/latest")
                     .set("User-Agent", "meatshell-update-check")
                     .timeout(std::time::Duration::from_secs(8))
                     .call()
@@ -2658,23 +2398,8 @@ fn open_window(
         window.set_about_libs(ModelRc::from(Rc::new(VecModel::from(libs))));
     }
 
-    // New-window entry points: the TabBar button and the Ctrl+Shift+N /
-    // ⌘⇧N shortcut both route here. Runs on the UI thread (Slint callback),
-    // so open_window can build the window directly. A failed open must not
-    // be silent — the click/keystroke already consumed (#multi-window).
-    {
-        let core = core.clone();
-        window.on_new_window_clicked(move || {
-            if let Err(e) = open_window(core.clone(), true, None) {
-                tracing::warn!("failed to open new window: {e:#}");
-            }
-        });
-    }
-
     wire_tab_callbacks(
         &window,
-        window_id,
-        core.clone(),
         tabs_model.clone(),
         terminals_model.clone(),
         layout.clone(),
@@ -2686,7 +2411,6 @@ fn open_window(
         render_gates.clone(),
         sftp_handles.clone(),
         sftp_last_cwd.clone(),
-        tab_titles.clone(),
     );
     wire_sftp_callbacks(
         &window,
@@ -2703,7 +2427,6 @@ fn open_window(
         store.clone(),
         ConnectCtx {
             weak: window.as_weak(),
-            window_id,
             runtime: runtime.clone(),
             handles: handles.clone(),
             sftp_handles: sftp_handles.clone(),
@@ -2718,7 +2441,6 @@ fn open_window(
             sftp_follow_cd: sftp_follow_cd.clone(),
             resource_monitor_enabled: resource_monitor_enabled.clone(),
             store: store.clone(),
-            tab_routes: core.tab_routes.clone(),
         },
     );
 
@@ -2789,30 +2511,23 @@ fn open_window(
             }
         },
     );
-    // Keep the timer alive as long as this window exists: it lives in the
-    // WindowState timers vec, which forget_window_state drops on close
-    // (Slint timers stop when dropped) — no leaking needed.
-    window_timers.borrow_mut().push(timer);
+    // Keep the timer alive for the entire event loop by parking it on a
+    // leaked Box. Slint timers drop themselves on Drop, and we don't want
+    // that here.
+    Box::leak(Box::new(timer));
 
     // OS file drag-and-drop → upload to the active session's SFTP directory,
     // but only when the file is dropped over the file-list area.
     {
-        use i_slint_backend_winit::winit::event::{
-            MouseScrollDelta, TouchPhase, WindowEvent as WEvent,
-        };
+        use i_slint_backend_winit::winit::event::{MouseScrollDelta, WindowEvent as WEvent};
         use i_slint_backend_winit::EventResult;
         let weak = window.as_weak();
         let sh = sftp_handles.clone();
         let wheel_bufs = bufs.clone();
         let close_handles = handles.clone();
-        let close_sftp_handles = sftp_handles.clone();
-        let ev_proc_weak = proc_win.as_weak();
-        let ev_sys_weak = sys_win.as_weak();
         let ev_store = store.clone();
         let ev_activity = activity.clone();
         let ev_exit_confirmed = exit_confirmed.clone();
-        let ev_registry = registry.clone();
-        let ev_core = core.clone();
         let ev_window_size_tracking_ready = window_size_tracking_ready.clone();
         let ev_pending_window_size_restore = pending_window_size_restore.clone();
         let mut last_cursor_logical: Option<(f32, f32)> = None;
@@ -3117,8 +2832,6 @@ fn open_window(
         let close_handles = handles.clone();
         let close_sftp_handles = sftp_handles.clone();
         let close_exit_confirmed = exit_confirmed.clone();
-        let close_registry = registry.clone();
-        let close_core = core.clone();
         window.on_confirm_close_yes(move || {
             // Guard against a double click and against another close request
             // arriving from Windows Installer while shutdown is in progress.
@@ -3128,24 +2841,31 @@ fn open_window(
             if let Some(w) = weak.upgrade() {
                 w.set_confirm_close_open(false);
                 save_layout(&w, &cc_store);
-                clear_zen_on_close(&w, &cc_store);
+                let _ = w.hide();
+            }
+            if let Some(w) = proc_weak.upgrade() {
+                let _ = w.hide();
+            }
+            if let Some(w) = sys_weak.upgrade() {
                 let _ = w.hide();
             }
             // Ask every worker to stop before the runtime/event loop is torn
-            // down, and hide the detachable monitor windows. Clearing the maps
-            // also makes any repeated close request see no live sessions and
-            // pass through immediately.
-            teardown_window(
-                window_id,
-                &close_handles,
-                &close_sftp_handles,
-                &proc_weak,
-                &sys_weak,
-            );
-            if close_registry.unregister(window_id) {
-                let _ = slint::quit_event_loop();
+            // down. Clearing the maps also makes any repeated close request see
+            // no live sessions and pass through immediately.
+            {
+                let mut sessions = close_handles.borrow_mut();
+                for handle in sessions.values() {
+                    handle.close();
+                }
+                sessions.clear();
             }
-            forget_window_state(&close_core, window_id);
+            if let Ok(mut sftp) = close_sftp_handles.lock() {
+                for handle in sftp.values() {
+                    handle.close();
+                }
+                sftp.clear();
+            }
+            let _ = slint::quit_event_loop();
         });
     }
 
@@ -3176,13 +2896,8 @@ fn open_window(
     {
         let weak = window.as_weak();
         let close_handles = handles.clone();
-        let close_sftp_handles = sftp_handles.clone();
-        let wc_proc_weak = proc_win.as_weak();
-        let wc_sys_weak = sys_win.as_weak();
         let wc_store = store.clone();
         let wc_exit_confirmed = exit_confirmed.clone();
-        let wc_registry = registry.clone();
-        let wc_core = core.clone();
         window.on_win_close(move || {
             if let Some(w) = weak.upgrade() {
                 // Mirror the native-X behaviour: confirm if sessions are open.
@@ -3192,21 +2907,7 @@ fn open_window(
                 ) {
                     wc_exit_confirmed.set(true);
                     save_layout(&w, &wc_store);
-                    clear_zen_on_close(&w, &wc_store);
-                    // Tear down this window's workers and hide its monitor
-                    // windows; quit only if it was the last one.
-                    teardown_window(
-                        window_id,
-                        &close_handles,
-                        &close_sftp_handles,
-                        &wc_proc_weak,
-                        &wc_sys_weak,
-                    );
-                    let _ = w.hide();
-                    if wc_registry.unregister(window_id) {
-                        let _ = slint::quit_event_loop();
-                    }
-                    forget_window_state(&wc_core, window_id);
+                    let _ = slint::quit_event_loop();
                 } else {
                     w.set_confirm_close_open(true);
                 }
@@ -3247,41 +2948,19 @@ fn open_window(
         });
     }
 
-    // Position once shown (size is only known after the first frame). The
-    // first window centers on the primary monitor; later windows cascade
-    // ~40 px from the newest existing window instead of stacking exactly on
-    // top of it. The origin was captured above, before this window was
-    // registered (registry.newest() would return this window itself).
+    // Center the window on the primary monitor once it's shown (size is only
+    // known after the first frame, so defer via a single-shot timer).
     {
         let weak = window.as_weak();
-        let origin = cascade_origin
-            .and_then(|w| w.upgrade())
-            .map(|w| w.window().position());
         slint::Timer::single_shot(std::time::Duration::from_millis(30), move || {
-            let Some(w) = weak.upgrade() else { return };
-            if let Some(pos) = at {
-                // Tab detach pinned the window under the cursor (#tab-detach).
-                w.window().set_position(pos);
-                return;
-            }
-            match origin {
-                Some(pos) => {
-                    w.window().set_position(slint::PhysicalPosition::new(
-                        pos.x + 40,
-                        pos.y + 40,
-                    ));
-                }
-                None => center_window(&w),
+            if let Some(w) = weak.upgrade() {
+                center_window(&w);
             }
         });
     }
 
-    // The old entry point was window.run(), which shows the window before
-    // spinning the loop. run_event_loop() does not, so display it here —
-    // without this the app starts but no window ever appears (#multi-window).
-    window.show().context("failed to show window")?;
-
-    Ok(window_id)
+    window.run().context("event loop exited with error")?;
+    Ok(())
 }
 
 /// Center the window on the primary monitor's work area (Windows).
@@ -3323,18 +3002,6 @@ fn center_window(win: &AppWindow) {
 #[cfg(not(windows))]
 fn center_window(_win: &AppWindow) {}
 
-/// Bring a window to the front and give it keyboard focus: un-minimize it
-/// and ask the OS for focus. Used when an OS entry point (taskbar jump list,
-/// Dock menu, desktop action) opens a window while the app is sitting in the
-/// background. Best effort — strict environments (Wayland, the Windows
-/// foreground lock) may degrade to a taskbar flash.
-fn raise_to_front(win: &AppWindow) {
-    let _ = win.window().with_winit_window(|w| {
-        w.set_minimized(false);
-        w.focus_window();
-    });
-}
-
 /// The active terminal tab's current SFTP directory ("" if unknown).
 fn active_sftp_path(win: &AppWindow, tab_id: &str) -> String {
     let model = win.get_terminals();
@@ -3350,10 +3017,22 @@ fn active_sftp_path(win: &AppWindow, tab_id: &str) -> String {
     String::new()
 }
 
-// The raw macOS wheel fallback runs before the usual Slint hit testing. Keep
-// modal-state routing explicit so it cannot target a terminal behind a dialog.
-fn macos_terminal_wheel_can_target_terminal(interface_open: bool) -> bool {
-    !interface_open
+fn handle_macos_terminal_wheel(
+    win: &AppWindow,
+    bufs: &TermBuffers,
+    x: f32,
+    y: f32,
+    lines: i32,
+) -> bool {
+    let Some(hit) = terminal_wheel_hit(win, bufs, x, y) else {
+        return false;
+    };
+    if hit.is_alt {
+        win.invoke_terminal_wheel(hit.tab_id.into(), lines.signum(), hit.col, hit.row);
+    } else {
+        win.invoke_terminal_scroll(hit.tab_id.into(), lines);
+    }
+    true
 }
 
 fn terminal_wheel_hit(
@@ -3518,59 +3197,6 @@ fn active_terminal_panel_rects(win: &AppWindow) -> Option<(String, LogicalRect, 
     ))
 }
 
-/// The SFTP file-list rectangle inside the active terminal panel. Kept for a
-/// future dedicated SFTP drop target; the shell-page drop currently accepts the
-/// whole terminal panel instead of just this region (#drag-onto-shell).
-#[allow(dead_code)]
-fn active_sftp_file_list_rect(win: &AppWindow) -> Option<LogicalRect> {
-    let (_active, term, term_state) = active_terminal_panel_rects(win)?;
-    if term_state.sftp_collapsed {
-        return None;
-    }
-
-    // TerminalView starts with a 24px connection-status line (hidden in zen
-    // mode); SFTP docks inside the remaining dock-region. This mirrors
-    // ui/terminal_view.slint.
-    let strip = if win.get_zen_mode() { 0.0 } else { 24.0 };
-    let dock_region = LogicalRect {
-        x: term.x,
-        y: term.y + strip,
-        w: term.w,
-        h: (term.h - strip).max(0.0),
-    };
-    let dock = win.get_sftp_dock().to_string();
-    let mut panel = LogicalRect {
-        x: dock_region.x,
-        y: dock_region.y,
-        w: if dock == "left" || dock == "right" {
-            term_state.sftp_panel_width
-        } else {
-            dock_region.w
-        },
-        h: if dock == "left" || dock == "right" {
-            dock_region.h
-        } else {
-            term_state.sftp_panel_height
-        },
-    };
-    if dock == "right" {
-        panel.x = dock_region.x + (dock_region.w - panel.w).max(0.0);
-    } else if dock == "bottom" {
-        panel.y = dock_region.y + (dock_region.h - panel.h).max(0.0);
-    }
-
-    // SftpPanel layout: toolbar 34, then file headers 20 + separator 1; when the
-    // tree is shown (top/bottom docks), the file list starts after tree 160 + sep.
-    let show_tree = dock != "left" && dock != "right";
-    panel.y += 34.0 + 20.0 + 1.0;
-    panel.h = (panel.h - 34.0 - 20.0 - 1.0).max(0.0);
-    if show_tree {
-        panel.x += 160.0 + 1.0;
-        panel.w = (panel.w - 160.0 - 1.0).max(0.0);
-    }
-    Some(panel)
-}
-
 /// Current mouse cursor position in physical screen pixels (Windows).
 #[cfg(windows)]
 fn cursor_pos() -> Option<(i32, i32)> {
@@ -3590,9 +3216,10 @@ fn cursor_pos() -> Option<(i32, i32)> {
     }
 }
 
-/// Handle an OS file drop: if it landed over the terminal panel (the shell page)
-/// of the active session tab, upload the file to that tab's current remote
-/// directory.
+/// Handle an OS file drop: if it landed over the terminal panel of the active
+/// session tab, upload the file to that tab's current remote directory. This
+/// intentionally accepts the shell area as well as the SFTP list so dragging a
+/// file onto the terminal behaves like a normal terminal client.
 #[cfg(windows)]
 fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path::PathBuf) {
     let active = win.get_active_tab_id().to_string();
@@ -3610,13 +3237,10 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: std::path
     // Drop point in logical client coordinates.
     let client_x = (cx - inner.x) as f32 / scale;
     let client_y = (cy - inner.y) as f32 / scale;
-    // Accept drops anywhere over the whole terminal panel ("shell page"), so
-    // dragging a file onto the terminal uploads it to the session's current
-    // directory — not just onto the SFTP file list (#drag-onto-shell).
-    let Some((_active, term, _term_state)) = active_terminal_panel_rects(win) else {
+    let Some((_active, terminal, _term_state)) = active_terminal_panel_rects(win) else {
         return;
     };
-    if !contains_logical(term, client_x, client_y) {
+    if !contains_logical(terminal, client_x, client_y) {
         return; // dropped outside the terminal panel — ignore
     }
 
@@ -3657,23 +3281,6 @@ fn handle_file_drop(_win: &AppWindow, _sftp_handles: &SftpHandles, _path: std::p
 // ---------------------------------------------------------------------------
 // Model helpers
 // ---------------------------------------------------------------------------
-
-fn sync_sessions_for_window(
-    window: &slint::Weak<AppWindow>,
-    store: &ConfigStore,
-    model: &VecModel<SessionInfo>,
-) {
-    let Some(window) = window.upgrade() else { return };
-    let query = window.get_host_search_query().to_string();
-    // Prefer in-place row updates: they keep the list's scroll position and
-    // any running drag alive and skip the reallocation. A full set_vec
-    // rebuild — which destroys the dragging row's pointer grab — happens
-    // only when the row count changed, and the revision bump tells Welcome
-    // to clear its stale drag state in exactly that case.
-    if !refresh_session_rows_in_place(store, model, &query) {
-        window.set_sessions_revision(window.get_sessions_revision() + 1);
-    }
-}
 
 /// Parse the batch-import textarea (#150). Each non-empty, non-`#` line is
 /// `host|port|user|password|name`; trailing fields are optional (port → 22,
@@ -3753,6 +3360,20 @@ fn session_groups_model(store: &ConfigStore) -> ModelRc<SharedString> {
     )))
 }
 
+fn wsl_profile_model(store: &ConfigStore) -> ModelRc<WslProfileInfo> {
+    let rows = store
+        .wsl_profiles()
+        .iter()
+        .map(|profile| WslProfileInfo {
+            id: profile.id.clone().into(),
+            name: profile.name.clone().into(),
+            distribution: profile.distribution.clone().into(),
+            directory: profile.directory.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
 /// Build the jump-host picker's parallel label/id lists for the session dialog
 /// (#211). Index 0 is always the "no jump host" entry (empty id); the rest are
 /// the saved SSH sessions except `exclude_id` (a session can't jump through
@@ -3793,27 +3414,98 @@ fn jump_candidates(
 }
 
 fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
+    sync_sessions_to_model_with_filter(store, model, "");
+}
+
+fn sync_sessions_for_window(
+    weak: &slint::Weak<AppWindow>,
+    store: &ConfigStore,
+    model: &VecModel<SessionInfo>,
+) {
+    let query = weak
+        .upgrade()
+        .map(|window| window.get_host_search_query().to_string())
+        .unwrap_or_default();
+    sync_sessions_to_model_with_filter(store, model, &query);
+}
+
+fn normalized_host_query(query: &str) -> String {
+    query.trim().to_lowercase()
+}
+
+fn session_matches_host_query(session: &Session, query: &str) -> bool {
+    query.is_empty()
+        || session.name.to_lowercase().contains(query)
+        || session.host.to_lowercase().contains(query)
+}
+
+#[cfg(test)]
+mod host_search_tests {
+    use super::*;
+
+    fn session(name: &str, host: &str) -> Session {
+        let mut value = Session::new_empty();
+        value.name = name.to_string();
+        value.host = host.to_string();
+        value
+    }
+
+    #[test]
+    fn search_matches_name_or_host_case_insensitively() {
+        let value = session("Production API", "DB.EXAMPLE.COM");
+        assert!(session_matches_host_query(&value, "production"));
+        assert!(session_matches_host_query(&value, "example.com"));
+        assert!(!session_matches_host_query(&value, "staging"));
+        assert!(session_matches_host_query(&value, ""));
+    }
+
+    #[test]
+    fn search_query_trims_whitespace() {
+        let value = session("Build", "ci.example");
+        let query = normalized_host_query("  CI.EXAMPLE  ");
+        assert!(session_matches_host_query(&value, &query));
+    }
+}
+
+fn sync_sessions_to_model_with_filter(
+    store: &ConfigStore,
+    model: &VecModel<SessionInfo>,
+    query: &str,
+) {
     // Group sessions by their `group` (named groups alphabetically, ungrouped
     // last), preserve the stored order within each group, and tag the first row
     // of every group with a header so the welcome list can render a folder heading (#41).
     let sessions = store.sessions();
+    let query = normalized_host_query(query);
+    let searching = !query.is_empty();
+    let matches = |s: &Session| session_matches_host_query(s, &query);
 
     // Ordered list of display groups:
     //  - "default" only when there are ungrouped sessions (group == "")
     //  - named groups: explicit folders (incl. empty ones) ∪ sessions' groups,
     //    de-duplicated, alphabetical.
-    let has_default = sessions.iter().any(|s| s.group.is_empty());
-    let mut named: Vec<String> = store
-        .groups()
+    let has_default = sessions
         .iter()
-        .cloned()
-        .chain(
-            sessions
-                .iter()
-                .filter(|s| !s.group.is_empty())
-                .map(|s| s.group.clone()),
-        )
-        .collect();
+        .any(|s| s.group.is_empty() && matches(s));
+    let mut named: Vec<String> = if searching {
+        sessions
+            .iter()
+            .filter(|s| !s.group.is_empty() && matches(s))
+            .map(|s| s.group.clone())
+            .collect()
+    } else {
+        store
+            .groups()
+            .iter()
+            .cloned()
+            .chain(
+                sessions
+                    .iter()
+                    .filter(|s| !s.group.is_empty())
+                    .map(|s| s.group.clone()),
+            )
+            .collect()
+    };
     named.sort_by_key(|g| g.to_lowercase());
     named.dedup();
 
@@ -3840,7 +3532,11 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
     };
 
     let mut rows: Vec<SessionInfo> = Vec::new();
-    for (i, s) in builtin_local_sessions().iter().enumerate() {
+    for (i, s) in builtin_local_sessions(store.wsl_profiles())
+        .iter()
+        .filter(|s| matches(s))
+        .enumerate()
+    {
         rows.push(SessionInfo {
             id: s.id.clone().into(),
             name: s.name.clone().into(),
@@ -3851,21 +3547,27 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
             last_used: "".into(),
             group: "system".into(),
             group_header: if i == 0 { "system".into() } else { "".into() },
-            collapsed: true,
+            collapsed: !searching,
             builtin: true,
         });
     }
     for group in &display_groups {
         let gs: Vec<&Session> = if group == "default" {
-            sessions.iter().filter(|s| s.group.is_empty()).collect()
+            sessions
+                .iter()
+                .filter(|s| s.group.is_empty() && matches(s))
+                .collect()
         } else {
-            sessions.iter().filter(|s| &s.group == group).collect()
+            sessions
+                .iter()
+                .filter(|s| &s.group == group && matches(s))
+                .collect()
         };
         // Preserve the order stored in sessions.json. This lets drag-reorder in
         // the session list persist across restarts instead of falling back to an
         // alphabetical sort.
 
-        if gs.is_empty() {
+        if gs.is_empty() && !searching {
             rows.push(blank(group));
         } else {
             for (i, s) in gs.iter().enumerate() {
@@ -3896,14 +3598,33 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
     model.set_vec(rows);
 }
 
-fn builtin_local_sessions() -> Vec<Session> {
+fn builtin_local_sessions(wsl_profiles: &[WslProfile]) -> Vec<Session> {
     let mut out = Vec::new();
     #[cfg(windows)]
     {
         out.push(builtin_local_session("system:powershell", "PowerShell", "powershell"));
         out.push(builtin_local_session("system:cmd", "CMD", "cmd"));
         if wsl_available() {
-            out.push(builtin_local_session("system:wsl", "WSL", "wsl"));
+            if wsl_profiles.is_empty() {
+                let mut session = builtin_local_session("system:wsl", "WSL", "wsl");
+                session.local_working_dir = "~".to_string();
+                out.push(session);
+            } else {
+                for profile in wsl_profiles {
+                    let mut session = builtin_local_session(
+                        &format!("system:wsl:{}", profile.id),
+                        profile.name.clone(),
+                        "wsl",
+                    );
+                    session.local_distribution = profile.distribution.clone();
+                    session.local_working_dir = if profile.directory.trim().is_empty() {
+                        "~".to_string()
+                    } else {
+                        profile.directory.clone()
+                    };
+                    out.push(session);
+                }
+            }
         }
     }
     #[cfg(not(windows))]
@@ -3930,6 +3651,22 @@ fn builtin_local_session(id: &str, name: impl Into<String>, host: &str) -> Sessi
     s.group = "system".to_string();
     s.kind = SessionKind::Local;
     s
+}
+
+fn wsl_directory_from_windows_path(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = raw[2..].trim_start_matches('/');
+        if rest.is_empty() {
+            format!("/mnt/{drive}")
+        } else {
+            format!("/mnt/{drive}/{rest}")
+        }
+    } else {
+        raw
+    }
 }
 
 #[cfg(windows)]
@@ -4007,6 +3744,7 @@ fn session_from_draft(
     draft: &SessionDraft,
     existing: Option<&Session>,
     forwards: Vec<crate::config::PortForward>,
+    triggers: Vec<crate::config::SessionTrigger>,
 ) -> Session {
     let password = if draft.password.is_empty() {
         existing.map(|s| s.password.clone()).unwrap_or_default()
@@ -4059,6 +3797,8 @@ fn session_from_draft(
         last_used: None,
         group: draft.group.to_string(),
         kind,
+        local_distribution: String::new(),
+        local_working_dir: String::new(),
         serial_port: draft.serial_port.to_string(),
         baud_rate: if draft.baud_rate <= 0 {
             115_200
@@ -4070,6 +3810,7 @@ fn session_from_draft(
         parity: draft.parity.to_string(),
         flow_control: draft.flow_control.to_string(),
         forwards,
+        triggers,
         disable_shell_integration: draft.disable_shell_integration,
         note: draft.note.to_string(),
         jump_session_id: draft.jump_session_id.to_string(),
@@ -4080,11 +3821,7 @@ fn session_from_draft(
 
 fn wire_session_callbacks(
     window: &AppWindow,
-    // Registry id of `window`; connect-time prompts are tagged with it so
-    // their dialogs open (and abort on close) in this window (#multi-window).
-    window_id: u64,
     store: Rc<RefCell<ConfigStore>>,
-    registry: Rc<WindowRegistry<slint::Weak<AppWindow>>>,
     sessions_model: Rc<VecModel<SessionInfo>>,
     tabs_model: Rc<VecModel<TabInfo>>,
     terminals_model: Rc<VecModel<TerminalState>>,
@@ -4113,31 +3850,19 @@ fn wire_session_callbacks(
     let edit_forwards: Rc<RefCell<Vec<PortFwd>>> =
         Rc::new(RefCell::new(vec![blank_forward_draft()]));
     let edit_triggers: Rc<RefCell<Vec<TriggerDraft>>> =
-        Rc::new(RefCell::new(vec![blank_trigger_draft()]));
-    let edit_trigger_secrets: Rc<RefCell<Vec<Secret>>> =
-        Rc::new(RefCell::new(vec![Secret::default()]));
-    // on_connect_session moves the panes_model binding into its closure; the
-    // rename handler below needs its own handle, so clone up front.
-    let panes_model_rename = panes_model.clone();
+        Rc::new(RefCell::new(Vec::new()));
 
-    // Rebuild the session list as the user edits the Quick Connect search.
+    // Rebuild the Quick Connect model whenever its search text changes.  The
+    // same helper is used by all session mutations below so a filtered list
+    // never unexpectedly jumps back to the unfiltered view.
     {
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
         window.on_host_search_changed(move |query| {
-            if let Some(window) = weak.upgrade() {
-                let query = if query.trim().is_empty() {
-                    SharedString::new()
-                } else {
-                    query
-                };
-                window.set_host_search_query(query.clone());
-                sync_sessions_to_model_with_filter(
-                    &store.borrow(),
-                    &sessions_model,
-                    query.as_str(),
-                );
+            sync_sessions_to_model_with_filter(&store.borrow(), &sessions_model, query.as_str());
+            if let Some(w) = weak.upgrade() {
+                w.set_host_search_query(query);
             }
         });
     }
@@ -4146,13 +3871,11 @@ fn wire_session_callbacks(
     let weak = window.as_weak();
     let ef_new = edit_forwards.clone();
     let et_new = edit_triggers.clone();
-    let ets_new = edit_trigger_secrets.clone();
     let store_ng = store.clone();
     window.on_new_session_clicked(move || {
         if let Some(w) = weak.upgrade() {
             *ef_new.borrow_mut() = vec![blank_forward_draft()];
-            *et_new.borrow_mut() = vec![blank_trigger_draft()];
-            *ets_new.borrow_mut() = vec![Secret::default()];
+            et_new.borrow_mut().clear();
             w.set_session_groups(session_groups_model(&store_ng.borrow()));
             w.set_dialog_forwards(forward_model(&ef_new.borrow()));
             w.set_dialog_triggers(trigger_model(&et_new.borrow()));
@@ -4199,7 +3922,6 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
         window.on_import_ssh_config(move || {
             let hosts = crate::ssh::ssh_config::parse_default();
             let mut added = 0usize;
@@ -4248,9 +3970,6 @@ fn wire_session_callbacks(
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            if added > 0 {
-                registry.broadcast_config_changed();
-            }
             if let Some(w) = weak.upgrade() {
                 let hint = if added > 0 {
                     format!("{} {}", t("已导入", "imported"), added)
@@ -4291,7 +4010,6 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
         window.on_batch_import_confirm(move |text: SharedString| {
             let parsed = parse_batch_import(text.as_str());
             let total = parsed.len();
@@ -4315,9 +4033,6 @@ fn wire_session_callbacks(
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            if added > 0 {
-                registry.broadcast_config_changed();
-            }
             if let Some(w) = weak.upgrade() {
                 let hint = if total == 0 {
                     t("没有可导入的连接", "nothing to import").to_string()
@@ -4336,7 +4051,6 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
         window.on_import_sessions(move || {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("JSON", &["json"])
@@ -4347,7 +4061,6 @@ fn wire_session_callbacks(
                     let hint = match res {
                         Ok((added, skipped)) => {
                             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                            registry.broadcast_config_changed();
                             format!(
                                 "{} {} / {} {}",
                                 t("已导入", "imported"),
@@ -4370,7 +4083,6 @@ fn wire_session_callbacks(
         let store = store.clone();
         let ef_edit = edit_forwards.clone();
         let et_edit = edit_triggers.clone();
-        let ets_edit = edit_trigger_secrets.clone();
         window.on_edit_session(move |id: SharedString| {
             let id = id.to_string();
             let store = store.borrow();
@@ -4378,14 +4090,9 @@ fn wire_session_callbacks(
                 return;
             };
             *ef_edit.borrow_mut() = forward_drafts(&session.forwards);
+            *et_edit.borrow_mut() = trigger_drafts(&session.triggers);
             if ef_edit.borrow().is_empty() {
                 ef_edit.borrow_mut().push(blank_forward_draft());
-            }
-            *et_edit.borrow_mut() = trigger_drafts(&session.triggers);
-            *ets_edit.borrow_mut() = session.triggers.iter().map(|t| t.response.clone()).collect();
-            if et_edit.borrow().is_empty() {
-                et_edit.borrow_mut().push(blank_trigger_draft());
-                ets_edit.borrow_mut().push(Secret::default());
             }
             if let Some(w) = weak.upgrade() {
                 w.set_session_groups(session_groups_model(&store));
@@ -4435,7 +4142,6 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
         window.on_remove_session(move |id: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -4445,7 +4151,6 @@ fn wire_session_callbacks(
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            registry.broadcast_config_changed();
             if let Some(w) = weak.upgrade() {
                 // Touch a property so the list re-renders reliably.
                 let _ = w.get_sessions();
@@ -4458,9 +4163,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
         window.on_duplicate_session(move |id: SharedString| {
-            let mut duplicated = false;
             {
                 let mut s = store.borrow_mut();
                 if let Some(orig) = s.get(&id.to_string()).cloned() {
@@ -4472,13 +4175,9 @@ fn wire_session_callbacks(
                     if let Err(err) = s.save() {
                         tracing::warn!("failed to save config: {err:#}");
                     }
-                    duplicated = true;
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            if duplicated {
-                registry.broadcast_config_changed();
-            }
             if let Some(w) = weak.upgrade() {
                 let _ = w.get_sessions();
             }
@@ -4490,106 +4189,24 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
         window.on_move_session(move |id: SharedString, group: SharedString| {
-            let mut moved = false;
             {
                 let mut s = store.borrow_mut();
                 if let Some(orig) = s.get(&id.to_string()).cloned() {
-                    let mut target = orig;
+                    let mut moved = orig;
                     // "default" is the display label for ungrouped → store empty.
                     moved.group = if group.as_str() == "default" {
                         String::new()
                     } else {
                         group.to_string()
                     };
-                    s.upsert(target);
+                    s.upsert(moved);
                     if let Err(err) = s.save() {
                         tracing::warn!("failed to save config: {err:#}");
                     }
-                    moved = true;
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            if moved {
-                registry.broadcast_config_changed();
-            }
-            if let Some(w) = weak.upgrade() {
-                let _ = w.get_sessions();
-            }
-        });
-    }
-
-    // Drag-to-reorder a host card among its same-group siblings. The stored
-    // Vec order is the display order (no alphabetical sort), so a swap plus
-    // re-sync is all it takes. Reordering while the list is filtered would map
-    // visible hops onto the wrong stored neighbours, so bail out then — the
-    // Slint side already disables the gesture while searching.
-    //
-    // Per-hop updates mutate the model IN PLACE (set_row_data): a full set_vec
-    // rebuild would recreate the rows and drop the dragging row's pointer grab,
-    // ending the drag after one hop. Saving + broadcasting are deferred to
-    // reorder-session-end (pointer release).
-    let sessions_dirty = Rc::new(std::cell::Cell::new(false));
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
-        let sessions_dirty = sessions_dirty.clone();
-        window.on_reorder_session(move |id: SharedString, dir: i32| {
-            if weak
-                .upgrade()
-                .map(|window| !window.get_host_search_query().trim().is_empty())
-                .unwrap_or(false)
-            {
-                return false;
-            }
-            let moved = {
-                let mut s = store.borrow_mut();
-                s.reorder_session(id.as_str(), dir as isize)
-            };
-            if moved {
-                sessions_dirty.set(true);
-                let query = weak
-                    .upgrade()
-                    .map(|w| w.get_host_search_query().to_string())
-                    .unwrap_or_default();
-                let in_place = refresh_session_rows_in_place(&store.borrow(), &sessions_model, &query);
-                if !in_place {
-                    // The hop changed the row count (e.g. a cross-group hop
-                    // emptied the ungrouped section): the set_vec rebuild
-                    // dropped the dragging row's pointer grab, so the
-                    // release's reorder-end may never arrive — finalise now.
-                    sessions_dirty.set(false);
-                    if let Err(err) = store.borrow_mut().save() {
-                        tracing::warn!("failed to save config: {err:#}");
-                    }
-                    sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-                    registry.broadcast_config_changed();
-                    if let Some(w) = weak.upgrade() {
-                        let _ = w.get_sessions();
-                    }
-                }
-            }
-            moved
-        });
-    }
-    {
-        let weak = window.as_weak();
-        let store = store.clone();
-        let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
-        let sessions_dirty = sessions_dirty.clone();
-        window.on_reorder_session_end(move || {
-            if !sessions_dirty.replace(false) {
-                return;
-            }
-            if let Err(err) = store.borrow_mut().save() {
-                tracing::warn!("failed to save config: {err:#}");
-            }
-            sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            registry.broadcast_config_changed();
             if let Some(w) = weak.upgrade() {
                 let _ = w.get_sessions();
             }
@@ -4644,7 +4261,7 @@ fn wire_session_callbacks(
                         changed
                     };
                     if changed {
-                        sync_sessions_to_model(&store.borrow(), &sessions_model);
+                        sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                     }
                 }
             }
@@ -4669,13 +4286,6 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let sessions_model = sessions_model.clone();
         window.on_toggle_group(move |group: SharedString| {
-            if weak
-                .upgrade()
-                .map(|window| !window.get_host_search_query().trim().is_empty())
-                .unwrap_or(false)
-            {
-                return;
-            }
             use slint::Model as _;
             let target = group.to_string();
             let n = sessions_model.row_count();
@@ -4708,7 +4318,6 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
         window.on_submit_group(move |orig: SharedString, name: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -4722,7 +4331,6 @@ fn wire_session_callbacks(
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            registry.broadcast_config_changed();
             if let Some(w) = weak.upgrade() {
                 let _ = w.get_sessions();
             }
@@ -4733,7 +4341,6 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
-        let registry = registry.clone();
         window.on_delete_group(move |name: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -4743,7 +4350,6 @@ fn wire_session_callbacks(
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            registry.broadcast_config_changed();
             if let Some(w) = weak.upgrade() {
                 let _ = w.get_sessions();
             }
@@ -4757,8 +4363,6 @@ fn wire_session_callbacks(
         let sessions_model = sessions_model.clone();
         let edit_forwards = edit_forwards.clone();
         let edit_triggers = edit_triggers.clone();
-        let edit_trigger_secrets = edit_trigger_secrets.clone();
-        let registry = registry.clone();
         window.on_session_dialog_submit(move |draft: SessionDraft| {
             let id = draft.id.to_string();
             let forwards = match validated_port_forwards(&edit_forwards.borrow()) {
@@ -4770,10 +4374,23 @@ fn wire_session_callbacks(
                     return;
                 }
             };
-            let triggers = match validated_triggers(&edit_triggers.borrow(), &edit_trigger_secrets.borrow()) {
+            let saved_responses = store
+                .borrow()
+                .get(&id)
+                .map(|session| {
+                    session
+                        .triggers
+                        .iter()
+                        .map(|trigger| trigger.response.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let triggers = match validated_triggers(&edit_triggers.borrow(), &saved_responses) {
                 Ok(triggers) => triggers,
                 Err(message) => {
-                    if let Some(w) = weak.upgrade() { w.set_dialog_test_status(message.into()); }
+                    if let Some(w) = weak.upgrade() {
+                        w.set_dialog_test_status(message.into());
+                    }
                     return;
                 }
             };
@@ -4846,6 +4463,8 @@ fn wire_session_callbacks(
                 last_used: None,
                 group: draft.group.to_string(),
                 kind,
+                local_distribution: String::new(),
+                local_working_dir: String::new(),
                 serial_port: draft.serial_port.to_string(),
                 baud_rate: if draft.baud_rate <= 0 {
                     115_200
@@ -4857,6 +4476,7 @@ fn wire_session_callbacks(
                 parity: draft.parity.to_string(),
                 flow_control: draft.flow_control.to_string(),
                 forwards,
+                triggers,
                 x11_forwarding: draft.x11_forwarding,
                 x11_display: draft.x11_display.to_string(),
                 disable_shell_integration: draft.disable_shell_integration,
@@ -4871,7 +4491,6 @@ fn wire_session_callbacks(
                 }
             }
             sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
-            registry.broadcast_config_changed();
             if let Some(w) = weak.upgrade() {
                 w.set_dialog_open(false);
             }
@@ -4887,7 +4506,6 @@ fn wire_session_callbacks(
         let store = store.clone();
         let edit_forwards = edit_forwards.clone();
         let edit_triggers = edit_triggers.clone();
-        let edit_trigger_secrets = edit_trigger_secrets.clone();
         window.on_session_dialog_test(move |draft: SessionDraft| {
             let kind = draft.kind.to_string();
             if kind == "serial" {
@@ -4929,10 +4547,22 @@ fn wire_session_callbacks(
                     return;
                 }
             };
-            let triggers = match validated_triggers(&edit_triggers.borrow(), &edit_trigger_secrets.borrow()) {
+            let saved_responses = existing
+                .as_ref()
+                .map(|session| {
+                    session
+                        .triggers
+                        .iter()
+                        .map(|trigger| trigger.response.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let triggers = match validated_triggers(&edit_triggers.borrow(), &saved_responses) {
                 Ok(triggers) => triggers,
                 Err(message) => {
-                    if let Some(w) = weak.upgrade() { w.set_dialog_test_status(message.into()); }
+                    if let Some(w) = weak.upgrade() {
+                        w.set_dialog_test_status(message.into());
+                    }
                     return;
                 }
             };
@@ -4968,7 +4598,6 @@ fn wire_session_callbacks(
                                                 responder,
                                             } => enqueue_hostkey_prompt(
                                                 &w,
-                                                window_id,
                                                 host,
                                                 port,
                                                 key_type,
@@ -4985,7 +4614,6 @@ fn wire_session_callbacks(
                                                 responder,
                                             } => enqueue_cred_prompt(
                                                 &w,
-                                                window_id,
                                                 session_id,
                                                 host,
                                                 user,
@@ -5001,7 +4629,6 @@ fn wire_session_callbacks(
                                                 responder,
                                             } => enqueue_mfa_prompt(
                                                 &w,
-                                                window_id,
                                                 session_id,
                                                 host,
                                                 prompt,
@@ -5067,12 +4694,10 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         window.on_session_dialog_pick_key(move || {
             let mut dialog =
-                rfd::FileDialog::new()
-                    .set_title(t("选择私钥文件", "Choose private key file"))
-                    .add_filter(
-                        t("SSH 私钥", "SSH private keys"),
-                        &["ppk", "pem", "key"],
-                    );
+                rfd::FileDialog::new().set_title(t("选择私钥文件", "Choose private key file"));
+            // OpenSSH's standard key names (id_rsa, id_ed25519, …) usually
+            // have no extension. Extension filters hide or disable those files
+            // in native pickers, so show every file on every platform.
             // Start in ~/.ssh if it exists.
             if let Some(home) = directories::UserDirs::new().map(|u| u.home_dir().join(".ssh")) {
                 if home.is_dir() {
@@ -5132,43 +4757,38 @@ fn wire_session_callbacks(
         });
     }
 
-    // Session expect/send trigger editor (#212).
+    // Add/edit/remove expect/send login triggers.
     {
         let weak = window.as_weak();
-        let triggers = edit_triggers.clone();
-        let secrets = edit_trigger_secrets.clone();
+        let et = edit_triggers.clone();
         window.on_add_trigger(move || {
-            triggers.borrow_mut().push(blank_trigger_draft());
-            secrets.borrow_mut().push(Secret::default());
+            et.borrow_mut().push(blank_trigger_draft());
             if let Some(w) = weak.upgrade() {
-                w.set_dialog_triggers(trigger_model(&triggers.borrow()));
+                w.set_dialog_triggers(trigger_model(&et.borrow()));
             }
         });
     }
     {
-        let triggers = edit_triggers.clone();
+        let et = edit_triggers.clone();
         window.on_update_trigger(move |index: i32, trigger: TriggerDraft| {
             let i = index as usize;
-            let mut values = triggers.borrow_mut();
-            if i < values.len() { values[i] = trigger; }
+            let mut triggers = et.borrow_mut();
+            if i < triggers.len() {
+                triggers[i] = trigger;
+            }
         });
     }
     {
         let weak = window.as_weak();
-        let triggers = edit_triggers.clone();
-        let secrets = edit_trigger_secrets.clone();
+        let et = edit_triggers.clone();
         window.on_delete_trigger(move |index: i32| {
             let i = index as usize;
-            let mut values = triggers.borrow_mut();
-            let mut saved = secrets.borrow_mut();
-            if i < values.len() { values.remove(i); }
-            if i < saved.len() { saved.remove(i); }
-            if values.is_empty() {
-                values.push(blank_trigger_draft());
-                saved.push(Secret::default());
+            let mut triggers = et.borrow_mut();
+            if i < triggers.len() {
+                triggers.remove(i);
             }
             if let Some(w) = weak.upgrade() {
-                w.set_dialog_triggers(trigger_model(&values));
+                w.set_dialog_triggers(trigger_model(&triggers));
             }
         });
     }
@@ -5198,7 +4818,11 @@ fn wire_session_callbacks(
         window.on_connect_session(move |id: SharedString| {
             let id = id.to_string();
             let session = if id.starts_with("system:") {
-                match builtin_local_sessions().into_iter().find(|s| s.id == id) {
+                let profiles = store.borrow().wsl_profiles().to_vec();
+                match builtin_local_sessions(&profiles)
+                    .into_iter()
+                    .find(|s| s.id == id)
+                {
                     Some(s) => s,
                     None => return,
                 }
@@ -5233,7 +4857,6 @@ fn wire_session_callbacks(
                     user: session.user.clone(),
                     session_id: id.clone(),
                     state: 0,
-                    is_local: session.kind == SessionKind::Local,
                     ..Default::default()
                 },
             );
@@ -5296,7 +4919,6 @@ fn wire_session_callbacks(
                 sftp_sort_key: "".into(),
                 sftp_sort_dir: 0,
                 sftp_available: has_sftp,
-                font_size: 0,
                 tunnels: ModelRc::from(std::rc::Rc::new(VecModel::<TunnelInfo>::default())),
                 sftp_collapsed: !has_sftp || startup_collapse_sftp_default,
                 sftp_panel_height: sftp_h_default,
@@ -5333,7 +4955,6 @@ fn wire_session_callbacks(
                     history: VecDeque::new(),
                     prev: Vec::new(),
                     view_offset: 0,
-                    scroll_accum: 0.0,
                     displayed_text: Vec::new(),
                     csi_state: CsiState::Normal,
                     csi_pending: Vec::new(),
@@ -5367,7 +4988,6 @@ fn wire_session_callbacks(
             // Shared with in-place reconnect (#79) via start_session_in_tab.
             let ctx = ConnectCtx {
                 weak: weak.clone(),
-                window_id,
                 runtime: runtime.clone(),
                 handles: handles.clone(),
                 sftp_handles: sftp_handles.clone(),
@@ -5413,100 +5033,6 @@ fn wire_session_callbacks(
             }
             if let Some(w) = weak.upgrade() {
                 w.invoke_connect_session(session_id.into());
-            }
-        });
-    }
-
-    // Rename session (tab context menu): open the dialog pre-filled with the
-    // tab's current title.
-    {
-        let weak = window.as_weak();
-        let tabs_model = tabs_model.clone();
-        window.on_tab_rename_request(move |tab_id: SharedString| {
-            let tab_id = tab_id.to_string();
-            if tab_id.is_empty() || tab_id == "welcome" {
-                return;
-            }
-            use slint::Model as _;
-            let title = (0..tabs_model.row_count())
-                .find_map(|i| {
-                    let row = tabs_model.row_data(i)?;
-                    (row.id.as_str() == tab_id).then(|| row.title.to_string())
-                })
-                .unwrap_or_default();
-            if let Some(w) = weak.upgrade() {
-                w.set_tab_rename_id(tab_id.into());
-                w.set_tab_rename_value(title.into());
-                w.set_tab_rename_open(true);
-            }
-        });
-    }
-
-    // Apply the new display name. An empty name clears the override and
-    // restores the saved session's name. Display-only: the config is untouched.
-    {
-        let weak = window.as_weak();
-        let tabs_model = tabs_model.clone();
-        let panes_model = panes_model_rename.clone();
-        let tab_statuses = tab_statuses.clone();
-        let tab_titles = tab_titles.clone();
-        let store = store.clone();
-        window.on_rename_tab(move |tab_id: SharedString, name: SharedString| {
-            use slint::Model as _;
-            if let Some(w) = weak.upgrade() {
-                w.set_tab_rename_open(false);
-            }
-            let tab_id = tab_id.to_string();
-            let name = name.trim().to_string();
-            let title = if name.is_empty() {
-                tab_titles.borrow_mut().remove(&tab_id);
-                let session_id = tab_statuses
-                    .lock()
-                    .unwrap()
-                    .get(&tab_id)
-                    .map(|s| s.session_id.clone())
-                    .unwrap_or_default();
-                // Two separate borrows: the builtin fallback must not run while
-                // the store lookup's RefCell borrow is still alive.
-                let saved = store.borrow().get(&session_id).map(|s| s.name.clone());
-                saved.or_else(|| {
-                    session_models::builtin_local_sessions(store.borrow().wsl_profiles())
-                        .into_iter()
-                        .find(|s| s.id == session_id)
-                        .map(|s| s.name)
-                })
-            } else {
-                tab_titles.borrow_mut().insert(tab_id.clone(), name.clone());
-                Some(name)
-            };
-            let Some(title) = title else {
-                return;
-            };
-            for i in 0..tabs_model.row_count() {
-                if let Some(mut row) = tabs_model.row_data(i) {
-                    if row.id.as_str() == tab_id {
-                        row.title_len = tab_title_len(&title);
-                        row.title = title.clone().into();
-                        tabs_model.set_row_data(i, row);
-                        break;
-                    }
-                }
-            }
-            // The tab strips render pane.tabs — per-pane snapshot sub-models
-            // built by refresh_panes — not tabs_model itself, so update them
-            // in place too.
-            for pi in 0..panes_model.row_count() {
-                if let Some(pane) = panes_model.row_data(pi) {
-                    for ti in 0..pane.tabs.row_count() {
-                        if let Some(mut tab) = pane.tabs.row_data(ti) {
-                            if tab.id.as_str() == tab_id {
-                                tab.title_len = tab_title_len(&title);
-                                tab.title = title.clone().into();
-                                pane.tabs.set_row_data(ti, tab);
-                            }
-                        }
-                    }
-                }
             }
         });
     }
@@ -5879,7 +5405,13 @@ fn terminal_sftp_paths(w: &AppWindow) -> HashMap<String, String> {
 fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
     use std::cmp::Ordering;
 
-    let name_cmp = |a: &SftpEntry, b: &SftpEntry| natural_name_cmp(&a.name, &b.name);
+    let natural_cmp = |a: &SftpEntry, b: &SftpEntry| natural_name_cmp(&a.name, &b.name);
+    let lexical_cmp = |a: &SftpEntry, b: &SftpEntry| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+    };
     let is_special = |e: &SftpEntry| {
         e.full_path.as_str() == "__MEATSHELL_LOAD_MORE__"
             || e.full_path.as_str() == "__MEATSHELL_LOAD_ALL__"
@@ -5887,7 +5419,7 @@ fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
     let default_cmp = |a: &SftpEntry, b: &SftpEntry| match (a.is_dir, b.is_dir) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        _ => name_cmp(a, b),
+        _ => natural_cmp(a, b),
     };
 
     if dir == 0 || key.is_empty() {
@@ -5934,7 +5466,8 @@ fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
                 .cmp(b.owner.as_str())
                 .then_with(|| a.group.as_str().cmp(b.group.as_str()))
                 .then_with(|| default_cmp(a, b)),
-            _ => name_cmp(a, b).then_with(|| default_cmp(a, b)),
+            "name" => lexical_cmp(a, b).then_with(|| default_cmp(a, b)),
+            _ => natural_cmp(a, b).then_with(|| default_cmp(a, b)),
         };
         if dir < 0 {
             ord.reverse()
@@ -5945,7 +5478,44 @@ fn sort_sftp_entries(entries: &mut [SftpEntry], key: &str, dir: i32) {
 }
 
 fn natural_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b))
+    use std::cmp::Ordering;
+
+    let chunks = |value: &str| {
+        let mut out = Vec::<(bool, String)>::new();
+        let mut current = String::new();
+        let mut numeric = None;
+        for ch in value.chars() {
+            let is_numeric = ch.is_ascii_digit();
+            if numeric != Some(is_numeric) && !current.is_empty() {
+                out.push((numeric.unwrap_or(false), std::mem::take(&mut current)));
+            }
+            numeric = Some(is_numeric);
+            current.push(ch);
+        }
+        if !current.is_empty() {
+            out.push((numeric.unwrap_or(false), current));
+        }
+        out
+    };
+
+    let left = chunks(a);
+    let right = chunks(b);
+    for (l, r) in left.iter().zip(right.iter()) {
+        let ord = if l.0 && r.0 {
+            let ln = l.1.trim_start_matches('0');
+            let rn = r.1.trim_start_matches('0');
+            ln.len()
+                .cmp(&rn.len())
+                .then_with(|| ln.cmp(rn))
+                .then_with(|| l.1.len().cmp(&r.1.len()))
+        } else {
+            l.1.to_lowercase().cmp(&r.1.to_lowercase())
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    left.len().cmp(&right.len()).then_with(|| a.cmp(b))
 }
 
 fn terminal_sftp_selected_path(w: &AppWindow, tab_id: &str) -> Option<String> {
@@ -6609,19 +6179,6 @@ fn save_layout(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
     let _ = s.save();
 }
 
-/// Zen is a transient per-window state. Closing a window while it is on must
-/// not leak the persisted flag into the next window, which would open stuck in
-/// zen mode (#zen). Called on every confirmed-close path right after
-/// `save_layout`.
-pub(super) fn clear_zen_on_close(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
-    if !win.get_zen_mode() {
-        return;
-    }
-    let mut s = store.borrow_mut();
-    s.set_zen_mode(false);
-    let _ = s.save();
-}
-
 /// Every quick-command group name (used to start with all groups collapsed, #55):
 /// "default" when any ungrouped command exists, plus explicit quick-groups and any
 /// group referenced by a command.
@@ -6761,6 +6318,71 @@ fn forward_drafts(forwards: &[crate::config::PortForward]) -> Vec<PortFwd> {
 
 fn forward_model(forwards: &[PortFwd]) -> ModelRc<PortFwd> {
     ModelRc::from(Rc::new(VecModel::from(forwards.to_vec())))
+}
+
+fn blank_trigger_draft() -> TriggerDraft {
+    TriggerDraft {
+        expect: "".into(),
+        response: "".into(),
+        append_enter: true,
+        repeat: false,
+    }
+}
+
+fn trigger_drafts(triggers: &[crate::config::SessionTrigger]) -> Vec<TriggerDraft> {
+    triggers
+        .iter()
+        .map(|trigger| TriggerDraft {
+            expect: trigger.expect.clone().into(),
+            // Do not echo saved secrets into the dialog. A blank response keeps
+            // the existing encrypted value when an edited rule is saved.
+            response: "".into(),
+            append_enter: trigger.append_enter,
+            repeat: trigger.repeat,
+        })
+        .collect()
+}
+
+fn trigger_model(triggers: &[TriggerDraft]) -> ModelRc<TriggerDraft> {
+    ModelRc::from(Rc::new(VecModel::from(triggers.to_vec())))
+}
+
+fn validated_triggers(
+    drafts: &[TriggerDraft],
+    saved_responses: &[Secret],
+) -> std::result::Result<Vec<crate::config::SessionTrigger>, String> {
+    let mut out = Vec::new();
+    for (index, draft) in drafts.iter().enumerate() {
+        if draft.expect.trim().is_empty() && draft.response.is_empty() {
+            continue;
+        }
+        if draft.expect.trim().is_empty() {
+            return Err(t(
+                "请输入触发器的期望文本",
+                "Enter the expected trigger text.",
+            )
+            .to_string());
+        }
+        let response = if draft.response.is_empty() {
+            saved_responses.get(index).cloned().unwrap_or_default()
+        } else {
+            Secret::new(draft.response.to_string())
+        };
+        if response.is_empty() {
+            return Err(t(
+                "请输入触发器的回复内容",
+                "Enter the trigger response.",
+            )
+            .to_string());
+        }
+        out.push(crate::config::SessionTrigger {
+            expect: draft.expect.trim().to_string(),
+            response,
+            append_enter: draft.append_enter,
+            repeat: draft.repeat,
+        });
+    }
+    Ok(out)
 }
 
 fn validated_port_forwards(
@@ -11511,46 +11133,17 @@ fn wire_key_input(
     {
         let bufs_scroll = bufs.clone();
         let weak = window.as_weak();
-        window.on_terminal_scroll(move |tab_id: SharedString, delta: f32| {
+        window.on_terminal_scroll(move |tab_id: SharedString, delta: i32| {
             let tid = tab_id.to_string();
-            let changed = with_term_buf(&bufs_scroll, &tid, |buf| {
+            with_term_buf(&bufs_scroll, &tid, |buf| {
                 // Scroll within our own session scrollback (history lines above
                 // the live screen).  Offset 0 = live bottom.
-                //
-                // `delta` is fractional lines (wheel pixels / cell height). The
-                // integer part moves the offset; the fraction stays banked in
-                // `scroll_accum` so a decaying macOS momentum tail converges to
-                // a stop instead of repeating full-line steps. Cap each event
-                // so a stray huge pixel delta can't teleport the view.
                 let max_off = buf.history.len() as i64;
-                buf.scroll_accum += delta.clamp(-24.0, 24.0);
-                let whole = buf.scroll_accum.trunc();
-                if whole != 0.0 {
-                    buf.scroll_accum -= whole;
-                }
                 let cur = buf.view_offset as i64;
-                let raw_new = cur + whole as i64;
-                let new_off = raw_new.clamp(0, max_off);
-                // Only a step that was actually CLIPPED by a boundary drops the
-                // banked remainder (stale fractions must not fire after a
-                // direction flip or fresh output). Resting AT a boundary must
-                // keep banking: clearing whenever `new_off` merely equals a
-                // boundary wiped the accumulation every tick and made slow
-                // scrolling dead until it was fast enough to cross a whole line
-                // per event.
-                if new_off != raw_new {
-                    buf.scroll_accum = 0.0;
-                }
-                let changed = new_off != cur;
-                buf.view_offset = new_off as usize;
-                changed
+                buf.view_offset = (cur + delta as i64).clamp(0, max_off) as usize;
             });
-            // Scrolling at a boundary (or an empty scrollback) leaves the offset
-            // unchanged; skip the full rebuild since the screen is identical.
-            if changed == Some(true) {
-                if let Some(win) = weak.upgrade() {
-                    rebuild_tab_display(&win, &bufs_scroll, &tid);
-                }
+            if let Some(win) = weak.upgrade() {
+                rebuild_tab_display(&win, &bufs_scroll, &tid);
             }
         });
     }
@@ -11612,19 +11205,12 @@ fn wire_key_input(
         let weak = window.as_weak();
         window.on_terminal_scroll_to(move |tab_id: SharedString, offset: i32| {
             let tid = tab_id.to_string();
-            let changed = with_term_buf(&bufs_scroll, &tid, |buf| {
+            with_term_buf(&bufs_scroll, &tid, |buf| {
                 let max_off = buf.history.len() as i64;
-                let new_off = (offset as i64).clamp(0, max_off);
-                let changed = new_off != buf.view_offset as i64;
-                buf.view_offset = new_off as usize;
-                changed
+                buf.view_offset = (offset as i64).clamp(0, max_off) as usize;
             });
-            // Same guard as on_terminal_scroll: an unchanged clamped offset
-            // must not pay for a full grid rebuild.
-            if changed == Some(true) {
-                if let Some(win) = weak.upgrade() {
-                    rebuild_tab_display(&win, &bufs_scroll, &tid);
-                }
+            if let Some(win) = weak.upgrade() {
+                rebuild_tab_display(&win, &bufs_scroll, &tid);
             }
         });
     }
@@ -12391,6 +11977,13 @@ fn debian_ctrl_marker_workaround_enabled() -> bool {
 #[cfg(not(target_os = "linux"))]
 fn debian_ctrl_marker_workaround_enabled() -> bool {
     false
+}
+
+/// Slint may deliver Ctrl+C as the already-translated ETX byte with the
+/// modifier flag cleared. Treat that byte as a real interrupt rather than as
+/// an injected C0 modifier marker.
+fn is_terminal_interrupt(key: &str) -> bool {
+    key == "\u{0003}"
 }
 
 fn key_to_pty_bytes(key: &str, ctrl: bool, alt: bool, app_cursor: bool) -> Vec<u8> {
@@ -13683,6 +13276,12 @@ mod key_tests {
     }
 
     #[test]
+    fn translated_ctrl_c_is_recognized_as_interrupt() {
+        assert!(is_terminal_interrupt("\u{0003}"));
+        assert!(!is_terminal_interrupt("\u{0011}"));
+    }
+
+    #[test]
     fn debian_bare_ctrl_markers_do_not_reach_nano() {
         // Slint on Debian emits these before the actual Ctrl+letter event.
         assert!(should_drop_debian_bare_ctrl_marker("\u{0011}", true, true));
@@ -13873,6 +13472,7 @@ mod selection_tests {
             view_offset,
             displayed_text: Vec::new(),
             csi_state: CsiState::Normal,
+            csi_pending: Vec::new(),
             raw: std::collections::VecDeque::new(),
         }
     }
@@ -14043,7 +13643,7 @@ mod selection_tests {
             true,
             true,
         );
-        assert_eq!(fg.as_argb_encoded(), 0xff0e0f13);
+        assert_eq!(fg.as_argb_encoded(), 0xff14161c);
         assert_eq!(bg.as_argb_encoded(), 0xffd4d4d4);
 
         let mut parser = vt100::Parser::new(3, 30, 0);
