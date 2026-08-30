@@ -2006,7 +2006,7 @@ async fn run_session(
     // The echoed setup line is discarded by anchoring on the OSC 7 it produces
     // (see the suppress block below), so it doesn't matter that the long line
     // wraps — we never substring-match it.
-    const PROMPT_BODY: &str = "test -z \"$FISH_VERSION\" && eval '__msc(){ __c=\"$(fc -ln -1 2>/dev/null)\"; [ -n \"$__c\" ] && [ \"$__c\" != \"$__cl\" ] && { __cl=\"$__c\"; printf \"\\033]697;%s\\007\" \"$__c\"; }; }; __ms7(){ if [ -n \"$TMUX\" ]; then printf \"\\033Ptmux;\\033\\033]7;file://%s%s\\007\\033\\134\" \"$HOSTNAME\" \"$PWD\"; else printf \"\\033]7;file://%s%s\\007\" \"$HOSTNAME\" \"$PWD\"; fi; __msc; }; __ms_tmux_env(){ command -v tmux >/dev/null 2>&1 || return; tmux set-option -g allow-passthrough on 2>/dev/null || true; tmux set-environment -g PROMPT_COMMAND \"printf \\\"\\\\033Ptmux;\\\\033\\\\033]7;file://%s%s\\\\007\\\\033\\\\134\\\" \\\"\\$HOSTNAME\\\" \\\"\\$PWD\\\"\" 2>/dev/null || true; }; __cl=\"$(fc -ln -1 2>/dev/null)\"; __ms_tmux_env; if [ -n \"$ZSH_VERSION\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __ms7; else PROMPT_COMMAND=\"__ms7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; __ms7'";
+    const PROMPT_BODY: &str = "test -z \"$FISH_VERSION\" && eval '__msc(){ __c=\"$(fc -ln -1 2>/dev/null)\"; [ -n \"$__c\" ] && [ \"$__c\" != \"$__cl\" ] && { __cl=\"$__c\"; printf \"\\033]697;%s\\007\" \"$__c\"; }; }; __ms7(){ if [ -n \"$TMUX\" ]; then printf \"\\033Ptmux;\\033\\033]7;file://%s%s\\007\\033\\134\" \"$HOSTNAME\" \"$PWD\"; else printf \"\\033]7;file://%s%s\\007\" \"$HOSTNAME\" \"$PWD\"; fi; __msc; }; __ms_tmux_env(){ [ -n \"$TMUX\" ] || return; command -v tmux >/dev/null 2>&1 || return; tmux set-option -g allow-passthrough on 2>/dev/null || true; tmux set-environment -g PROMPT_COMMAND \"printf \\\"\\\\033Ptmux;\\\\033\\\\033]7;file://%s%s\\\\007\\\\033\\\\134\\\" \\\"\\$HOSTNAME\\\" \\\"\\$PWD\\\"\" 2>/dev/null || true; }; __cl=\"$(fc -ln -1 2>/dev/null)\"; __ms_tmux_env; if [ -n \"$ZSH_VERSION\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook precmd __ms7; else PROMPT_COMMAND=\"__ms7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi; __ms7'";
     let prompt_setup = format!(" {}\r", PROMPT_BODY);
     // --- Remote resource monitor (separate exec channel) ----------------
     // A tiny remote loop streams /proc/stat + /proc/meminfo every 2s; we parse
@@ -2355,7 +2355,8 @@ async fn run_session(
             }
             msg = channel.wait() => {
                 match msg {
-                    Some(ChannelMsg::Data { data }) => {
+                    Some(ChannelMsg::Data { data })
+                    | Some(ChannelMsg::ExtendedData { data, .. }) => {
                         // Route remote `sz` and `rz` handshakes to the matching
                         // receive/send implementation.
                         let zmodem_cooldown = zmodem_done_at
@@ -2563,19 +2564,6 @@ async fn run_session(
                             }
                         }
 
-                        for (response, append_enter) in trigger_engine.feed(&text) {
-                            let mut bytes = response.as_str().as_bytes().to_vec();
-                            if append_enter {
-                                bytes.push(b'\r');
-                            }
-                            if let Err(error) = channel.data(&bytes[..]).await {
-                                tracing::warn!("login trigger response failed: {error}");
-                            }
-                        }
-                        let _ = events.send(SessionEvent::Output(text));
-                    }
-                    Some(ChannelMsg::ExtendedData { data, ext: _ }) => {
-                        let text = String::from_utf8_lossy(&data).into_owned();
                         for (response, append_enter) in trigger_engine.feed(&text) {
                             let mut bytes = response.as_str().as_bytes().to_vec();
                             if append_enter {
