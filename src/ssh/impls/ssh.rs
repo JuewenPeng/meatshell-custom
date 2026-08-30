@@ -462,9 +462,9 @@ fn filter_late_prompt_setup_echo(
     text: &mut String,
     pending: &mut bool,
     held: &mut String,
-) {
+) -> bool {
     if !*pending {
-        return;
+        return false;
     }
 
     if !held.is_empty() {
@@ -476,6 +476,7 @@ fn filter_late_prompt_setup_echo(
                 strip_prompt_setup_echo(&mut combined, prefix_pos, end);
                 *text = combined;
                 *pending = false;
+                return true;
             } else if held.len() >= (1 << 14) {
                 // A broken/non-POSIX shell may never emit the closing text.
                 // Bound the temporary buffer and release it rather than
@@ -488,6 +489,7 @@ fn filter_late_prompt_setup_echo(
                 strip_prompt_setup_echo(&mut combined, prefix_pos, end);
                 *text = combined;
                 *pending = false;
+                return true;
             } else {
                 text.clear();
             }
@@ -496,21 +498,22 @@ fn filter_late_prompt_setup_echo(
             // itself. Keep buffering rather than exposing a partial command.
             text.clear();
         }
-        return;
+        return false;
     }
 
     let Some(prefix_pos) = text.find(PROMPT_SETUP_PREFIX) else {
-        return;
+        return false;
     };
     if let Some(rel_end) = text[prefix_pos..].find(PROMPT_SETUP_SUFFIX) {
         let end = prefix_pos + rel_end + PROMPT_SETUP_SUFFIX.len();
         strip_prompt_setup_echo(text, prefix_pos, end);
         *pending = false;
-        return;
+        return true;
     }
 
     let line_start = line_start_before(text, prefix_pos);
     *held = text.split_off(line_start);
+    false
 }
 
 /// Extract the remote path from an OSC 7 sequence embedded in `text`.
@@ -1970,6 +1973,10 @@ async fn run_session(
     // If the late echo starts before the suppression deadline but finishes in
     // a later SSH packet, retain that command line until its suffix arrives.
     let mut late_prompt_echo_buf = String::new();
+    // Keep filtering active until the injected command's own echo has really
+    // been removed. Some SSH servers deliver its OSC output before the PTY
+    // echo, which otherwise ends suppression too early.
+    let mut prompt_setup_filter_active = false;
     // After a ZMODEM transfer finishes we briefly ignore ZMODEM detection so the
     // sender's lingering close frames can't spawn a spurious second receive (#76).
     let mut zmodem_done_at: Option<std::time::Instant> = None;
@@ -2458,6 +2465,7 @@ async fn run_session(
                         {
                             prompt_injected = true;
                             suppress_echo = true;
+                            prompt_setup_filter_active = true;
                             // Give the hook ~2 s to echo its OSC 7; past that we
                             // assume a non-POSIX shell and stop hiding output (#140-1).
                             // 1.2 s was too tight for slow PTY/SSH servers — the echo
@@ -2504,13 +2512,20 @@ async fn run_session(
                             // The command echo + its trailing OSC 7 (the one after
                             // our command, not any earlier prompt OSC 7).
                             let landed = echo_buf.find(PROMPT_SETUP_PREFIX).and_then(|p| {
-                                extract_osc7_end(&echo_buf[p..])
-                                    .map(|(cwd, rel)| (p, p + rel, cwd))
+                                extract_osc7_end(&echo_buf[p..]).and_then(|(cwd, rel)| {
+                                    // Do not treat an OSC 7 that arrived before
+                                    // the PTY echo as completion. A few servers
+                                    // deliver those streams out of order.
+                                    echo_buf[p..p + rel]
+                                        .contains(PROMPT_SETUP_SUFFIX)
+                                        .then_some((p, p + rel, cwd))
+                                })
                             });
                             if let Some((cmd_pos, osc_end, cwd)) = landed {
                                 suppress_echo = false;
                                 suppress_deadline = None;
                                 late_prompt_echo_pending = false;
+                                prompt_setup_filter_active = false;
                                 tracing::debug!("OSC7 cwd={:?}", cwd);
                                 let _ = events.send(SessionEvent::CwdChanged(cwd));
                                 let mut buf = std::mem::take(&mut echo_buf);
@@ -2525,6 +2540,7 @@ async fn run_session(
                                         let end = p + rel_end + PROMPT_SETUP_SUFFIX.len();
                                         strip_prompt_setup_echo(&mut buf, p, end);
                                         late_prompt_echo_pending = false;
+                                        prompt_setup_filter_active = false;
                                     } else {
                                         let line_start = line_start_before(&buf, p);
                                         late_prompt_echo_buf = buf.split_off(line_start);
@@ -2544,11 +2560,16 @@ async fn run_session(
                                 let _ = events.send(SessionEvent::CwdChanged(cwd));
                             }
                             let mut clean = chunk;
-                            filter_late_prompt_setup_echo(
+                            if prompt_setup_filter_active {
+                                late_prompt_echo_pending = true;
+                            }
+                            if filter_late_prompt_setup_echo(
                                 &mut clean,
                                 &mut late_prompt_echo_pending,
                                 &mut late_prompt_echo_buf,
-                            );
+                            ) {
+                                prompt_setup_filter_active = false;
+                            }
                             clean
                         };
 
