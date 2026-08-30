@@ -124,6 +124,8 @@ $version = $Tag.Substring(1)
 $escapedVersion = [regex]::Escape($version)
 $cargoTomlPath = Join-Path $repoRoot 'Cargo.toml'
 $cargoLockPath = Join-Path $repoRoot 'Cargo.lock'
+$androidCargoTomlPath = Join-Path $repoRoot 'android/Cargo.toml'
+$androidCargoLockPath = Join-Path $repoRoot 'android/Cargo.lock'
 
 $cargoToml = Read-TextFile $cargoTomlPath
 $newCargoToml = [regex]::Replace(
@@ -158,7 +160,8 @@ $newAndroidCargoToml = [regex]::Replace(
     "`${1}$version`${2}",
     1
 )
-if ($newAndroidCargoToml -eq $androidCargoToml) {
+$androidCargoTomlVersionPattern = '(?m)^version\s*=\s*"{0}"\s*$' -f $escapedVersion
+if ($newAndroidCargoToml -eq $androidCargoToml -and $androidCargoToml -notmatch $androidCargoTomlVersionPattern) {
     throw "Could not update [package].version in android/Cargo.toml."
 }
 
@@ -169,12 +172,13 @@ $newAndroidCargoLock = [regex]::Replace(
     "`${1}`${2}`${3}$version`${4}",
     1
 )
-if ($newAndroidCargoLock -eq $androidCargoLock) {
+$androidCargoLockVersionPattern = '(?ms)^name\s*=\s*"meatshell-android"\s*\r?\nversion\s*=\s*"{0}"\s*$' -f $escapedVersion
+if ($newAndroidCargoLock -eq $androidCargoLock -and $androidCargoLock -notmatch $androidCargoLockVersionPattern) {
     throw "Could not update meatshell-android version in android/Cargo.lock."
 }
 
 if ($DryRun) {
-    Write-Host "Would set Cargo.toml and Cargo.lock version to $version."
+    Write-Host "Would set Cargo.toml, Cargo.lock, and Android crate versions to $version."
 }
 else {
     Write-Utf8NoBom $cargoTomlPath $newCargoToml
@@ -206,7 +210,7 @@ else {
     }
 }
 
-Run-Git @('add', 'Cargo.toml', 'Cargo.lock')
+Run-Git @('add', 'Cargo.toml', 'Cargo.lock', 'android/Cargo.toml', 'android/Cargo.lock')
 
 # Re-running a release for an already-versioned clean HEAD should recreate the
 # tag without failing on an empty commit.
