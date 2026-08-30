@@ -183,6 +183,8 @@ if ($DryRun) {
 else {
     Write-Utf8NoBom $cargoTomlPath $newCargoToml
     Write-Utf8NoBom $cargoLockPath $newCargoLock
+    Write-Utf8NoBom $androidCargoTomlPath $newAndroidCargoToml
+    Write-Utf8NoBom $androidCargoLockPath $newAndroidCargoLock
 }
 
 Run-Cargo @('check', '--locked')
