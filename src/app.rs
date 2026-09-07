@@ -93,7 +93,8 @@ use crate::ssh::{
     SessionEvent, SessionHandle, SystemDetails,
 };
 use crate::terminal::{
-    CompiledOutputRule, CsiState, HistSpan, Line, OutputHighlightPreset, RenderGates, TabRenderGate,
+    CharsetTracker, CompiledOutputRule, CsiState, HistSpan, Line, OutputHighlightPreset,
+    RenderGates, TabRenderGate,
     TermBuffer, TermBufferHandle, TermBuffers,
 };
 use crate::resource::system::{format_bytes_per_sec, format_mem};
@@ -4948,10 +4949,13 @@ fn wire_session_callbacks(
                     output_highlight,
                     custom_highlight_rules,
                     json_format_output: false,
+                    vt100_drawing: false,
+                    charset: CharsetTracker::default(),
                     interactive_echo_until: std::time::Instant::now(),
                     sel_anchor: None,
                     sel_focus: None,
                     sel_ranges: Vec::new(),
+                    mouse_tracked: false,
                     history: VecDeque::new(),
                     prev: Vec::new(),
                     view_offset: 0,
@@ -13463,10 +13467,13 @@ mod selection_tests {
             output_highlight: OutputHighlightPreset::Log,
             custom_highlight_rules: Vec::new(),
             json_format_output: false,
+            vt100_drawing: false,
+            charset: CharsetTracker::default(),
             interactive_echo_until: std::time::Instant::now(),
             sel_anchor: None,
             sel_focus: None,
             sel_ranges: Vec::new(),
+            mouse_tracked: false,
             history: history.iter().map(|s| hist_line(s)).collect(),
             prev: Vec::new(),
             view_offset,
