@@ -108,7 +108,7 @@ component SingleTab inherits Rectangle {
     }
 
     HorizontalLayout {
-        width: parent.width - (info.kind != "welcome" ? 28px : 0px);
+        width: parent.width - 36px;
         padding-left: 0px;
         padding-right: 4px;
         spacing: 8px;
@@ -129,6 +129,7 @@ component SingleTab inherits Rectangle {
             // Keep session-tab text at the custom-backup fixed size. Long
             // titles are elided instead of shrinking the font adaptively.
             font-size: Theme.fs-sm;
+            horizontal-alignment: left;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
