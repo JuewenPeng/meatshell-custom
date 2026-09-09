@@ -1,6 +1,5 @@
 import { Theme } from "theme.slint";
 import { IconButton } from "widgets.slint";
-import { ScrollView } from "std-widgets.slint";
 
 export struct TabInfo {
     id: string,
@@ -13,43 +12,49 @@ export struct TabInfo {
 component SingleTab inherits Rectangle {
     in property <TabInfo> info;
     in property <bool> active;
+    // A ghost is the floating copy that follows the cursor while its original is
+    // being dragged (#408). Purely visual: its TouchArea is off, so it can never
+    // steal the pointer grab from the real tab.
+    in property <bool> ghost: false;
     callback selected();
     callback closed();
-    callback scrolled(int /* direction: +1 = wheel up */);
-    // Drag-to-reorder (v0.5): emitted while dragging when the tab should hop one
-    // slot left (-1) or right (+1). The model reorders and the tab follows.
-    callback reorder(int /* dir */);
+    callback duplicated();
     // Right-click (v0.5): request a context menu at the given absolute position.
     callback context-requested(length /* abs-x */, length /* abs-y */);
-    // Drag-to-split (v0.5): report the absolute cursor while dragging, and the
-    // drop point on release. The parent maps these to pane drop-zones.
+    // Drag lifecycle (#408). The tab only *reports* the gesture; the strip owns
+    // every bit of reorder state and the model is not touched before the drop, so
+    // this element — and with it the pointer grab — survives the whole drag.
+    callback drag-begun(length /* grab-offset */);
     callback drag-moved(length /* abs-x */, length /* abs-y */);
     callback drag-dropped(length /* abs-x */, length /* abs-y */);
+    callback drag-cancelled();
 
     // Where inside the tab the drag began, and whether a drag (vs a click) is in
     // progress. `dragging` suppresses the select-on-release.
     property <length> grab-offset;
     property <bool> pressing;
-    property <int> pending-reorder;
     out property <bool> dragging;
+    // The dragged original (dimmed in place) and its ghost share the lifted look.
+    property <bool> lifted: root.dragging || root.ghost;
 
     height: 30px;
-    min-width: 100px;
-    preferred-width: clamp(100px, title-text.preferred-width + 66px, 250px);
-    max-width: 250px;
-    horizontal-stretch: 0;
     border-radius: Theme.radius-sm;
     border-width: active ? 2px : 0px;
     border-color: active ? Theme.accent : transparent;
-    background: dragging ? Theme.bg-active
+    background: lifted ? Theme.bg-active
         : (active ? Theme.tab-active-bg
         : (touch.has-hover ? Theme.bg-hover : transparent));
     animate background { duration: 120ms; }
+    // Lift the ghost off the strip so it reads as "in hand".
+    drop-shadow-blur: ghost ? 12px : 0px;
+    drop-shadow-color: ghost ? #00000070 : transparent;
 
     // Declared FIRST so the HorizontalLayout's children (close button) are at
     // a higher z-order and receive their own click events.
-    legacy-drag-touch := TouchArea {
-        mouse-cursor: pointer;
+    touch := TouchArea {
+        // A ghost never takes input: the real tab keeps the grab until the drop.
+        enabled: !root.ghost;
+        mouse-cursor: root.dragging ? move : pointer;
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
                 root.grab-offset = self.mouse-x;
@@ -62,9 +67,18 @@ component SingleTab inherits Rectangle {
             } else if (e.kind == PointerEventKind.up) {
                 if (root.pressing && !root.dragging) {
                     root.selected();
-                } else if (root.pressing && root.dragging) {
+                } else if (root.dragging) {
                     root.drag-dropped(self.absolute-position.x + self.mouse-x,
                                       self.absolute-position.y + self.mouse-y);
+                }
+                root.pressing = false;
+                root.dragging = false;
+            } else if (e.kind == PointerEventKind.cancel) {
+                // The grab was taken away (window deactivated, an ancestor
+                // intercepted, the area got disabled). End the gesture without
+                // committing anything so no ghost or highlight is left behind.
+                if (root.dragging) {
+                    root.drag-cancelled();
                 }
                 root.pressing = false;
                 root.dragging = false;
@@ -75,38 +89,26 @@ component SingleTab inherits Rectangle {
                 // A drag begins once the cursor drifts horizontally OR leaves the
                 // tab vertically (so a straight-down drag to split also counts).
                 if (!root.dragging
-                        && (abs(self.mouse-x - root.grab-offset) > 5px
+                        && (abs(self.mouse-x - root.grab-offset) > 4px
                             || self.mouse-y < -6px || self.mouse-y > root.height + 6px)) {
                     root.dragging = true;
+                    root.drag-begun(root.grab-offset);
                 }
-                // Gate everything below on `dragging`: a plain click can emit
-                // tiny `moved` events (macOS), which would otherwise light up
-                // the drop-zone highlight and leave it stuck — no drop ever
-                // follows a click to clear it.
+                // Gate on `dragging`: a plain click can emit tiny `moved` events
+                // (macOS), which would otherwise start a bogus gesture.
                 if (root.dragging) {
-                    // Tell the parent where the cursor is, for drop-to-split zones.
                     root.drag-moved(self.absolute-position.x + self.mouse-x,
                                     self.absolute-position.y + self.mouse-y);
-                    // Reorder within the strip only while the cursor stays on the strip
-                    // row; once it drops into a pane body we hand off to drag-to-split.
-                    // One slot = the tab's own width + the 2px strip spacing; re-anchor
-                    // grab-offset after each hop so the drift resets (no oscillation).
-                    if (self.mouse-y > -10px && self.mouse-y < root.height + 10px) {
-                        if (self.mouse-x - root.grab-offset > (root.width + 2px) / 2) {
-                            root.reorder(1);
-                            root.grab-offset = self.mouse-x - (root.width + 2px);
-                        } else if (self.mouse-x - root.grab-offset < -(root.width + 2px) / 2) {
-                            root.reorder(-1);
-                            root.grab-offset = self.mouse-x + (root.width + 2px);
-                        }
-                    }
                 }
             }
+        }
+        double-clicked => {
+            if (root.info.kind != "welcome") { root.duplicated(); }
         }
     }
 
     HorizontalLayout {
-        width: parent.width - 36px;
+        width: parent.width - (info.kind != "welcome" ? 28px : 0px);
         padding-left: 0px;
         padding-right: 4px;
         spacing: 8px;
@@ -124,8 +126,9 @@ component SingleTab inherits Rectangle {
         title-text := Text {
             text: info.title;
             color: active ? Theme.text-primary : Theme.text-secondary;
+            // Keep session-tab text at the custom-backup fixed size. Long
+            // titles are elided instead of shrinking the font adaptively.
             font-size: Theme.fs-sm;
-            horizontal-alignment: left;
             vertical-alignment: center;
             overflow: elide;
             horizontal-stretch: 1;
@@ -133,66 +136,9 @@ component SingleTab inherits Rectangle {
 
     }
 
-    // Keep the tab hit area above title text so it owns the cursor and drag.
-    // The close button is declared after this area and therefore stays clickable.
-    touch := TouchArea {
-        mouse-cursor: root.dragging ? default : pointer;
-        scroll-event(ev) => {
-            root.scrolled(ev.delta-y > 0 ? 1 : -1);
-            accept
-        }
-        pointer-event(e) => {
-            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
-                root.grab-offset = self.mouse-x;
-                root.pressing = true;
-                root.dragging = false;
-                root.pending-reorder = 0;
-            } else if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
-                root.context-requested(
-                    self.absolute-position.x + self.mouse-x,
-                    self.absolute-position.y + self.mouse-y);
-            } else if (e.kind == PointerEventKind.up) {
-                if (root.pressing && !root.dragging) {
-                    root.selected();
-                } else if (root.pressing && root.dragging) {
-                    // Do not rebuild the tab model while it owns the pointer.
-                    // Reordering on release keeps the drag capture and cursor stable.
-                    if (root.pending-reorder != 0) {
-                        root.reorder(root.pending-reorder);
-                    }
-                    root.drag-dropped(self.absolute-position.x + self.mouse-x,
-                                      self.absolute-position.y + self.mouse-y);
-                }
-                root.pressing = false;
-                root.dragging = false;
-                root.pending-reorder = 0;
-            }
-        }
-        moved => {
-            if (root.pressing) {
-                if (abs(self.mouse-x - root.grab-offset) > 5px
-                        || self.mouse-y < -6px || self.mouse-y > root.height + 6px) {
-                    root.dragging = true;
-                }
-                if (root.dragging) {
-                    root.drag-moved(self.absolute-position.x + self.mouse-x,
-                                    self.absolute-position.y + self.mouse-y);
-                    if (self.mouse-y > -10px && self.mouse-y < root.height + 10px) {
-                        // Derive the destination from the total drag distance. The
-                        // previous incremental approach relied on a model rebuild
-                        // after each hop and otherwise kept accumulating at an edge.
-                        root.pending-reorder = round(
-                            (self.mouse-x - root.grab-offset) / (root.width + 2px));
-                    }
-                }
-            }
-        }
-    }
-
     // Keep close pinned to the far right even when the title is very short.
-    IconButton {
-        glyph: "\u{E5CD}";
-        glyph-font-family: "Material Icons";
+    if info.kind != "welcome" && !ghost : IconButton {
+        glyph: "×";
         size: 20px;
         x: parent.width - self.width - 6px;
         y: (parent.height - self.height) / 2;
@@ -226,7 +172,6 @@ component TabMenuItem inherits Rectangle {
         clicked => { root.clicked(); }
     }
 }
-
 // --- TabBar ----------------------------------------------------------------
 export component TabBar inherits Rectangle {
     in property <[TabInfo]> tabs;
@@ -236,11 +181,23 @@ export component TabBar inherits Rectangle {
     // Keep this much clear on the right so tabs don't slide under the app's
     // top-right toolbar icons, which are positioned over the tab row (#122).
     in property <length> reserve-right: 0px;
+    // Window-wide tab-drag hand-off (#408). The window root hit-tests the live
+    // drag against each pane's rect (pure model data) and hands the hovering strip
+    // the cursor in its own coordinates, so this strip can offer an insertion index
+    // for a tab dropped in from another pane. Keeping the hit-test out of here
+    // matters: every binding a `changed` handler depends on must stay free of
+    // layout results, or its eager first evaluation recurses into the very layout
+    // that is creating this component.
+    in property <bool> ext-drag-over: false;
+    in property <length> ext-drag-x;
+
     callback tab-selected(string);
     callback tab-closed(string);
     callback new-tab();
-    // Drag-to-reorder: move the tab at `from` one slot in `dir` (#v0.5).
-    callback tab-reorder(int /* from */, int /* dir */);
+    // Drag-to-reorder (#408), committed exactly once on drop: move the tab at
+    // `from` to `to`, where `to` is the insertion index AFTER `from` has been
+    // removed from the list.
+    callback tab-move(int /* from */, int /* to */);
     // Split this pane, peeling `tab-id` into a new pane on `dir` (#v0.5).
     callback tab-split(string /* tab-id */, string /* dir */);
     // Open another connection to the same session as `tab-id` (#v0.5).
@@ -249,17 +206,156 @@ export component TabBar inherits Rectangle {
     callback tab-rename-request(string /* tab-id */);
     callback merge-pane();
     // Drag-to-split (#v0.5): cursor moved / dropped while dragging `tab-id`, in
-    // absolute (window) coordinates.
-    callback tab-drag-move(string /* tab-id */, length /* abs-x */, length /* abs-y */);
+    // absolute (window) coordinates. `over-own-strip` tells Rust that this strip
+    // is showing its own insertion gap, so no pane drop-zone must light up.
+    callback tab-drag-move(string /* tab-id */, length /* abs-x */, length /* abs-y */,
+                           bool /* over-own-strip */);
     callback tab-drag-drop(string /* tab-id */, length /* abs-x */, length /* abs-y */);
+    // The gesture ended without a drop (grab lost / nothing to commit): drop any
+    // highlight the drag put up.
+    callback tab-drag-cancel();
+    // Insertion index this strip offers for a tab dragged in from another pane;
+    // -1 while the cursor is somewhere else (#408).
+    callback drop-index-changed(int);
 
     // Right-click context-menu state.
     property <length> menu-x;
     property <length> menu-y;
     property <string> menu-target;
 
-    height: 42px;
+    height: 36px;
     background: Theme.bg-panel-alt;
+
+    // --- Drag-to-reorder state (#408) --------------------------------------
+    // Nothing here touches the model: the slots stay exactly where they are for
+    // the whole gesture, which is what keeps the dragged tab's pointer grab (and
+    // therefore the drag) alive across any number of slots. Only the drop commits.
+    //
+    // Everything a `changed` handler below can reach must be computable without
+    // asking the layout for a position — those handlers are evaluated eagerly when
+    // a slot is created, which happens *inside* the layout pass, so a peek at
+    // `x` / `width` / `absolute-position` there recurses. Hence the cursor arrives
+    // pre-converted from the event handler (where reading geometry is safe) and
+    // every tracked binding short-circuits on a plain flag first.
+    property <bool> drag-active;
+    property <int> drag-from: -1;
+    // Insertion index in the "dragged tab removed" list; see `tab-move`.
+    property <int> drag-to: -1;
+    property <length> drag-width;
+    property <length> grab-offset;
+    // Cursor relative to this bar's top-left, and whether it is still on the strip
+    // row. Both are written by `drag-move` rather than bound, to keep them (and the
+    // tracked bindings that read them) independent of the layout.
+    property <length> cursor-x;
+    property <length> cursor-y;
+    property <bool> over-strip;
+    property <bool> reordering: root.drag-active && root.drag-from >= 0 && root.over-strip;
+    // Cursor in strip-content space: past the bar's 3px padding and through the
+    // scroll offset. A binding, not a stored value, so edge auto-scrolling keeps
+    // the ghost and the insertion index live while the pointer stands still.
+    property <length> content-x: root.cursor-x - 3px - flick.viewport-x;
+    // Ghost's left edge, clamped to the visible part of the strip so it can never
+    // be dragged out of sight. Only ever evaluated while a drag is live.
+    property <length> ghost-x: clamp(root.content-x - root.grab-offset,
+        -flick.viewport-x,
+        max(-flick.viewport-x, -flick.viewport-x + flick.width - root.drag-width));
+
+    function begin-drag(index: int, offset: length, slot-width: length) {
+        root.drag-from = index;
+        root.drag-to = index;
+        root.grab-offset = offset;
+        root.drag-width = slot-width;
+        root.drag-active = true;
+    }
+
+    function end-drag() {
+        root.drag-active = false;
+        root.over-strip = false;
+        root.drag-from = -1;
+        root.drag-to = -1;
+    }
+
+    // Absolute cursor -> bar-local. Safe here: an event handler runs with the
+    // layout settled, unlike the bindings above.
+    function track-cursor(ax: length, ay: length) {
+        root.cursor-x = ax - root.absolute-position.x;
+        root.cursor-y = ay - root.absolute-position.y;
+        root.over-strip = root.cursor-x >= 0px && root.cursor-x <= root.width
+            && root.cursor-y >= -10px && root.cursor-y <= root.height + 10px;
+    }
+
+    function drag-move(id: string, ax: length, ay: length) {
+        root.track-cursor(ax, ay);
+        // Reported for every move, in or out of the strip: Rust needs it to track
+        // the cross-window merge target, and the window root republishes it to the
+        // other panes' strips.
+        root.tab-drag-move(id, ax, ay, root.reordering);
+    }
+
+    function drag-drop(id: string, ax: length, ay: length) {
+        root.track-cursor(ax, ay);
+        if (root.reordering) {
+            if (root.drag-to >= 0 && root.drag-to != root.drag-from) {
+                root.tab-move(root.drag-from, root.drag-to);
+            } else {
+                root.tab-drag-cancel();
+            }
+        } else {
+            root.tab-drag-drop(id, ax, ay);
+        }
+        root.end-drag();
+    }
+
+    // Visual let-in: a tab the dragged one has moved past slides over by one slot,
+    // opening the gap it will land in. Each slot decides on its own — the run of
+    // "passed" slots is exactly the run that has to move — so no reduction over the
+    // strip is needed for the animation.
+    pure function slot-shift(i: int, passed: bool) -> length {
+        if (!root.reordering || i == root.drag-from) {
+            return 0px;
+        }
+        if (i > root.drag-from) {
+            return passed ? -(root.drag-width + 2px) : 0px;
+        }
+        return passed ? 0px : root.drag-width + 2px;
+    }
+
+    // --- Insertion index for a tab dragged in from another pane (#408) ------
+    property <bool> ext-hover: root.ext-drag-over && !root.drag-active;
+    property <length> ext-content-x: root.ext-drag-x - 3px - flick.viewport-x;
+    property <int> ext-index: -1;
+    changed ext-hover => {
+        root.ext-index = root.ext-hover ? 0 : -1;
+        root.drop-index-changed(root.ext-index);
+    }
+    changed ext-index => {
+        if (root.ext-hover) {
+            root.drop-index-changed(root.ext-index);
+        }
+    }
+
+    // True only when the tabs are wider than the available strip width (#122).
+    // Computed from the TabBar's own width (set by the parent), not flick.width,
+    // so showing the arrows (which shrink the flickable) can't feed back into this
+    // condition and form a binding loop. The 64px allows for the two arrows.
+    property <bool> tab-overflow:
+        strip.preferred-width > root.width - root.reserve-right - 64px;
+
+    // Drag past either end of an overflowing strip to scroll it (Chrome-style).
+    // `!reordering` first, and a single read of `flick.width`, so this stays out of
+    // the layout while idle: the Timer evaluates `running` eagerly.
+    property <length> edge-step:
+        !root.reordering || !root.tab-overflow ? 0px
+        : (root.cursor-x - 3px < 24px ? -6px
+        : (root.cursor-x - 3px > flick.width - 24px ? 6px : 0px));
+    Timer {
+        interval: 16ms;
+        running: root.edge-step != 0px;
+        triggered => {
+            flick.viewport-x = clamp(flick.viewport-x - root.edge-step,
+                min(0px, flick.width - flick.viewport-width), 0px);
+        }
+    }
 
     HorizontalLayout {
         padding: 3px;
@@ -267,54 +363,148 @@ export component TabBar inherits Rectangle {
         spacing: 2px;
 
         // Horizontally-scrollable strip: when the tabs overflow the available
-        // width they stay reachable by dragging, trackpad, or the mouse wheel.
-        flick := ScrollView {
-            min-width: 0px;
-            min-height: 0px;
+        // width they stay reachable by the arrows or the wheel (#122).
+        flick := Flickable {
+            // Non-interactive on purpose (#408): an interactive Flickable delays
+            // the press to its children by 100ms and, once the tabs overflow,
+            // steals the gesture as soon as it travels 8px — which cancelled the
+            // tab drag and scrolled the strip instead. Wheel / trackpad scrolling
+            // is unaffected (the Flickable still handles wheel events), and the
+            // arrows below remain.
+            interactive: false;
             horizontal-stretch: 1;
-            viewport-height: 30px;
-            viewport-width: max(self.visible-width, strip.preferred-width);
-            horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
-            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            viewport-height: self.height;
+            viewport-width: max(self.width, strip.preferred-width);
             strip := HorizontalLayout {
-                height: 30px;
                 spacing: 2px;
                 alignment: start;
-                for tab[i] in tabs : SingleTab {
-                    info: tab;
-                    active: tab.id == root.active-id;
-                    selected => { root.tab-selected(tab.id); }
-                    closed => { root.tab-closed(tab.id); }
-                    scrolled(direction) => {
-                        flick.viewport-x = min(0px, max(
-                            flick.visible-width - flick.viewport-width,
-                            flick.viewport-x + (direction > 0 ? 120px : -120px)));
+                // The slot owns the geometry and never moves during a drag; the
+                // tab inside it is what slides. A layout child cannot have its `x`
+                // set (the layout owns it), hence this wrapper.
+                for tab[i] in tabs : Rectangle {
+                    // Match custom-backup: width follows the rendered title,
+                    // with fixed padding and sensible minimum/maximum bounds.
+                    width: clamp(100px, tab-measure.preferred-width + 66px, 250px);
+                    horizontal-stretch: 0;
+                    tab-measure := Text {
+                        text: tab.title;
+                        font-size: Theme.fs-sm;
+                        x: -10000px;
+                        y: -10000px;
                     }
-                    reorder(dir) => { root.tab-reorder(i, dir); }
-                    context-requested(ax, ay) => {
-                        root.menu-target = tab.id;
-                        root.menu-x = ax - root.absolute-position.x;
-                        root.menu-y = ay - root.absolute-position.y;
-                        tab-menu.show();
+                    // Index in the list with the dragged tab removed.
+                    property <int> shifted-index: i < root.drag-from ? i : i - 1;
+                    // Has the ghost's leading edge passed this slot's midpoint in
+                    // the "dragged tab removed" layout? That layout depends only on
+                    // `drag-from`, never on `drag-to`, so the decision can never
+                    // feed back into the let-in animation and oscillate. `self.x` is
+                    // the slot's offset inside the strip, i.e. content space.
+                    property <bool> passed: root.reordering && i != root.drag-from
+                        && root.ghost-x > self.x + self.width / 2
+                            - (i > root.drag-from ? root.drag-width + 2px : 0px);
+                    // Exactly the leading run of slots is "passed", so pushing the
+                    // max/min of the crossed boundaries converges on the insertion
+                    // index however many slots a single move event skipped over.
+                    changed passed => {
+                        if (i != root.drag-from) {
+                            if (self.passed) {
+                                root.drag-to = max(root.drag-to, self.shifted-index + 1);
+                            } else {
+                                root.drag-to = min(root.drag-to, self.shifted-index);
+                            }
+                        }
                     }
-                    drag-moved(ax, ay) => { root.tab-drag-move(tab.id, ax, ay); }
-                    drag-dropped(ax, ay) => { root.tab-drag-drop(tab.id, ax, ay); }
+                    // Same rule for a tab dragged in from another pane, minus the
+                    // removal (nothing leaves this strip).
+                    property <bool> ext-passed:
+                        root.ext-hover && root.ext-content-x > self.x + self.width / 2;
+                    changed ext-passed => {
+                        if (self.ext-passed) {
+                            root.ext-index = max(root.ext-index, i + 1);
+                        } else {
+                            root.ext-index = min(root.ext-index, i);
+                        }
+                    }
+
+                    SingleTab {
+                        x: root.slot-shift(i, parent.passed);
+                        width: parent.width;
+                        height: parent.height;
+                        // The dragged tab leaves a hole; the ghost carries it.
+                        opacity: root.reordering && i == root.drag-from ? 0.0 : 1.0;
+                        animate x { duration: 120ms; easing: ease-out; }
+                        info: tab;
+                        active: tab.id == root.active-id;
+                        selected => { root.tab-selected(tab.id); }
+                        closed => { root.tab-closed(tab.id); }
+                        duplicated => { root.tab-duplicate(tab.id); }
+                        context-requested(ax, ay) => {
+                            root.menu-target = tab.id;
+                            root.menu-x = ax - root.absolute-position.x;
+                            root.menu-y = ay - root.absolute-position.y;
+                            tab-menu.show();
+                        }
+                        drag-begun(offset) => { root.begin-drag(i, offset, parent.width); }
+                        drag-moved(ax, ay) => { root.drag-move(tab.id, ax, ay); }
+                        drag-dropped(ax, ay) => { root.drag-drop(tab.id, ax, ay); }
+                        drag-cancelled => {
+                            root.end-drag();
+                            root.tab-drag-cancel();
+                        }
+                    }
                 }
                 if root.show-new-tab : IconButton {
-                    glyph: "\u{E145}";
-                    glyph-font-family: "Material Icons";
-                    size: 30px;
-                    y: 0px;
+                    glyph: "+";
+                    size: 28px;
+                    y: (parent.height - self.height) / 2;
                     clicked => { root.new-tab(); }
                 }
             }
+
+            // The dragged tab's floating copy. It lives in the Flickable (so its x
+            // is already in content space and it is clipped to the strip) and is
+            // declared after `strip`, which puts it on top — Slint's `z` is a
+            // compile-time constant, so stacking has to come from declaration order.
+            if root.reordering && root.drag-from < root.tabs.length : SingleTab {
+                ghost: true;
+                info: root.tabs[root.drag-from];
+                active: root.tabs[root.drag-from].id == root.active-id;
+                x: root.ghost-x;
+                y: 0px;
+                width: root.drag-width;
+                height: 30px;
+            }
         }
-        // Keep the trailing tab and new-tab button clear of quick connect.
-        Rectangle { width: 29px; }
+
         // Reserved gap for the external top-right toolbar icons (#122).
         Rectangle { width: root.reserve-right; }
     }
 
+    // Scroll arrows are absolute overlays so toggling them can't
+    // change the layout that `tab-overflow` reads (avoids a binding loop). Shown
+    // only on overflow, masking the edge tab beneath them (#122).
+    if root.tab-overflow : Rectangle {
+        x: 3px;
+        y: (parent.height - self.height) / 2;
+        width: 26px; height: 26px;
+        background: Theme.bg-panel-alt;
+        IconButton {
+            glyph: "<"; size: 24px;
+            clicked => { flick.viewport-x = min(0px, flick.viewport-x + 120px); }
+        }
+    }
+    if root.tab-overflow : Rectangle {
+        x: root.width - root.reserve-right - 29px;
+        y: (parent.height - self.height) / 2;
+        width: 26px; height: 26px;
+        background: Theme.bg-panel-alt;
+        IconButton {
+            glyph: ">"; size: 24px;
+            clicked => {
+                flick.viewport-x = max(flick.width - flick.viewport-width, flick.viewport-x - 120px);
+            }
+        }
+    }
     // Right-click context menu (v0.5): split this pane by peeling the clicked tab
     // into a new pane. Splitting needs at least two tabs so the source pane survives.
     tab-menu := PopupWindow {

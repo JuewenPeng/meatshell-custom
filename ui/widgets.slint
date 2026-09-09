@@ -253,7 +253,9 @@ export component LabeledInput inherits VerticalLayout {
         }
 
         // Lightweight placeholder — shown when value is empty.
-        if value == "" : Text {
+        // Hide on focus so IME preedit text is never drawn on top of the
+        // placeholder while the field is still logically empty.
+        if value == "" && !input.has-focus : Text {
             x: 10px;
             y: 0px;
             height: parent.height;

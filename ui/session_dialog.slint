@@ -98,7 +98,7 @@ component MiniInput inherits Rectangle {
         text <=> root.value;
         edited => { root.edited(root.value); }
     }
-    if root.value == "" : Text {
+    if root.value == "" && !mi.has-focus : Text {
         x: 8px;
         height: parent.height;
         text: root.placeholder;
@@ -284,7 +284,7 @@ component GroupCombo inherits VerticalLayout {
             font-size: Theme.fs-md;
         }
 
-        if root.value == "" : Text {
+        if root.value == "" && !ginput.has-focus : Text {
             x: 10px;
             height: parent.height;
             text: root.placeholder;

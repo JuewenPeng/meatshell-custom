@@ -187,6 +187,22 @@ impl TermBuffer {
             .join("\n")
     }
 
+    /// Return whether the selection covers at least one cell.  Selection
+    /// endpoints are inclusive, so comparing the coordinates is more reliable
+    /// than looking at extracted text: a plain click would otherwise copy the
+    /// character under the pointer when auto-copy is enabled.
+    pub(crate) fn selection_has_extent(&self) -> bool {
+        if self.sel_ranges.is_empty() {
+            return matches!(
+                (self.sel_anchor, self.sel_focus),
+                (Some(anchor), Some(focus)) if anchor != focus
+            );
+        }
+        self.sel_ranges
+            .iter()
+            .any(|(anchor, focus)| anchor != focus)
+    }
+
     /// Select the shell-oriented word at a visible grid position and return it.
     /// Paths, host names and flags stay together; whitespace and shell control
     /// punctuation delimit words (#287).
@@ -736,7 +752,7 @@ impl TermBuffer {
 #[cfg(test)]
 mod feed_batch_tests {
     use super::*;
-    use crate::terminal::OutputHighlightPreset;
+    use crate::terminal::{CharsetTracker, OutputHighlightPreset};
     use std::collections::VecDeque;
 
     fn buffer(rows: u16, cols: u16) -> TermBuffer {

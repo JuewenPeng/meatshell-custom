@@ -3440,6 +3440,23 @@ fn session_matches_host_query(session: &Session, query: &str) -> bool {
         || session.host.to_lowercase().contains(query)
 }
 
+/// Format the connection parameters shown beside a serial session in the
+/// welcome list.  SSH/Telnet rows keep using the host/port columns.
+fn serial_session_detail(session: &Session) -> String {
+    if session.kind != SessionKind::Serial {
+        return String::new();
+    }
+    let parity = match session.parity.as_str() {
+        "odd" => "O",
+        "even" => "E",
+        _ => "N",
+    };
+    format!(
+        "{} · {} baud · {}{}{}",
+        session.serial_port, session.baud_rate, session.data_bits, parity, session.stop_bits
+    )
+}
+
 #[cfg(test)]
 mod host_search_tests {
     use super::*;
@@ -3522,6 +3539,7 @@ fn sync_sessions_to_model_with_filter(
         id: "".into(),
         name: "".into(),
         host: "".into(),
+        serial_detail: "".into(),
         port: 0,
         user: "".into(),
         auth: "".into(),
@@ -3542,6 +3560,7 @@ fn sync_sessions_to_model_with_filter(
             id: s.id.clone().into(),
             name: s.name.clone().into(),
             host: s.host.clone().into(),
+            serial_detail: serial_session_detail(s).into(),
             port: 0,
             user: s.user.clone().into(),
             auth: s.kind.as_str().into(),
@@ -3576,6 +3595,7 @@ fn sync_sessions_to_model_with_filter(
                     id: s.id.clone().into(),
                     name: s.name.clone().into(),
                     host: s.host.clone().into(),
+                    serial_detail: serial_session_detail(s).into(),
                     port: s.port as i32,
                     user: s.user.clone().into(),
                     auth: s.auth.as_str().into(),
@@ -4846,7 +4866,7 @@ fn wire_session_callbacks(
                 SessionKind::Local => format!("local {}", session.name),
             };
             // Serial / Telnet have no SFTP side-channel.
-            let has_sftp = session.kind == SessionKind::Ssh;
+            let has_sftp = should_start_sftp(&session);
 
             // Seed the per-tab status so the sidebar shows "连接中 host" the
             // moment this tab becomes active (the `changed active-tab-id`
@@ -4865,7 +4885,7 @@ fn wire_session_callbacks(
             // Register tab + terminal state (SFTP fields start empty/loading).
             tabs_model.push(TabInfo {
                 id: tab_id.clone().into(),
-                title: tab_title.into(),
+                title: tab_title.clone().into(),
                 kind: "terminal".into(),
                 connected: false,
             });
@@ -5080,11 +5100,18 @@ fn resolve_jump(store: &Rc<RefCell<ConfigStore>>, session: &Session) -> Option<S
     store.borrow().get(&session.jump_session_id).cloned()
 }
 
+/// Compatibility mode (for example a Windows PowerShell/cmd server) must keep
+/// the SSH connection to one plain PTY. Starting a second SFTP handshake while
+/// shell integration is disabled can make bastions terminate the first one.
+fn should_start_sftp(session: &Session) -> bool {
+    session.kind == SessionKind::Ssh && !session.disable_shell_integration
+}
+
 /// Spawn the shell (+ SFTP) workers and their event-pump threads for an
 /// already-registered tab. Used by the initial connect and by in-place
 /// reconnect (#79); the tab/terminal/parser must already exist.
 fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
-    let has_sftp = session.kind == SessionKind::Ssh;
+    let has_sftp = should_start_sftp(&session);
     // Reconnect reuses the existing tab model. Snapshot its SFTP location and
     // expanded nodes before the fresh worker publishes its initial home tree.
     let (restore_sftp_path, restore_tree_expanded) = if has_sftp {
@@ -7803,7 +7830,7 @@ fn apply_session_event_to_window(
         } => {
             if error.is_empty() {
                 // Open the built-in viewer/editor (#70).
-                win.set_editor_line_numbers(line_numbers_for(&content).into());
+                win.set_editor_lines(editor_lines_for(&content));
                 win.set_editor_path(path.into());
                 win.set_editor_name(name.into());
                 win.set_editor_content(content.into());
@@ -8636,8 +8663,8 @@ fn wire_tab_callbacks(
         });
     }
 
-    // Drag-to-reorder within a pane's strip: move the tab at `from` one slot in
-    // `dir`. Only the pane's own tab order changes; content shows by active id.
+    // Commit a tab reorder within a pane. The TabBar keeps the drag ghost and
+    // insertion gap purely visual, then emits one final move on drop.
     {
         let weak = window.as_weak();
         let layout = layout.clone();
@@ -8645,24 +8672,15 @@ fn wire_tab_callbacks(
         let tabs_model = tabs_model.clone();
         let panes_model = panes_model.clone();
         let splitters_model = splitters_model.clone();
-        window.on_pane_tab_reorder(move |pane_id: i32, from: i32, dir: i32| {
-            {
-                let mut lay = layout.borrow_mut();
-                if let Some(l) = lay.leaf_mut(pane_id as u64) {
-                    let n = l.tabs.len() as i32;
-                    if n <= 1 {
-                        return;
-                    }
-                    let from = from.clamp(0, n - 1);
-                    let to = (from + dir).clamp(0, n - 1);
-                    if from == to {
-                        return;
-                    }
-                    let item = l.tabs.remove(from as usize);
-                    l.tabs.insert(to as usize, item);
-                }
+        window.on_pane_tab_move(move |pane_id: i32, from: i32, to: i32| {
+            if from < 0 || to < 0 || from == to {
+                return;
             }
+            layout
+                .borrow_mut()
+                .move_tab_within(pane_id as u64, from as usize, to as usize);
             if let Some(w) = weak.upgrade() {
+                w.set_drag_active(false);
                 refresh_panes(
                     &w,
                     &layout.borrow(),
@@ -8671,6 +8689,23 @@ fn wire_tab_callbacks(
                     &panes_model,
                     &splitters_model,
                 );
+            }
+        });
+    }
+
+    // The strip that a dragged tab is hovering over reports its insertion
+    // index. Keep this separate from the pane highlight state so a tab can be
+    // dropped into an exact slot in another pane.
+    let drop_index: Rc<Cell<(i32, i32)>> = Rc::new(Cell::new((-1, -1)));
+    {
+        let drop_index = drop_index.clone();
+        window.on_pane_tab_drop_index(move |pane_id: i32, index: i32| {
+            if index < 0 {
+                if drop_index.get().0 == pane_id {
+                    drop_index.set((-1, -1));
+                }
+            } else {
+                drop_index.set((pane_id, index));
             }
         });
     }
@@ -8950,8 +8985,12 @@ fn wire_tab_callbacks(
         let weak = window.as_weak();
         let layout = layout.clone();
         let content_size = content_size.clone();
-        window.on_tab_drag_move(move |_tab_id: SharedString, x: f32, y: f32| {
+        window.on_tab_drag_move(move |_tab_id: SharedString, x: f32, y: f32, over_own_strip: bool| {
             if let Some(w) = weak.upgrade() {
+                if over_own_strip {
+                    w.set_drag_active(false);
+                    return;
+                }
                 match drag_target(&layout.borrow(), content_size.get(), x, y) {
                     Some((_, _, (hx, hy, hw, hh))) => {
                         w.set_drag_active(true);
@@ -8966,6 +9005,18 @@ fn wire_tab_callbacks(
         });
     }
 
+    // Clear transient drag state if the pointer grab is cancelled.
+    {
+        let weak = window.as_weak();
+        let drop_index = drop_index.clone();
+        window.on_tab_drag_cancel(move || {
+            drop_index.set((-1, -1));
+            if let Some(w) = weak.upgrade() {
+                w.set_drag_active(false);
+            }
+        });
+    }
+
     // Drop: split the target pane toward the dropped-on edge (peeling the tab
     // into the new pane), or drop into another pane's tab group from the middle
     // / tab strip (IDEA-style merge by dragging onto the tab row).
@@ -8976,8 +9027,10 @@ fn wire_tab_callbacks(
         let tabs_model = tabs_model.clone();
         let panes_model = panes_model.clone();
         let splitters_model = splitters_model.clone();
+        let drop_index = drop_index.clone();
         window.on_tab_drag_drop(move |tab_id: SharedString, x: f32, y: f32| {
             let tab_id = tab_id.to_string();
+            let dropped_at = drop_index.replace((-1, -1));
             let target = drag_target(&layout.borrow(), content_size.get(), x, y);
             if let Some((pane, zone, _)) = target {
                 let mut lay = layout.borrow_mut();
@@ -8997,12 +9050,20 @@ fn wire_tab_callbacks(
                     }
                     "tabstrip" => {
                         if src != Some(pane) {
-                            lay.move_tab(&tab_id, pane);
+                            if dropped_at.0 == pane as i32 && dropped_at.1 >= 0 {
+                                lay.move_tab_at(&tab_id, pane, dropped_at.1 as usize);
+                            } else {
+                                lay.move_tab(&tab_id, pane);
+                            }
                         }
                     }
                     _ => {
                         if src != Some(pane) {
-                            lay.move_tab(&tab_id, pane);
+                            if dropped_at.0 == pane as i32 && dropped_at.1 >= 0 {
+                                lay.move_tab_at(&tab_id, pane, dropped_at.1 as usize);
+                            } else {
+                                lay.move_tab(&tab_id, pane);
+                            }
                         }
                     }
                 }
@@ -10134,7 +10195,9 @@ fn wire_sftp_callbacks(
     }
     {
         window.on_sftp_copy_path(move |path: SharedString| {
-            clipboard_set_text(path.to_string());
+            // Clipboard access may block while another process owns it. Keep
+            // the Slint event loop responsive when copying an SFTP path.
+            std::thread::spawn(move || clipboard_set_text(path.to_string()));
         });
     }
 
@@ -10192,7 +10255,7 @@ fn wire_sftp_callbacks(
         let weak = window.as_weak();
         window.on_editor_recount(move |text: SharedString| {
             if let Some(w) = weak.upgrade() {
-                w.set_editor_line_numbers(line_numbers_for(text.as_str()).into());
+                w.set_editor_lines(editor_lines_for(text.as_str()));
             }
         });
     }
@@ -11282,6 +11345,12 @@ fn wire_key_input(
             // Extract the selected text; a zero-area selection (a plain click)
             // is cleared instead of copied.
             let text = with_term_buf(&bufs_sel, &tid, |buf| {
+                if !buf.selection_has_extent() {
+                    buf.sel_anchor = None;
+                    buf.sel_focus = None;
+                    buf.sel_ranges.clear();
+                    return None;
+                }
                 let extracted = buf.extract_selection_text();
                 if extracted.is_empty() {
                     // Zero-area selection (a plain click) → clear it.
@@ -11677,19 +11746,15 @@ fn redact_key(key: &str) -> String {
 /// when true the four arrow keys must use SS3 sequences (`\x1bOA`…) instead
 /// of the default CSI sequences (`\x1b[A`…).  Full-screen apps like nano and
 /// vim set this mode on startup.
-/// Build the editor's line-number gutter text: "1\n2\n…\nN", one number per line
-/// of `content`, matching its (newline-separated) line count (#81).
-fn line_numbers_for(content: &str) -> String {
-    use std::fmt::Write;
-    let lines = content.split('\n').count().max(1);
-    let mut s = String::with_capacity(lines * 4);
-    for i in 1..=lines {
-        if i > 1 {
-            s.push('\n');
-        }
-        let _ = write!(s, "{i}");
-    }
-    s
+/// Preserve logical lines (including blank and trailing lines) for the gutter.
+/// Slint measures each line with the same wrapping and font as the editor.
+fn editor_lines_for(content: &str) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(
+        content
+            .split('\n')
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// Write `text` to the system clipboard. Call from a dedicated thread, never the

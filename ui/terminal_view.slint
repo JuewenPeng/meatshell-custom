@@ -2,7 +2,7 @@ import { Theme } from "theme.slint";
 import { SftpPanel, SftpEntry, SftpTreeNode, TunnelInfo } from "sftp_panel.slint";
 import { TabInfo } from "tabs.slint";
 import { AutoScrollTextInput, DockExpandButton, ToolStrip } from "widgets.slint";
-import { LineEdit, Button, ListView } from "std-widgets.slint";
+import { LineEdit, Button, ListView, ScrollView } from "std-widgets.slint";
 
 // Embed the terminal fonts here too so the cell-probe Text below measures
 // with the CORRECT font (the built-in Meatshell Mono), not a system fallback.
@@ -335,7 +335,7 @@ export component TerminalView inherits Rectangle {
                     root.focus-pending = true;
                 } else {
                     cmd-input.text = root.quick-command-fill-text;
-                    cmd-input.focus-input();
+                    cmd-input.focus();
                 }
                 root.quick-command-fill-consumed();
             }
@@ -1147,20 +1147,49 @@ export component TerminalView inherits Rectangle {
                     border-width: 1px;
                     border-color: cmd-input.has-focus ? Theme.accent : Theme.border-subtle;
                     background: Theme.bg-root;
-                    cmd-input := AutoScrollTextInput {
+                    clip: true;
+                    TouchArea {
+                        scroll-event(event) => {
+                            command-scroll.viewport-y = clamp(
+                                command-scroll.viewport-y + event.delta-y,
+                                min(0px, command-scroll.visible-height - command-scroll.viewport-height), 0px);
+                            accept
+                        }
+                    }
+                    command-scroll := ScrollView {
+                        viewport-width: self.visible-width;
+                        viewport-height: max(self.visible-height, cmd-input.preferred-height);
+                        cmd-input := TextInput {
                         x: 8px;
-                        width: parent.width - 16px;
-                        height: parent.height;
-                        text-color: Theme.text-primary;
+                        width: max(1px, command-scroll.visible-width - 16px);
+                        y: 0px;
+                        height: max(command-scroll.visible-height, self.preferred-height);
+                        color: Theme.text-primary;
                         font-family: Theme.ui-font-family;
                         font-size: Theme.fs-md;
+                        vertical-alignment: top;
+                        wrap: char-wrap;
+                        page-height: command-scroll.visible-height;
+                        cursor-position-changed(position) => {
+                            let cursor-y = position.y + command-scroll.viewport-y;
+                            if (cursor-y < 0px) {
+                                command-scroll.viewport-y = min(0px, command-scroll.viewport-y - cursor-y);
+                            } else if (cursor-y > command-scroll.visible-height - self.font-size) {
+                                command-scroll.viewport-y = max(
+                                    min(0px, command-scroll.visible-height - command-scroll.viewport-height),
+                                    command-scroll.viewport-y - (cursor-y - command-scroll.visible-height + self.font-size));
+                            }
+                        }
+                        // Preserve pasted newlines. A single-line input rewrites
+                        // them as spaces and corrupts multi-line commands.
+                        single-line: false;
                         // Enter sends; ↑/↓ recall history.
                         accepted => {
                             root.run-command(self.text, root.send-to-all);
                             self.text = "";
                             root.history-cursor = -1;
                         }
-                        input-key-pressed(e) => {
+                        key-pressed(e) => {
                             // Cmd/Ctrl+R opens the searchable history dropdown.
                             // The command box follows regular text-field editing
                             // shortcuts; terminal/readline shortcuts stay in the
@@ -1207,6 +1236,7 @@ export component TerminalView inherits Rectangle {
                                 reject
                             }
                         }
+                    }
                     }
                     if cmd-input.text == "" : Text {
                         x: 8px;
@@ -1380,7 +1410,7 @@ export component TerminalView inherits Rectangle {
                                             // Only fill the input box so it can be
                                             // tweaked before sending (B站 suggestion).
                                             cmd-input.text = q.command;
-                                            cmd-input.focus-input();
+                                            cmd-input.focus();
                                         }
                                         root.quick-open = false;
                                     }
@@ -1527,7 +1557,7 @@ export component TerminalView inherits Rectangle {
                                 clicked => {
                                     cmd-input.text = h;
                                     root.history-open = false;
-                                    cmd-input.focus-input();
+                                    cmd-input.focus();
                                 }
                             }
                             HorizontalLayout {
@@ -1885,6 +1915,10 @@ export component TerminalView inherits Rectangle {
 
         if root.sftp-move-open : Rectangle {
             x: 0px; y: 0px; width: parent.width; height: parent.height;
+            // The SFTP splitter sits above the normal panel content so it can be
+            // grabbed reliably. Keep the modal veil above it as well; otherwise
+            // the command-bar/SFTP boundary remains bright while moving files.
+            z: 200;
             background: #00000080;
             TouchArea { clicked => { root.sftp-move-open = false; } }
             move-esc-scope := FocusScope {

@@ -735,7 +735,7 @@ export component AppWindow inherits Window {
     // from the component's init handler can re-enter the Windows accessibility
     // adapter while the new item tree is still being registered.
     property <bool> editor-focus-pending: false;
-    in-out property <string> editor-line-numbers; // newline-joined "1..N" from Rust (#81)
+    in-out property <[string]> editor-lines; // logical lines, measured with editor wrapping
     callback save-file();                     // Ctrl+S / Save button (edit only)
     callback close-editor();                  // X / Esc; uploads if dirty
     callback editor-recount(string);          // rebuild line numbers after an edit
@@ -855,12 +855,14 @@ export component AppWindow inherits Window {
     callback tab-selected(string);
     callback tab-closed(string);
     callback new-tab-clicked();
-    callback tab-reorder(int /* from-index */, int /* dir: -1 left / +1 right */);
+    // Legacy single-pane reorder callback retained for compatibility with
+    // older consumers; the TabBar now commits a final insertion index.
     // Per-pane tab actions (v0.5): the int is the pane (leaf) id.
     callback pane-tab-selected(int /* pane-id */, string /* tab-id */);
     callback pane-tab-closed(int /* pane-id */, string /* tab-id */);
     callback pane-new-tab(int /* pane-id */);
-    callback pane-tab-reorder(int /* pane-id */, int /* from */, int /* dir */);
+    callback pane-tab-move(int /* pane-id */, int /* from */, int /* to */);
+    callback pane-tab-drop-index(int /* pane-id */, int /* index */);
     callback pane-focus(int /* pane-id */);
     callback cycle-tab(bool /* reverse */);
     // Split pane `pane-id`, peeling `tab-id` into a new pane on `dir`
@@ -871,8 +873,14 @@ export component AppWindow inherits Window {
     callback tab-duplicate(string /* tab-id */);
     // Drag-to-split (v0.5): cursor moved / dropped while dragging `tab-id`, in
     // pane-area coordinates. Rust hit-tests the pane + edge zone.
-    callback tab-drag-move(string /* tab-id */, length /* x */, length /* y */);
+    callback tab-drag-move(string /* tab-id */, length /* x */, length /* y */, bool /* over-own-strip */);
     callback tab-drag-drop(string /* tab-id */, length /* x */, length /* y */);
+    callback tab-drag-cancel();
+    // Live drag coordinates are republished to every pane's TabBar so a tab
+    // dragged from one pane can show its insertion position in another.
+    property <bool> tab-drag-live;
+    property <length> tab-drag-px;
+    property <length> tab-drag-py;
     // Drop-zone highlight (set by Rust during a drag): the region the dropped
     // tab's new pane would occupy.
     in property <bool> drag-active;
@@ -2101,21 +2109,42 @@ export component AppWindow inherits Window {
                     can-merge-pane: root.panes.length > 1;
                     tabs: pane.tabs;
                     active-id: pane.active-id;
+                    // A drag from another pane is offered to every strip in
+                    // pane coordinates; the strip computes its exact slot.
+                    ext-drag-over: root.tab-drag-live
+                        && root.tab-drag-px >= pane.x
+                        && root.tab-drag-px <= pane.x + pane.w
+                        && root.tab-drag-py >= pane.y
+                        && root.tab-drag-py <= pane.y + 36px;
+                    ext-drag-x: root.tab-drag-px - pane.x;
                     tab-selected(id) => { root.pane-tab-selected(pane.id, id); }
                     tab-closed(id) => { root.pane-tab-closed(pane.id, id); }
                     new-tab() => { root.pane-new-tab(pane.id); }
-                    tab-reorder(from-index, direction) => {
-                        root.pane-tab-reorder(pane.id, from-index, direction);
+                    tab-move(from-index, to-index) => {
+                        root.tab-drag-live = false;
+                        root.pane-tab-move(pane.id, from-index, to-index);
+                    }
+                    drop-index-changed(index) => {
+                        root.pane-tab-drop-index(pane.id, index);
                     }
                     tab-split(id, dir) => { root.pane-split(pane.id, id, dir); }
                     merge-pane() => { root.pane-merge(pane.id); }
                     tab-duplicate(id) => { root.tab-duplicate(id); }
-                    tab-drag-move(id, ax, ay) => {
+                    tab-drag-move(id, ax, ay, over-own-strip) => {
+                        root.tab-drag-live = true;
+                        root.tab-drag-px = ax - pane-area.absolute-position.x;
+                        root.tab-drag-py = ay - pane-area.absolute-position.y;
                         root.tab-drag-move(id,
-                            ax - pane-area.absolute-position.x,
-                            ay - pane-area.absolute-position.y);
+                            root.tab-drag-px,
+                            root.tab-drag-py,
+                            over-own-strip);
+                    }
+                    tab-drag-cancel() => {
+                        root.tab-drag-live = false;
+                        root.tab-drag-cancel();
                     }
                     tab-drag-drop(id, ax, ay) => {
+                        root.tab-drag-live = false;
                         root.tab-drag-drop(id,
                             ax - pane-area.absolute-position.x,
                             ay - pane-area.absolute-position.y);
@@ -2759,15 +2788,38 @@ export component AppWindow inherits Window {
                                 width: 48px;
                                 background: Theme.bg-panel-alt;
                                 clip: true;
-                                Text {
-                                    x: 0;
+                                // Measure each logical line with the same font,
+                                // width and wrapping rules as the editor.
+                                VerticalLayout {
                                     y: ed-scroll.viewport-y + 8px;
-                                    width: parent.width - 6px;
-                                    text: root.editor-line-numbers;
-                                    horizontal-alignment: right;
-                                    font-family: Theme.ui-font-family;
-                                    font-size: Theme.fs-md;
-                                    color: Theme.text-muted;
+                                    width: parent.width;
+                                    height: self.preferred-height;
+                                    spacing: 0px;
+                                    padding: 0px;
+                                    for line[index] in root.editor-lines: Rectangle {
+                                        height: line-measure.preferred-height;
+                                        line-measure := TextInput {
+                                            x: parent.width;
+                                            width: edit-input.width;
+                                            height: self.preferred-height;
+                                            text: line;
+                                            read-only: true;
+                                            single-line: false;
+                                            wrap: char-wrap;
+                                            font-family: edit-input.font-family;
+                                            font-size: edit-input.font-size;
+                                        }
+                                        Text {
+                                            width: parent.width - 6px;
+                                            height: line-measure.preferred-height;
+                                            text: "\{index + 1}";
+                                            horizontal-alignment: right;
+                                            vertical-alignment: top;
+                                            font-family: edit-input.font-family;
+                                            font-size: edit-input.font-size;
+                                            color: Theme.text-muted;
+                                        }
+                                    }
                                 }
                             }
                             Rectangle { width: 1px; background: Theme.border-subtle; }
